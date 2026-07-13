@@ -15,6 +15,7 @@ Read before architectural or product changes:
 - `docs/SECURITY.md`
 - `docs/RANKING.md`
 - `docs/ROADMAP.md`
+- `docs/adr/README.md`
 
 ## Non-negotiable boundaries
 
@@ -51,3 +52,5 @@ Run relevant formatting, linting, type checking, tests, builds, and migration va
 ## ADRs
 
 Create an ADR under `docs/adr/` for long-lived architectural decisions. Supersede prior ADRs rather than rewriting history.
+
+Initial implementation milestones must follow accepted ADRs unless a new ADR supersedes them.
