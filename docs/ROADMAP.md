@@ -18,7 +18,23 @@ Exit criteria:
 
 ## Milestone 0B: Monorepo and tooling scaffold
 
+Status: in progress until accepted.
+
 Create the TypeScript monorepo structure, package manager setup, shared TypeScript config, formatting/linting/test conventions, CI-ready commands, and empty package/app boundaries only where justified by the documentation.
+
+Scope:
+
+- Create `apps/web` and `apps/api` package boundaries.
+- Create shared packages for item model, API client, sync engine, UI, design tokens, ranking, AI, and connector SDK.
+- Add pnpm workspace configuration, shared TypeScript config, formatting, linting, tests, CI, `.gitignore`, and names-only `.env.example`.
+- Add package responsibility READMEs.
+- Do not implement authentication, D1 schema, Notes, connectors, calendar providers, webhooks, Tauri, Android, or AI calls.
+
+Exit criteria:
+
+- Workspace packages can be installed and validated with one command.
+- Package boundaries match accepted ADRs and foundation docs.
+- Scaffold contains no product implementation beyond package boundary smoke tests.
 
 ## Milestone 1: Authentication and Notes vertical slice
 

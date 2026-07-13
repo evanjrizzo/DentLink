@@ -8,9 +8,12 @@ DentLink is a new, independent platform. It must not depend on Odysseus, the pre
 
 ## Current status
 
-Milestone 0A: documentation foundation.
+Milestone 0B: monorepo and tooling scaffold.
 
-This repository intentionally does not yet contain application scaffolding, backend code, database migrations, connector code, Tauri code, Android code, or AI calls. Implementation begins after the documentation foundation is accepted.
+This repository contains the pnpm TypeScript workspace structure, shared package boundaries, app
+boundaries, formatting/linting/type checking/test commands, and CI configuration. It does not yet
+contain implemented backend routes, database migrations, authentication, Notes behavior, connectors,
+calendar providers, webhooks, Tauri, Android, or AI calls.
 
 ## Product shape
 
@@ -27,6 +30,23 @@ Gmail, Microsoft 365 Mail, IMAP, Google Calendar, Microsoft 365 Calendar, ICS, n
 ## Planned clients
 
 Web, desktop, Android app, and Android homescreen widget.
+
+## Repository layout
+
+```text
+apps/
+  api/                 Future Cloudflare Worker API and ingestion boundary
+  web/                 Future browser client shell
+packages/
+  ai/                  Optional provider-neutral AI boundary
+  api-client/          Versioned API client contracts
+  connector-sdk/       Connector manifest and normalization contracts
+  design-tokens/       Shared visual token boundary
+  item-model/          Provider-neutral DentLink item contracts
+  ranking/             Ranking result and explanation contracts
+  sync-engine/         Client sync and offline queue contracts
+  ui/                  Shared presentation boundary
+```
 
 ## Architectural boundaries
 
@@ -56,4 +76,10 @@ Read these before architectural, product, API, schema, security, or UX changes:
 
 ## Validation
 
-For documentation-only changes, validate by checking repository status and reviewing the changed Markdown. Future implementation milestones must run relevant formatting, linting, type checking, tests, builds, and migration validation.
+Install dependencies with `pnpm install`, then run:
+
+```bash
+pnpm validate
+```
+
+The validation command checks formatting, linting, TypeScript, and tests across the workspace.
