@@ -25,6 +25,10 @@ export function generateSessionToken(): string {
   return `session_${toBase64Url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES)))}`;
 }
 
+export function generateWebhookSecret(): string {
+  return `webhook_${toBase64Url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES)))}`;
+}
+
 export async function hashSessionToken(token: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
   return toBase64Url(new Uint8Array(digest));

@@ -97,8 +97,24 @@ Scope:
 
 ## Milestone 2: Named webhooks and Notifications
 
-Implement named webhook endpoints, normalized notification creation, webhook health/rate limiting,
-notification list, done/pin/reorder behavior, and Ranking Mode dismiss.
+Status: implemented.
+
+Implemented scope:
+
+- User-scoped Notifications with list, create, pin, done, delete, global reorder, version checks,
+  sync changes, and Ranking Mode dismiss.
+- Named webhook endpoints with user-scoped slug uniqueness, one-time generated secrets, hashed
+  secret storage, enabled/disabled state, destination mapping to notification or note creation, and
+  last-triggered health metadata.
+- Public webhook ingest endpoint using `X-DentLink-Webhook-Secret`, validated normalized payloads,
+  accepted delivery recording, and per-endpoint accepted delivery rate limiting.
+- D1 migration for notifications, webhook endpoints, webhook deliveries, and sync change support
+  for notification/webhook changes.
+- Shared types, typed API client methods, storage contract coverage for memory and D1 adapters, and
+  web UI tabs for Notifications and Webhooks.
+
+Out of scope and still not implemented: email connectors, calendar providers, provider OAuth,
+AI calls, Tauri, Android, widgets, and richer ranking models.
 
 ## Milestone 3: Calendar foundation and ICS
 

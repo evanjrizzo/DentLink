@@ -11,14 +11,14 @@ inspected only as behavioral references.
 
 ## Current status
 
-Milestone 1.3: authentication and manual Notes vertical slice with Cloudflare preview API and web
-deployment baseline.
+Milestone 2: authentication, manual Notes, named webhook ingestion, and Notifications with a
+Cloudflare preview API and web deployment baseline.
 
 This repository contains the pnpm TypeScript workspace, shared package boundaries, a Worker-style
-API handler, Cloudflare D1 storage adapter, D1 migration for auth and notes, shared
-auth/note/sync/conflict types, a typed API client, a small sync helper, and a responsive Notes UI
-shell. It does not yet contain email connectors, calendar providers, named webhooks, Tauri, Android,
-or AI calls.
+API handler, Cloudflare D1 storage adapter, D1 migrations for auth, notes, notifications, and
+webhooks, shared auth/note/notification/sync/conflict types, a typed API client, a small sync
+helper, and a responsive web UI shell. It does not yet contain email connectors, calendar providers,
+Tauri, Android, or AI calls.
 
 ## Product shape
 
@@ -44,8 +44,8 @@ Web, desktop, Android app, and Android homescreen widget.
 
 ```text
 apps/
-  api/                 Worker-style auth and Notes API boundary
-  web/                 Browser Notes client shell
+  api/                 Worker-style auth, Notes, Notifications, and webhook API boundary
+  web/                 Browser Notes, Notifications, and webhook management client shell
 packages/
   ai/                  Optional provider-neutral AI boundary
   api-client/          Versioned API client contracts
@@ -114,9 +114,10 @@ pnpm --filter @dentlink/web dev
 Migration validation can also be run directly with:
 
 ```bash
-sqlite3 /tmp/dentlink_m1_migration_check.db < migrations/0001_auth_notes.sql
-sqlite3 /tmp/dentlink_m1_migration_check.db "PRAGMA foreign_key_check;"
-sqlite3 /tmp/dentlink_m1_migration_check.db "PRAGMA integrity_check;"
+sqlite3 /tmp/dentlink_m2_migration_check.db < migrations/0001_auth_notes.sql
+sqlite3 /tmp/dentlink_m2_migration_check.db < migrations/0002_notifications_webhooks.sql
+sqlite3 /tmp/dentlink_m2_migration_check.db "PRAGMA foreign_key_check;"
+sqlite3 /tmp/dentlink_m2_migration_check.db "PRAGMA integrity_check;"
 ```
 
 Deployment, preview, production, smoke-test, and rollback instructions live in `docs/DEPLOYMENT.md`.

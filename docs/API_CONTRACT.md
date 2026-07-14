@@ -112,3 +112,37 @@ overwriting local state.
 
 Milestone 1.1 keeps these endpoint shapes unchanged while adding a Cloudflare D1 storage adapter.
 Clients should not observe different API behavior between the in-memory adapter and D1 adapter.
+
+## Milestone 2 endpoints
+
+Milestone 2 adds Notifications and named webhook ingestion without changing the Milestone 1 auth,
+Notes, sync, history, or conflict contracts.
+
+- `GET /v1/notifications`: list the authenticated user's non-deleted notifications.
+- `POST /v1/notifications`: create a manual/system notification for the authenticated user.
+- `PATCH /v1/notifications/:id`: update `pinned` or `status` with `expectedVersion`.
+- `DELETE /v1/notifications/:id`: soft-delete a notification with `expectedVersion`.
+- `POST /v1/notifications/reorder`: update notification global ordering with per-notification
+  `expectedVersion` entries.
+- `GET /v1/webhooks`: list authenticated user's named webhook endpoints. Responses include
+  `ingestUrl` but never include the endpoint secret or secret hash.
+- `POST /v1/webhooks`: create a named webhook endpoint. The response returns the generated webhook
+  secret once, alongside the public endpoint record and `ingestUrl`.
+- `PATCH /v1/webhooks/:id`: update an authenticated user's webhook endpoint with
+  `expectedVersion`.
+- `POST /v1/ingest/webhooks/:slug`: public ingest route for enabled webhook endpoints.
+
+Webhook ingest requests authenticate with `X-DentLink-Webhook-Secret`. The slug is not treated as a
+secret. The raw secret is hashed before lookup, and only the hash is stored. Missing secrets return
+`401`; unknown, disabled, or wrong-secret endpoints return `404`; accepted deliveries return `202`.
+Endpoints are currently limited to 60 accepted deliveries per minute per endpoint.
+
+Webhook endpoints route payloads to one of two destinations:
+
+- `notification`: creates a normalized notification with source `webhook` and source label from the
+  endpoint name.
+- `note`: creates a task/reference note using the endpoint defaults and submitted note fields.
+
+Notification and webhook changes are included in `/v1/sync` through the same numeric cursor log used
+by Milestone 1. Notification deletes are emitted as tombstones. Webhook secrets and hashes are never
+included in sync payloads.

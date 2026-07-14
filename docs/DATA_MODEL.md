@@ -95,3 +95,27 @@ send back only the cursor returned by the API.
 Versioned D1 note mutations use SQL affected-row checks with `id`, `user_id`, and `version`
 conditions. Failed checks create persisted conflict records instead of performing unconditional
 updates.
+
+## Milestone 2 D1 schema
+
+`migrations/0002_notifications_webhooks.sql` extends the durable schema:
+
+- `notifications`: user-scoped active/done/dismissed/deleted notification records with title,
+  summary, body, source metadata, severity, pin state, rank, global order, version, timestamps, and
+  completion/dismissal timestamps.
+- `webhook_endpoints`: user-scoped named endpoints with unique `(user_id, slug)`, hashed secret
+  storage, destination mapping, enabled state, default severity/priority, last-triggered metadata,
+  and version.
+- `webhook_deliveries`: user-scoped accepted delivery records used for endpoint health metadata and
+  per-endpoint rate limiting.
+- `sync_changes`: rebuilt in place to permit `notification` and `webhook` entity types while
+  preserving existing cursors and payloads.
+
+Notification and webhook mutations are versioned and user-scoped. D1 notification and webhook
+updates use affected-row checks with `id`, `user_id`, and `version` conditions before accepting a
+mutation. Webhook raw secrets are returned only at endpoint creation; the schema stores only
+`secret_hash`.
+
+Milestone 2 indexes cover user/status/order notification listing, notification sync/update scans,
+endpoint lookup by slug/enabled state, user webhook listing, webhook delivery history, and the
+extended sync change log.

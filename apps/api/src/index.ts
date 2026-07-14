@@ -1,5 +1,11 @@
 import { D1DentLinkStore, type D1DatabaseLike } from "./d1-storage";
-import { generateSessionToken, hashPassword, hashSessionToken, verifyPassword } from "./auth";
+import {
+  generateSessionToken,
+  generateWebhookSecret,
+  hashPassword,
+  hashSessionToken,
+  verifyPassword
+} from "./auth";
 import { MemoryDentLinkStore, StoreError, type DentLinkStore } from "./storage";
 import {
   parseCredentials,
@@ -7,10 +13,15 @@ import {
   parseCursor,
   parseExpectedVersion,
   parseName,
+  parseNotificationInput,
+  parseNotificationPatch,
   parseNoteInput,
   parseNotePatch,
   parseReorder,
   parseSearch,
+  parseWebhookEndpointInput,
+  parseWebhookEndpointPatch,
+  parseWebhookIngest,
   ValidationError
 } from "./validation";
 
@@ -95,6 +106,27 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
       });
     }
 
+    const webhookIngestMatch = path.match(/^\/v1\/ingest\/webhooks\/([^/]+)$/);
+    if (webhookIngestMatch && method === "POST") {
+      const secret = request.headers.get("X-DentLink-Webhook-Secret");
+      if (!secret) return error("unauthorized", "Webhook secret is required", 401);
+      const delivered = await store.deliverWebhook(
+        webhookIngestMatch[1] ?? "",
+        await hashSessionToken(secret),
+        parseWebhookIngest(await readJson(request)),
+        now
+      );
+      if (!delivered) return error("not_found", "Webhook not found", 404);
+      return json(
+        {
+          accepted: true,
+          notification: delivered.notification,
+          note: delivered.note
+        },
+        202
+      );
+    }
+
     const token = bearerToken(request);
     const tokenHash = token ? await hashSessionToken(token) : null;
     const auth = tokenHash ? await store.findSessionByTokenHash(tokenHash, now) : null;
@@ -159,6 +191,86 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
         201
       );
     }
+    if (method === "GET" && path === "/v1/notifications") {
+      return json(await store.listNotifications(auth.user.id));
+    }
+    if (method === "POST" && path === "/v1/notifications") {
+      return json(
+        await store.createNotification(
+          auth.user.id,
+          parseNotificationInput(await readJson(request)),
+          now
+        ),
+        201
+      );
+    }
+    if (method === "POST" && path === "/v1/notifications/reorder") {
+      return json(
+        await store.reorderNotifications(auth.user.id, parseReorder(await readJson(request)), now)
+      );
+    }
+    const notificationMatch = path.match(/^\/v1\/notifications\/([^/]+)$/);
+    if (notificationMatch && method === "PATCH") {
+      const { expectedVersion, patch } = parseNotificationPatch(await readJson(request));
+      return json(
+        await store.updateNotification(
+          auth.user.id,
+          notificationMatch[1] ?? "",
+          expectedVersion,
+          patch,
+          now
+        )
+      );
+    }
+    if (notificationMatch && method === "DELETE") {
+      return json(
+        await store.updateNotification(
+          auth.user.id,
+          notificationMatch[1] ?? "",
+          parseExpectedVersion(await readJson(request)),
+          { status: "deleted" },
+          now
+        )
+      );
+    }
+    if (method === "GET" && path === "/v1/webhooks") {
+      return json({
+        webhooks: (await store.listWebhookEndpoints(auth.user.id)).map((webhook) => ({
+          ...webhook,
+          ingestUrl: webhookIngestUrl(url, webhook.slug)
+        }))
+      });
+    }
+    if (method === "POST" && path === "/v1/webhooks") {
+      const input = parseWebhookEndpointInput(await readJson(request));
+      const secret = generateWebhookSecret();
+      const webhook = await store.createWebhookEndpoint(
+        auth.user.id,
+        input,
+        await hashSessionToken(secret),
+        now
+      );
+      return json(
+        {
+          webhook: { ...webhook, ingestUrl: webhookIngestUrl(url, webhook.slug) },
+          secret
+        },
+        201
+      );
+    }
+    const webhookMatch = path.match(/^\/v1\/webhooks\/([^/]+)$/);
+    if (webhookMatch && method === "PATCH") {
+      const body = parseWebhookEndpointPatch(await readJson(request));
+      const webhook = await store.updateWebhookEndpoint(
+        auth.user.id,
+        webhookMatch[1] ?? "",
+        body.expectedVersion,
+        body.patch,
+        now
+      );
+      if (!webhook) return error("not_found", "Webhook not found", 404);
+      return json({ ...webhook, ingestUrl: webhookIngestUrl(url, webhook.slug) });
+    }
     if (method === "GET" && path === "/v1/sync") {
       return json(await store.sync(auth.user.id, parseCursor(url.searchParams.get("cursor"))));
     }
@@ -188,7 +300,13 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     if (caught instanceof ValidationError) return error(caught.code, caught.message, 400);
     if (caught instanceof StoreError) {
       const status =
-        caught.code === "not_found" ? 404 : caught.code === "invalid_cursor" ? 400 : 409;
+        caught.code === "not_found"
+          ? 404
+          : caught.code === "invalid_cursor"
+            ? 400
+            : caught.code === "rate_limited"
+              ? 429
+              : 409;
       return error(caught.code, caught.message, status);
     }
     const requestId = crypto.randomUUID();
@@ -232,6 +350,10 @@ function bearerToken(request: Request): string | null {
   const header = request.headers.get("Authorization");
   if (!header?.startsWith("Bearer ")) return null;
   return header.slice("Bearer ".length);
+}
+
+function webhookIngestUrl(url: URL, slug: string): string {
+  return `${url.origin}/v1/ingest/webhooks/${slug}`;
 }
 
 function sessionExpiry(now: string): string {

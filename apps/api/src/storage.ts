@@ -3,6 +3,9 @@ import type {
   CurrentSession,
   EntityId,
   Folder,
+  Notification,
+  NotificationInput,
+  NotificationPatch,
   Note,
   NoteConflict,
   NoteHistoryEvent,
@@ -11,7 +14,11 @@ import type {
   Session,
   SyncChange,
   Tag,
-  User
+  User,
+  WebhookEndpoint,
+  WebhookEndpointInput,
+  WebhookEndpointPatch,
+  WebhookIngestInput
 } from "@dentlink/item-model";
 
 export type PasswordRecord = {
@@ -65,6 +72,44 @@ export interface DentLinkStore {
   ): Promise<Note[] | NoteConflict>;
   createFolder(userId: EntityId, name: string, now: string): Promise<Folder>;
   createTag(userId: EntityId, name: string, now: string): Promise<Tag>;
+  listNotifications(userId: EntityId): Promise<{ notifications: Notification[] }>;
+  createNotification(
+    userId: EntityId,
+    input: NotificationInput & { source?: Notification["source"]; sourceLabel?: string },
+    now: string
+  ): Promise<Notification>;
+  updateNotification(
+    userId: EntityId,
+    notificationId: EntityId,
+    expectedVersion: number,
+    patch: NotificationPatch,
+    now: string
+  ): Promise<Notification>;
+  reorderNotifications(
+    userId: EntityId,
+    notificationOrders: Array<{ id: EntityId; expectedVersion: number; globalOrder: number }>,
+    now: string
+  ): Promise<Notification[]>;
+  createWebhookEndpoint(
+    userId: EntityId,
+    input: WebhookEndpointInput,
+    secretHash: string,
+    now: string
+  ): Promise<WebhookEndpoint>;
+  listWebhookEndpoints(userId: EntityId): Promise<WebhookEndpoint[]>;
+  updateWebhookEndpoint(
+    userId: EntityId,
+    endpointId: EntityId,
+    expectedVersion: number,
+    patch: WebhookEndpointPatch,
+    now: string
+  ): Promise<WebhookEndpoint | null>;
+  deliverWebhook(
+    slug: string,
+    secretHash: string,
+    input: WebhookIngestInput,
+    now: string
+  ): Promise<{ endpoint: WebhookEndpoint; notification?: Notification; note?: Note } | null>;
   listConflicts(userId: EntityId): Promise<NoteConflict[]>;
   resolveConflict(
     userId: EntityId,
@@ -84,6 +129,16 @@ export class MemoryDentLinkStore implements DentLinkStore {
   private notes = new Map<EntityId, Note>();
   private folders = new Map<EntityId, Folder>();
   private tags = new Map<EntityId, Tag>();
+  private notifications = new Map<EntityId, Notification>();
+  private webhooks = new Map<EntityId, WebhookEndpoint & { secretHash: string }>();
+  private webhookDeliveries: Array<{
+    id: EntityId;
+    userId: EntityId;
+    endpointId: EntityId;
+    status: "accepted";
+    message: string;
+    createdAt: string;
+  }> = [];
   private noteTagIds = new Map<EntityId, Set<EntityId>>();
   private conflicts = new Map<EntityId, NoteConflict>();
   private history: NoteHistoryEvent[] = [];
@@ -307,6 +362,233 @@ export class MemoryDentLinkStore implements DentLinkStore {
     return { ...tag };
   }
 
+  async listNotifications(userId: EntityId): Promise<{ notifications: Notification[] }> {
+    return {
+      notifications: [...this.notifications.values()]
+        .filter(
+          (notification) => notification.userId === userId && notification.status !== "deleted"
+        )
+        .sort(compareNotifications)
+        .map((notification) => ({ ...notification }))
+    };
+  }
+
+  async createNotification(
+    userId: EntityId,
+    input: NotificationInput & { source?: Notification["source"]; sourceLabel?: string },
+    now: string
+  ): Promise<Notification> {
+    const notification: Notification = {
+      id: this.nextId("notification"),
+      userId,
+      title: input.title.trim(),
+      summary: input.summary?.trim() ?? "",
+      body: input.body?.trim() ?? "",
+      source: input.source ?? "manual",
+      sourceLabel: input.sourceLabel ?? "Manual",
+      sourceUrl: input.sourceUrl ?? null,
+      severity: input.severity ?? "info",
+      status: "active",
+      pinned: input.pinned ?? false,
+      rank: input.rank ?? 0,
+      globalOrder: this.nextNotificationOrder(userId),
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      dismissedAt: null
+    };
+    this.notifications.set(notification.id, notification);
+    this.recordChange({
+      type: "notification",
+      op: "upsert",
+      notification,
+      cursor: "0"
+    });
+    return { ...notification };
+  }
+
+  async updateNotification(
+    userId: EntityId,
+    notificationId: EntityId,
+    expectedVersion: number,
+    patch: NotificationPatch,
+    now: string
+  ): Promise<Notification> {
+    const existing = this.requireNotification(userId, notificationId);
+    if (existing.version !== expectedVersion) {
+      throw new StoreError("version_mismatch", "Notification changed on the server");
+    }
+    const next: Notification = {
+      ...existing,
+      title: patch.title === undefined ? existing.title : patch.title.trim(),
+      summary: patch.summary === undefined ? existing.summary : patch.summary.trim(),
+      body: patch.body === undefined ? existing.body : patch.body.trim(),
+      sourceUrl: patch.sourceUrl === undefined ? existing.sourceUrl : patch.sourceUrl,
+      severity: patch.severity ?? existing.severity,
+      pinned: patch.pinned ?? existing.pinned,
+      rank: patch.rank ?? existing.rank,
+      globalOrder: patch.globalOrder ?? existing.globalOrder,
+      status: patch.status ?? existing.status,
+      version: existing.version + 1,
+      updatedAt: now,
+      completedAt:
+        patch.status === "done" ? now : patch.status === "active" ? null : existing.completedAt,
+      dismissedAt:
+        patch.status === "dismissed" ? now : patch.status === "active" ? null : existing.dismissedAt
+    };
+    this.notifications.set(next.id, next);
+    this.recordChange(
+      next.status === "deleted"
+        ? { type: "notification", op: "delete", id: next.id, userId, cursor: "0" }
+        : { type: "notification", op: "upsert", notification: next, cursor: "0" }
+    );
+    return { ...next };
+  }
+
+  async reorderNotifications(
+    userId: EntityId,
+    notificationOrders: Array<{ id: EntityId; expectedVersion: number; globalOrder: number }>,
+    now: string
+  ): Promise<Notification[]> {
+    for (const order of notificationOrders) {
+      const notification = this.requireNotification(userId, order.id);
+      if (notification.version !== order.expectedVersion) {
+        throw new StoreError("version_mismatch", "Notification changed on the server");
+      }
+    }
+    const updated = [];
+    for (const order of notificationOrders) {
+      const notification = this.requireNotification(userId, order.id);
+      const next = {
+        ...notification,
+        globalOrder: order.globalOrder,
+        version: notification.version + 1,
+        updatedAt: now
+      };
+      this.notifications.set(next.id, next);
+      this.recordChange({ type: "notification", op: "upsert", notification: next, cursor: "0" });
+      updated.push({ ...next });
+    }
+    return updated.sort(compareNotifications);
+  }
+
+  async createWebhookEndpoint(
+    userId: EntityId,
+    input: WebhookEndpointInput,
+    secretHash: string,
+    now: string
+  ): Promise<WebhookEndpoint> {
+    if (
+      [...this.webhooks.values()].some(
+        (webhook) => webhook.userId === userId && webhook.slug === input.slug
+      )
+    ) {
+      throw new StoreError("webhook_exists", "A webhook with that slug already exists");
+    }
+    const webhook = {
+      id: this.nextId("webhook"),
+      userId,
+      name: input.name.trim(),
+      slug: input.slug,
+      secretHash,
+      destination: input.destination,
+      enabled: input.enabled ?? true,
+      defaultSeverity: input.defaultSeverity ?? "info",
+      defaultPriority: input.defaultPriority ?? "none",
+      createdAt: now,
+      updatedAt: now,
+      lastTriggeredAt: null,
+      version: 1
+    };
+    this.webhooks.set(webhook.id, webhook);
+    this.recordChange({
+      type: "webhook",
+      op: "upsert",
+      webhook: publicWebhook(webhook),
+      cursor: "0"
+    });
+    return publicWebhook(webhook);
+  }
+
+  async listWebhookEndpoints(userId: EntityId): Promise<WebhookEndpoint[]> {
+    return [...this.webhooks.values()]
+      .filter((webhook) => webhook.userId === userId)
+      .sort(compareNames)
+      .map(publicWebhook);
+  }
+
+  async updateWebhookEndpoint(
+    userId: EntityId,
+    endpointId: EntityId,
+    expectedVersion: number,
+    patch: WebhookEndpointPatch,
+    now: string
+  ): Promise<WebhookEndpoint | null> {
+    const existing = this.webhooks.get(endpointId);
+    if (!existing || existing.userId !== userId) return null;
+    if (existing.version !== expectedVersion) {
+      throw new StoreError("version_mismatch", "Webhook changed on the server");
+    }
+    const next = {
+      ...existing,
+      name: patch.name === undefined ? existing.name : patch.name.trim(),
+      destination: patch.destination ?? existing.destination,
+      defaultSeverity: patch.defaultSeverity ?? existing.defaultSeverity,
+      defaultPriority: patch.defaultPriority ?? existing.defaultPriority,
+      enabled: patch.enabled ?? existing.enabled,
+      version: existing.version + 1,
+      updatedAt: now
+    };
+    this.webhooks.set(next.id, next);
+    this.recordChange({ type: "webhook", op: "upsert", webhook: publicWebhook(next), cursor: "0" });
+    return publicWebhook(next);
+  }
+
+  async deliverWebhook(
+    slug: string,
+    secretHash: string,
+    input: WebhookIngestInput,
+    now: string
+  ): Promise<{ endpoint: WebhookEndpoint; notification?: Notification; note?: Note } | null> {
+    const endpoint = [...this.webhooks.values()].find(
+      (webhook) => webhook.slug === slug && webhook.enabled && webhook.secretHash === secretHash
+    );
+    if (!endpoint) return null;
+    this.assertWebhookRateLimit(endpoint.id, now);
+    endpoint.lastTriggeredAt = now;
+    endpoint.updatedAt = now;
+    this.webhooks.set(endpoint.id, endpoint);
+    if (endpoint.destination === "note") {
+      const note = await this.createNote(
+        endpoint.userId,
+        {
+          kind: input.kind ?? "task",
+          title: input.title,
+          body: input.body ?? input.summary ?? "",
+          priority: input.priority ?? endpoint.defaultPriority,
+          dueAt: input.dueAt ?? null,
+          sourceUrl: input.sourceUrl ?? null
+        },
+        now
+      );
+      this.recordWebhookDelivery(endpoint.userId, endpoint.id, now);
+      return { endpoint: publicWebhook(endpoint), note };
+    }
+    const notification = await this.createNotification(
+      endpoint.userId,
+      {
+        ...input,
+        severity: input.severity ?? endpoint.defaultSeverity,
+        source: "webhook",
+        sourceLabel: endpoint.name
+      },
+      now
+    );
+    this.recordWebhookDelivery(endpoint.userId, endpoint.id, now);
+    return { endpoint: publicWebhook(endpoint), notification };
+  }
+
   async listConflicts(userId: EntityId): Promise<NoteConflict[]> {
     return [...this.conflicts.values()].filter(
       (conflict) => conflict.userId === userId && conflict.status === "open"
@@ -361,6 +643,14 @@ export class MemoryDentLinkStore implements DentLinkStore {
       throw new StoreError("not_found", "Note not found");
     }
     return note;
+  }
+
+  private requireNotification(userId: EntityId, notificationId: EntityId): Notification {
+    const notification = this.notifications.get(notificationId);
+    if (!notification || notification.userId !== userId || notification.status === "deleted") {
+      throw new StoreError("not_found", "Notification not found");
+    }
+    return notification;
   }
 
   private assertFolder(userId: EntityId, folderId: EntityId | null): void {
@@ -442,9 +732,39 @@ export class MemoryDentLinkStore implements DentLinkStore {
       : Math.max(...userNotes.map((note) => note.globalOrder)) + 1000;
   }
 
+  private nextNotificationOrder(userId: EntityId): number {
+    const userNotifications = [...this.notifications.values()].filter(
+      (notification) => notification.userId === userId
+    );
+    return userNotifications.length === 0
+      ? 1000
+      : Math.max(...userNotifications.map((notification) => notification.globalOrder)) + 1000;
+  }
+
   private nextId(prefix: string): EntityId {
     this.sequence += 1;
     return `${prefix}_${this.sequence.toString(36)}`;
+  }
+
+  private assertWebhookRateLimit(endpointId: EntityId, now: string): void {
+    const windowStart = new Date(new Date(now).getTime() - 60_000).toISOString();
+    const recentDeliveries = this.webhookDeliveries.filter(
+      (delivery) => delivery.endpointId === endpointId && delivery.createdAt >= windowStart
+    );
+    if (recentDeliveries.length >= 60) {
+      throw new StoreError("rate_limited", "Webhook rate limit exceeded");
+    }
+  }
+
+  private recordWebhookDelivery(userId: EntityId, endpointId: EntityId, now: string): void {
+    this.webhookDeliveries.push({
+      id: this.nextId("delivery"),
+      userId,
+      endpointId,
+      status: "accepted",
+      message: "accepted",
+      createdAt: now
+    });
   }
 }
 
@@ -475,6 +795,32 @@ function compareNotes(left: Note, right: Note): number {
   return left.globalOrder - right.globalOrder || left.updatedAt.localeCompare(right.updatedAt);
 }
 
+function compareNotifications(left: Notification, right: Notification): number {
+  if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+  return (
+    right.rank - left.rank ||
+    left.globalOrder - right.globalOrder ||
+    left.updatedAt.localeCompare(right.updatedAt)
+  );
+}
+
+function publicWebhook(webhook: WebhookEndpoint & { secretHash?: string }): WebhookEndpoint {
+  return {
+    id: webhook.id,
+    userId: webhook.userId,
+    name: webhook.name,
+    slug: webhook.slug,
+    destination: webhook.destination,
+    enabled: webhook.enabled,
+    defaultSeverity: webhook.defaultSeverity,
+    defaultPriority: webhook.defaultPriority,
+    createdAt: webhook.createdAt,
+    updatedAt: webhook.updatedAt,
+    lastTriggeredAt: webhook.lastTriggeredAt,
+    version: webhook.version
+  };
+}
+
 function actionForPatch(patch: NotePatch): NoteHistoryEvent["action"] {
   if (patch.status === "deleted") return "deleted";
   if (patch.status === "done") return "done";
@@ -488,6 +834,10 @@ function changeBelongsTo(change: SyncChange, userId: EntityId): boolean {
   if (change.type === "note" && change.op === "delete") return change.userId === userId;
   if (change.type === "folder") return change.folder.userId === userId;
   if (change.type === "tag") return change.tag.userId === userId;
+  if (change.type === "notification" && change.op === "upsert")
+    return change.notification.userId === userId;
+  if (change.type === "notification" && change.op === "delete") return change.userId === userId;
+  if (change.type === "webhook") return change.webhook.userId === userId;
   if (change.type === "conflict") return change.conflict.userId === userId;
   return true;
 }

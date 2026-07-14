@@ -14,10 +14,12 @@ import type {
   ApiErrorBody,
   AuthSession,
   ConflictResponse,
+  Notification,
   Note,
   NoteHistoryEvent,
   NotesList,
-  SyncResponse
+  SyncResponse,
+  WebhookEndpoint
 } from "@dentlink/item-model";
 
 Object.defineProperty(globalThis, "crypto", {
@@ -28,6 +30,10 @@ Object.defineProperty(globalThis, "crypto", {
 const schemaPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../migrations/0001_auth_notes.sql"
+);
+const milestone2SchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0002_notifications_webhooks.sql"
 );
 
 type StoreFixture = {
@@ -51,7 +57,7 @@ const fixtures: StoreFixture[] = [
   {
     name: "d1",
     createStore() {
-      const db = new SqliteD1TestDatabase(schemaPath);
+      const db = new SqliteD1TestDatabase([schemaPath, milestone2SchemaPath]);
       return {
         store: new D1DentLinkStore(db),
         async hasRawSessionToken(token: string) {
@@ -579,6 +585,184 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       400
     );
   });
+
+  it("supports user-isolated notifications and versioned notification actions", async () => {
+    const { store } = createStore();
+    const first = await register(store, "notifications@example.com");
+    const second = await register(store, "other-notifications@example.com");
+
+    const created = await requestJson<Notification>(
+      store,
+      "POST",
+      "/v1/notifications",
+      {
+        title: "Review webhook alert",
+        summary: "Patient request",
+        severity: "high",
+        rank: 42
+      },
+      first.session.token,
+      201
+    );
+    expect(created.userId).toBe(first.user.id);
+    expect(created.status).toBe("active");
+
+    const otherList = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      second.session.token
+    );
+    expect(otherList.notifications).toEqual([]);
+
+    const pinned = await requestJson<Notification>(
+      store,
+      "PATCH",
+      `/v1/notifications/${created.id}`,
+      { expectedVersion: created.version, patch: { pinned: true } },
+      first.session.token
+    );
+    expect(pinned.pinned).toBe(true);
+
+    await requestJson<ApiErrorBody>(
+      store,
+      "PATCH",
+      `/v1/notifications/${created.id}`,
+      { expectedVersion: created.version, patch: { title: "stale" } },
+      first.session.token,
+      409
+    );
+    await requestJson<ApiErrorBody>(
+      store,
+      "PATCH",
+      `/v1/notifications/${created.id}`,
+      { expectedVersion: pinned.version, patch: { status: "done" } },
+      second.session.token,
+      404
+    );
+
+    const dismissed = await requestJson<Notification>(
+      store,
+      "PATCH",
+      `/v1/notifications/${created.id}`,
+      { expectedVersion: pinned.version, patch: { status: "dismissed" } },
+      first.session.token
+    );
+    expect(dismissed.status).toBe("dismissed");
+    expect(dismissed.dismissedAt).toBeTruthy();
+
+    const sync = await requestJson<SyncResponse>(
+      store,
+      "GET",
+      "/v1/sync?cursor=0",
+      undefined,
+      first.session.token
+    );
+    expect(sync.changes.some((change) => change.type === "notification")).toBe(true);
+  });
+
+  it("creates named webhooks, accepts secret deliveries, and rejects cross-user access", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "webhook-owner@example.com");
+    const other = await register(store, "webhook-other@example.com");
+
+    const created = await requestJson<{
+      webhook: WebhookEndpoint & { ingestUrl: string };
+      secret: string;
+    }>(
+      store,
+      "POST",
+      "/v1/webhooks",
+      {
+        name: "Front desk",
+        slug: "front-desk",
+        destination: "notification",
+        defaultSeverity: "medium"
+      },
+      owner.session.token,
+      201
+    );
+    expect(created.secret).toMatch(/^webhook_/);
+    expect(created.webhook.ingestUrl).toBe(
+      "https://api.dentlink.test/v1/ingest/webhooks/front-desk"
+    );
+
+    const listed = await requestJson<{ webhooks: Array<WebhookEndpoint & { ingestUrl: string }> }>(
+      store,
+      "GET",
+      "/v1/webhooks",
+      undefined,
+      owner.session.token
+    );
+    expect(JSON.stringify(listed)).not.toContain(created.secret);
+
+    await requestJson<ApiErrorBody>(
+      store,
+      "PATCH",
+      `/v1/webhooks/${created.webhook.id}`,
+      { expectedVersion: created.webhook.version, patch: { enabled: false } },
+      other.session.token,
+      404
+    );
+
+    const denied = await deliverWebhook(
+      store,
+      "front-desk",
+      "wrong-secret",
+      { title: "Should not appear" },
+      404
+    );
+    expect(denied.error.code).toBe("not_found");
+
+    const delivered = await deliverWebhook(
+      store,
+      "front-desk",
+      created.secret,
+      { title: "New patient callback", summary: "Call before 5", severity: "high" },
+      202
+    );
+    expect(delivered.accepted).toBe(true);
+    expect(delivered.notification?.title).toBe("New patient callback");
+    expect(delivered.notification?.sourceLabel).toBe("Front desk");
+
+    const ownerNotifications = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(ownerNotifications.notifications.map((item) => item.title)).toContain(
+      "New patient callback"
+    );
+
+    const noteWebhook = await requestJson<{
+      webhook: WebhookEndpoint & { ingestUrl: string };
+      secret: string;
+    }>(
+      store,
+      "POST",
+      "/v1/webhooks",
+      {
+        name: "Tasks",
+        slug: "tasks",
+        destination: "note",
+        defaultPriority: "high"
+      },
+      owner.session.token,
+      201
+    );
+    const deliveredNote = await deliverWebhook(
+      store,
+      "tasks",
+      noteWebhook.secret,
+      { title: "Prepare estimate", body: "Use webhook body", kind: "task" },
+      202
+    );
+    expect(deliveredNote.note?.title).toBe("Prepare estimate");
+    expect(deliveredNote.note?.priority).toBe("high");
+  });
 });
 
 async function register(store: DentLinkStore, email: string): Promise<AuthSession> {
@@ -615,6 +799,35 @@ async function requestJson<T>(
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body)
+    }),
+    { store }
+  );
+  expect(response.status).toBe(expectedStatus);
+  return (await response.json()) as T;
+}
+
+async function deliverWebhook<
+  T = {
+    accepted?: boolean;
+    notification?: Notification;
+    note?: Note;
+    error: { code: string };
+  }
+>(
+  store: DentLinkStore,
+  slug: string,
+  secret: string,
+  body: unknown,
+  expectedStatus: number
+): Promise<T> {
+  const response = await handleApiRequest(
+    new Request(`https://api.dentlink.test/v1/ingest/webhooks/${slug}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-DentLink-Webhook-Secret": secret
+      },
+      body: JSON.stringify(body)
     }),
     { store }
   );

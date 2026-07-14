@@ -10,6 +10,9 @@ import type {
   CurrentSession,
   EntityId,
   Folder,
+  Notification,
+  NotificationInput,
+  NotificationPatch,
   Note,
   NoteConflict,
   NoteHistoryEvent,
@@ -18,7 +21,11 @@ import type {
   Session,
   SyncChange,
   Tag,
-  User
+  User,
+  WebhookEndpoint,
+  WebhookEndpointInput,
+  WebhookEndpointPatch,
+  WebhookIngestInput
 } from "@dentlink/item-model";
 
 type Primitive = string | number | null;
@@ -27,6 +34,9 @@ type SyncPayload =
   | Omit<Extract<SyncChange, { type: "note"; op: "delete" }>, "cursor">
   | Omit<Extract<SyncChange, { type: "folder" }>, "cursor">
   | Omit<Extract<SyncChange, { type: "tag" }>, "cursor">
+  | Omit<Extract<SyncChange, { type: "notification"; op: "upsert" }>, "cursor">
+  | Omit<Extract<SyncChange, { type: "notification"; op: "delete" }>, "cursor">
+  | Omit<Extract<SyncChange, { type: "webhook" }>, "cursor">
   | Omit<Extract<SyncChange, { type: "conflict" }>, "cursor">;
 
 export type D1Result<T = unknown> = {
@@ -120,6 +130,43 @@ type HistoryRow = {
 type SyncRow = {
   cursor: number;
   payload_json: string;
+};
+
+type NotificationRow = {
+  id: string;
+  user_id: string;
+  title: string;
+  summary: string;
+  body: string;
+  source: "webhook" | "manual" | "system";
+  source_label: string;
+  source_url: string | null;
+  severity: "info" | "low" | "medium" | "high";
+  status: "active" | "done" | "dismissed" | "deleted";
+  pinned: number;
+  rank: number;
+  global_order: number;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  dismissed_at: string | null;
+};
+
+type WebhookRow = {
+  id: string;
+  user_id: string;
+  name: string;
+  slug: string;
+  secret_hash: string;
+  destination: "notification" | "note";
+  enabled: number;
+  default_severity: "info" | "low" | "medium" | "high";
+  default_priority: "none" | "low" | "medium" | "high";
+  created_at: string;
+  updated_at: string;
+  last_triggered_at: string | null;
+  version: number;
 };
 
 export class D1DentLinkStore implements DentLinkStore {
@@ -528,6 +575,347 @@ export class D1DentLinkStore implements DentLinkStore {
     return tag;
   }
 
+  async listNotifications(userId: EntityId): Promise<{ notifications: Notification[] }> {
+    const rows = await this.all<NotificationRow>(
+      `SELECT * FROM notifications
+       WHERE user_id = ? AND status != 'deleted'
+       ORDER BY pinned DESC, rank DESC, global_order ASC, updated_at ASC`,
+      [userId]
+    );
+    return { notifications: rows.map(notificationFromRow) };
+  }
+
+  async createNotification(
+    userId: EntityId,
+    input: NotificationInput & { source?: Notification["source"]; sourceLabel?: string },
+    now: string
+  ): Promise<Notification> {
+    const notification: Notification = {
+      id: nextId("notification"),
+      userId,
+      title: input.title.trim(),
+      summary: input.summary?.trim() ?? "",
+      body: input.body?.trim() ?? "",
+      source: input.source ?? "manual",
+      sourceLabel: input.sourceLabel ?? "Manual",
+      sourceUrl: input.sourceUrl ?? null,
+      severity: input.severity ?? "info",
+      status: "active",
+      pinned: input.pinned ?? false,
+      rank: input.rank ?? 0,
+      globalOrder: await this.nextNotificationOrder(userId),
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      dismissedAt: null
+    };
+    await this.batch([
+      this.db
+        .prepare(
+          `INSERT INTO notifications
+           (id, user_id, title, summary, body, source, source_label, source_url, severity, status,
+            pinned, rank, global_order, version, created_at, updated_at, completed_at, dismissed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          notification.id,
+          notification.userId,
+          notification.title,
+          notification.summary,
+          notification.body,
+          notification.source,
+          notification.sourceLabel,
+          notification.sourceUrl,
+          notification.severity,
+          notification.status,
+          bool(notification.pinned),
+          notification.rank,
+          notification.globalOrder,
+          notification.version,
+          notification.createdAt,
+          notification.updatedAt,
+          notification.completedAt,
+          notification.dismissedAt
+        ),
+      this.changeStatement(userId, "notification", notification.id, "upsert", {
+        type: "notification",
+        op: "upsert",
+        notification
+      })
+    ]);
+    return notification;
+  }
+
+  async updateNotification(
+    userId: EntityId,
+    notificationId: EntityId,
+    expectedVersion: number,
+    patch: NotificationPatch,
+    now: string
+  ): Promise<Notification> {
+    const existing = await this.requireNotification(userId, notificationId);
+    const next: Notification = {
+      ...existing,
+      title: patch.title === undefined ? existing.title : patch.title.trim(),
+      summary: patch.summary === undefined ? existing.summary : patch.summary.trim(),
+      body: patch.body === undefined ? existing.body : patch.body.trim(),
+      sourceUrl: patch.sourceUrl === undefined ? existing.sourceUrl : patch.sourceUrl,
+      severity: patch.severity ?? existing.severity,
+      pinned: patch.pinned ?? existing.pinned,
+      rank: patch.rank ?? existing.rank,
+      globalOrder: patch.globalOrder ?? existing.globalOrder,
+      status: patch.status ?? existing.status,
+      version: existing.version + 1,
+      updatedAt: now,
+      completedAt:
+        patch.status === "done" ? now : patch.status === "active" ? null : existing.completedAt,
+      dismissedAt:
+        patch.status === "dismissed" ? now : patch.status === "active" ? null : existing.dismissedAt
+    };
+    const result = await this.db
+      .prepare(
+        `UPDATE notifications
+         SET title = ?, summary = ?, body = ?, source_url = ?, severity = ?, status = ?,
+             pinned = ?, rank = ?, global_order = ?, version = ?, updated_at = ?,
+             completed_at = ?, dismissed_at = ?
+         WHERE id = ? AND user_id = ? AND status != 'deleted' AND version = ?`
+      )
+      .bind(
+        next.title,
+        next.summary,
+        next.body,
+        next.sourceUrl,
+        next.severity,
+        next.status,
+        bool(next.pinned),
+        next.rank,
+        next.globalOrder,
+        next.version,
+        next.updatedAt,
+        next.completedAt,
+        next.dismissedAt,
+        notificationId,
+        userId,
+        expectedVersion
+      )
+      .run();
+    if ((result.meta?.changes ?? 0) !== 1) {
+      throw new StoreError("version_mismatch", "Notification changed on the server");
+    }
+    await this.batch([
+      this.changeStatement(
+        userId,
+        "notification",
+        next.id,
+        next.status === "deleted" ? "delete" : "upsert",
+        next.status === "deleted"
+          ? { type: "notification", op: "delete", id: next.id, userId }
+          : { type: "notification", op: "upsert", notification: next }
+      )
+    ]);
+    return next;
+  }
+
+  async reorderNotifications(
+    userId: EntityId,
+    notificationOrders: Array<{ id: EntityId; expectedVersion: number; globalOrder: number }>,
+    now: string
+  ): Promise<Notification[]> {
+    const updates = notificationOrders.map((order) =>
+      this.db
+        .prepare(
+          `UPDATE notifications
+           SET global_order = ?, version = version + 1, updated_at = ?
+           WHERE id = ? AND user_id = ? AND status != 'deleted' AND version = ?`
+        )
+        .bind(order.globalOrder, now, order.id, userId, order.expectedVersion)
+    );
+    const results = await this.batch(updates);
+    if (results.some((result) => (result.meta?.changes ?? 0) !== 1)) {
+      throw new StoreError("version_mismatch", "Notification changed on the server");
+    }
+    const updated = [];
+    for (const order of notificationOrders) {
+      const notification = await this.requireNotification(userId, order.id);
+      await this.batch([
+        this.changeStatement(userId, "notification", notification.id, "upsert", {
+          type: "notification",
+          op: "upsert",
+          notification
+        })
+      ]);
+      updated.push(notification);
+    }
+    return updated.sort(compareNotifications);
+  }
+
+  async createWebhookEndpoint(
+    userId: EntityId,
+    input: WebhookEndpointInput,
+    secretHash: string,
+    now: string
+  ): Promise<WebhookEndpoint> {
+    const webhook: WebhookEndpoint = {
+      id: nextId("webhook"),
+      userId,
+      name: input.name.trim(),
+      slug: input.slug,
+      destination: input.destination,
+      enabled: input.enabled ?? true,
+      defaultSeverity: input.defaultSeverity ?? "info",
+      defaultPriority: input.defaultPriority ?? "none",
+      createdAt: now,
+      updatedAt: now,
+      lastTriggeredAt: null,
+      version: 1
+    };
+    try {
+      await this.batch([
+        this.db
+          .prepare(
+            `INSERT INTO webhook_endpoints
+             (id, user_id, name, slug, secret_hash, destination, enabled, default_severity,
+              default_priority, created_at, updated_at, last_triggered_at, version)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .bind(
+            webhook.id,
+            userId,
+            webhook.name,
+            webhook.slug,
+            secretHash,
+            webhook.destination,
+            bool(webhook.enabled),
+            webhook.defaultSeverity,
+            webhook.defaultPriority,
+            webhook.createdAt,
+            webhook.updatedAt,
+            webhook.lastTriggeredAt,
+            webhook.version
+          ),
+        this.changeStatement(userId, "webhook", webhook.id, "upsert", {
+          type: "webhook",
+          op: "upsert",
+          webhook
+        })
+      ]);
+    } catch (error) {
+      throw mapConstraintError(error, "webhook_exists", "A webhook with that slug already exists");
+    }
+    return webhook;
+  }
+
+  async listWebhookEndpoints(userId: EntityId): Promise<WebhookEndpoint[]> {
+    const rows = await this.all<WebhookRow>(
+      `SELECT * FROM webhook_endpoints WHERE user_id = ? ORDER BY name ASC`,
+      [userId]
+    );
+    return rows.map(webhookFromRow);
+  }
+
+  async updateWebhookEndpoint(
+    userId: EntityId,
+    endpointId: EntityId,
+    expectedVersion: number,
+    patch: WebhookEndpointPatch,
+    now: string
+  ): Promise<WebhookEndpoint | null> {
+    const existing = await this.getWebhook(userId, endpointId);
+    if (!existing) return null;
+    const next = {
+      ...existing,
+      name: patch.name === undefined ? existing.name : patch.name.trim(),
+      destination: patch.destination ?? existing.destination,
+      defaultSeverity: patch.defaultSeverity ?? existing.defaultSeverity,
+      defaultPriority: patch.defaultPriority ?? existing.defaultPriority,
+      enabled: patch.enabled ?? existing.enabled,
+      version: existing.version + 1,
+      updatedAt: now
+    };
+    const result = await this.db
+      .prepare(
+        `UPDATE webhook_endpoints
+         SET name = ?, destination = ?, enabled = ?, default_severity = ?, default_priority = ?,
+             version = ?, updated_at = ?
+         WHERE id = ? AND user_id = ? AND version = ?`
+      )
+      .bind(
+        next.name,
+        next.destination,
+        bool(next.enabled),
+        next.defaultSeverity,
+        next.defaultPriority,
+        next.version,
+        next.updatedAt,
+        endpointId,
+        userId,
+        expectedVersion
+      )
+      .run();
+    if ((result.meta?.changes ?? 0) !== 1) {
+      throw new StoreError("version_mismatch", "Webhook changed on the server");
+    }
+    await this.batch([
+      this.changeStatement(userId, "webhook", next.id, "upsert", {
+        type: "webhook",
+        op: "upsert",
+        webhook: next
+      })
+    ]);
+    return next;
+  }
+
+  async deliverWebhook(
+    slug: string,
+    secretHash: string,
+    input: WebhookIngestInput,
+    now: string
+  ): Promise<{ endpoint: WebhookEndpoint; notification?: Notification; note?: Note } | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT * FROM webhook_endpoints
+         WHERE slug = ? AND secret_hash = ? AND enabled = 1`
+      )
+      .bind(slug, secretHash)
+      .first<WebhookRow>();
+    if (!row) return null;
+    const endpoint = webhookFromRow(row);
+    await this.assertWebhookRateLimit(endpoint.id, now);
+    await this.db
+      .prepare(`UPDATE webhook_endpoints SET last_triggered_at = ?, updated_at = ? WHERE id = ?`)
+      .bind(now, now, endpoint.id)
+      .run();
+    if (endpoint.destination === "note") {
+      const note = await this.createNote(
+        endpoint.userId,
+        {
+          kind: input.kind ?? "task",
+          title: input.title,
+          body: input.body ?? input.summary ?? "",
+          priority: input.priority ?? endpoint.defaultPriority,
+          dueAt: input.dueAt ?? null,
+          sourceUrl: input.sourceUrl ?? null
+        },
+        now
+      );
+      await this.recordWebhookDelivery(endpoint.userId, endpoint.id, now);
+      return { endpoint: { ...endpoint, lastTriggeredAt: now, updatedAt: now }, note };
+    }
+    const notification = await this.createNotification(
+      endpoint.userId,
+      {
+        ...input,
+        severity: input.severity ?? endpoint.defaultSeverity,
+        source: "webhook",
+        sourceLabel: endpoint.name
+      },
+      now
+    );
+    await this.recordWebhookDelivery(endpoint.userId, endpoint.id, now);
+    return { endpoint: { ...endpoint, lastTriggeredAt: now, updatedAt: now }, notification };
+  }
+
   async listConflicts(userId: EntityId): Promise<NoteConflict[]> {
     const rows = await this.all<ConflictRow>(
       `SELECT * FROM note_conflicts WHERE user_id = ? AND status = 'open' ORDER BY created_at ASC`,
@@ -613,6 +1001,60 @@ export class D1DentLinkStore implements DentLinkStore {
     return note;
   }
 
+  private async requireNotification(
+    userId: EntityId,
+    notificationId: EntityId
+  ): Promise<Notification> {
+    const row = await this.db
+      .prepare(`SELECT * FROM notifications WHERE id = ? AND user_id = ? AND status != 'deleted'`)
+      .bind(notificationId, userId)
+      .first<NotificationRow>();
+    if (!row) throw new StoreError("not_found", "Notification not found");
+    return notificationFromRow(row);
+  }
+
+  private async getWebhook(
+    userId: EntityId,
+    endpointId: EntityId
+  ): Promise<WebhookEndpoint | null> {
+    const row = await this.db
+      .prepare(`SELECT * FROM webhook_endpoints WHERE id = ? AND user_id = ?`)
+      .bind(endpointId, userId)
+      .first<WebhookRow>();
+    return row ? webhookFromRow(row) : null;
+  }
+
+  private async assertWebhookRateLimit(endpointId: EntityId, now: string): Promise<void> {
+    const windowStart = new Date(new Date(now).getTime() - 60_000).toISOString();
+    const row = await this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM webhook_deliveries
+         WHERE endpoint_id = ?
+           AND status = 'accepted'
+           AND created_at >= ?`
+      )
+      .bind(endpointId, windowStart)
+      .first<{ count: number }>();
+    if ((row?.count ?? 0) >= 60) {
+      throw new StoreError("rate_limited", "Webhook rate limit exceeded");
+    }
+  }
+
+  private async recordWebhookDelivery(
+    userId: EntityId,
+    endpointId: EntityId,
+    now: string
+  ): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT INTO webhook_deliveries (id, user_id, endpoint_id, status, message, created_at)
+         VALUES (?, ?, ?, 'accepted', 'accepted', ?)`
+      )
+      .bind(nextId("delivery"), userId, endpointId, now)
+      .run();
+  }
+
   private async noteRows(sql: string, values: Primitive[]): Promise<Note[]> {
     const rows = await this.all<NoteRow>(sql, values);
     return Promise.all(rows.map((row) => this.noteFromRow(row)));
@@ -672,6 +1114,16 @@ export class D1DentLinkStore implements DentLinkStore {
   private async nextOrder(userId: EntityId): Promise<number> {
     const row = await this.db
       .prepare(`SELECT COALESCE(MAX(global_order), 0) AS max_order FROM notes WHERE user_id = ?`)
+      .bind(userId)
+      .first<{ max_order: number }>();
+    return (row?.max_order ?? 0) + 1000;
+  }
+
+  private async nextNotificationOrder(userId: EntityId): Promise<number> {
+    const row = await this.db
+      .prepare(
+        `SELECT COALESCE(MAX(global_order), 0) AS max_order FROM notifications WHERE user_id = ?`
+      )
       .bind(userId)
       .first<{ max_order: number }>();
     return (row?.max_order ?? 0) + 1000;
@@ -755,7 +1207,7 @@ export class D1DentLinkStore implements DentLinkStore {
 
   private changeStatement(
     userId: EntityId,
-    entityType: "note" | "folder" | "tag" | "conflict",
+    entityType: "note" | "folder" | "tag" | "notification" | "webhook" | "conflict",
     entityId: string,
     operation: "upsert" | "delete",
     payload: SyncPayload
@@ -828,6 +1280,46 @@ function tagFromRow(row: TagRow): Tag {
   return folderFromRow(row);
 }
 
+function notificationFromRow(row: NotificationRow): Notification {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    title: row.title,
+    summary: row.summary,
+    body: row.body,
+    source: row.source,
+    sourceLabel: row.source_label,
+    sourceUrl: row.source_url,
+    severity: row.severity,
+    status: row.status,
+    pinned: Boolean(row.pinned),
+    rank: row.rank,
+    globalOrder: row.global_order,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at,
+    dismissedAt: row.dismissed_at
+  };
+}
+
+function webhookFromRow(row: WebhookRow): WebhookEndpoint {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    name: row.name,
+    slug: row.slug,
+    destination: row.destination,
+    enabled: Boolean(row.enabled),
+    defaultSeverity: row.default_severity,
+    defaultPriority: row.default_priority,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastTriggeredAt: row.last_triggered_at,
+    version: row.version
+  };
+}
+
 function historyFromRow(row: HistoryRow): NoteHistoryEvent {
   return {
     id: row.id,
@@ -872,6 +1364,15 @@ function compareNames(left: { name: string }, right: { name: string }): number {
 function compareNotes(left: Note, right: Note): number {
   if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
   return left.globalOrder - right.globalOrder || left.updatedAt.localeCompare(right.updatedAt);
+}
+
+function compareNotifications(left: Notification, right: Notification): number {
+  if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+  return (
+    right.rank - left.rank ||
+    left.globalOrder - right.globalOrder ||
+    left.updatedAt.localeCompare(right.updatedAt)
+  );
 }
 
 function nextId(prefix: string): string {

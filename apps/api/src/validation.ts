@@ -1,10 +1,23 @@
-import type { ConflictResolution, NoteInput, NotePatch, NotePriority } from "@dentlink/item-model";
+import type {
+  ConflictResolution,
+  NotificationInput,
+  NotificationPatch,
+  NotificationSeverity,
+  NoteInput,
+  NotePatch,
+  NotePriority,
+  WebhookDestination,
+  WebhookEndpointInput,
+  WebhookEndpointPatch,
+  WebhookIngestInput
+} from "@dentlink/item-model";
 
 const MAX_EMAIL_LENGTH = 254;
 const MAX_PASSWORD_LENGTH = 1024;
 const MAX_TITLE_LENGTH = 200;
 const MAX_BODY_LENGTH = 20_000;
 const MAX_NAME_LENGTH = 80;
+const MAX_SLUG_LENGTH = 80;
 const MAX_TAGS = 20;
 const MAX_URL_LENGTH = 2048;
 const MAX_SEARCH_LENGTH = 200;
@@ -93,6 +106,100 @@ export function parseName(value: unknown): string {
   if (name.length === 0) throw new ValidationError("invalid_name", "Name is required");
   assertMax(name, MAX_NAME_LENGTH, "name");
   return name;
+}
+
+export function parseNotificationInput(value: unknown): NotificationInput {
+  const object = asObject(value);
+  const title = boundedString(object.title, "title", MAX_TITLE_LENGTH).trim();
+  if (title.length === 0) throw new ValidationError("invalid_title", "Title is required");
+  const summary = boundedOptionalString(object.summary, "summary", MAX_TITLE_LENGTH);
+  const body = boundedOptionalString(object.body, "body", MAX_BODY_LENGTH);
+  const sourceUrl = boundedOptionalNullableString(object.sourceUrl, "sourceUrl", MAX_URL_LENGTH);
+  return {
+    title,
+    summary,
+    body,
+    sourceUrl,
+    severity: parseSeverity(object.severity),
+    pinned: optionalBoolean(object.pinned, "pinned") ?? false,
+    rank: optionalNumber(object.rank, "rank")
+  };
+}
+
+export function parseNotificationPatch(value: unknown): {
+  expectedVersion: number;
+  patch: NotificationPatch;
+} {
+  const object = asObject(value);
+  const patch = asObject(object.patch);
+  return {
+    expectedVersion: asVersion(object.expectedVersion),
+    patch: {
+      title: boundedOptionalString(patch.title, "title", MAX_TITLE_LENGTH),
+      summary: boundedOptionalString(patch.summary, "summary", MAX_TITLE_LENGTH),
+      body: boundedOptionalString(patch.body, "body", MAX_BODY_LENGTH),
+      sourceUrl: boundedOptionalNullableString(patch.sourceUrl, "sourceUrl", MAX_URL_LENGTH),
+      severity: patch.severity === undefined ? undefined : parseSeverity(patch.severity),
+      pinned: optionalBoolean(patch.pinned, "pinned"),
+      rank: optionalNumber(patch.rank, "rank"),
+      globalOrder: optionalNumber(patch.globalOrder, "globalOrder"),
+      status: parseNotificationStatus(patch.status)
+    }
+  };
+}
+
+export function parseWebhookEndpointInput(value: unknown): WebhookEndpointInput {
+  const object = asObject(value);
+  const name = boundedString(object.name, "name", MAX_NAME_LENGTH).trim();
+  if (name.length === 0) throw new ValidationError("invalid_name", "Name is required");
+  return {
+    name,
+    slug: parseSlug(object.slug),
+    destination: parseDestination(object.destination),
+    defaultSeverity: parseSeverity(object.defaultSeverity),
+    defaultPriority: parsePriority(object.defaultPriority),
+    enabled: optionalBoolean(object.enabled, "enabled") ?? true
+  };
+}
+
+export function parseWebhookEndpointPatch(value: unknown): {
+  expectedVersion: number;
+  patch: WebhookEndpointPatch;
+} {
+  const object = asObject(value);
+  const patch = asObject(object.patch);
+  return {
+    expectedVersion: asVersion(object.expectedVersion),
+    patch: {
+      name:
+        patch.name === undefined
+          ? undefined
+          : boundedString(patch.name, "name", MAX_NAME_LENGTH).trim(),
+      destination:
+        patch.destination === undefined ? undefined : parseDestination(patch.destination),
+      defaultSeverity:
+        patch.defaultSeverity === undefined ? undefined : parseSeverity(patch.defaultSeverity),
+      defaultPriority:
+        patch.defaultPriority === undefined ? undefined : parsePriority(patch.defaultPriority),
+      enabled: optionalBoolean(patch.enabled, "enabled")
+    }
+  };
+}
+
+export function parseWebhookIngest(value: unknown): WebhookIngestInput {
+  const object = asObject(value);
+  const notification = parseNotificationInput(object);
+  return {
+    ...notification,
+    kind:
+      object.kind === undefined
+        ? undefined
+        : object.kind === "task" || object.kind === "reference"
+          ? object.kind
+          : invalid("invalid_kind"),
+    priority: object.priority === undefined ? undefined : parsePriority(object.priority),
+    dueAt: validatedOptionalDueAt(object.dueAt)
+  };
 }
 
 export function parseReorder(
@@ -236,6 +343,41 @@ function parsePriority(value: unknown): NotePriority {
   if (value === undefined) return "none";
   if (value === "none" || value === "low" || value === "medium" || value === "high") return value;
   throw new ValidationError("invalid_priority", "Priority is invalid");
+}
+
+function parseSeverity(value: unknown): NotificationSeverity {
+  if (value === undefined) return "info";
+  if (value === "info" || value === "low" || value === "medium" || value === "high") return value;
+  throw new ValidationError("invalid_severity", "Severity is invalid");
+}
+
+function parseDestination(value: unknown): WebhookDestination {
+  if (value === "notification" || value === "note") return value;
+  throw new ValidationError("invalid_destination", "Webhook destination is invalid");
+}
+
+function parseNotificationStatus(value: unknown): NotificationPatch["status"] {
+  if (value === undefined) return undefined;
+  if (value === "active" || value === "done" || value === "dismissed" || value === "deleted")
+    return value;
+  throw new ValidationError("invalid_status", "Status is invalid");
+}
+
+function parseSlug(value: unknown): string {
+  const slug = boundedString(value, "slug", MAX_SLUG_LENGTH).trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) {
+    throw new ValidationError(
+      "invalid_slug",
+      "Slug must use lowercase letters, numbers, or dashes"
+    );
+  }
+  return slug;
+}
+
+function boundedString(value: unknown, field: string, max: number): string {
+  const result = asString(value, field);
+  assertMax(result, max, field);
+  return result;
 }
 
 function boundedOptionalString(value: unknown, field: string, max: number): string | undefined {

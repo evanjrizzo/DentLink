@@ -1,7 +1,7 @@
 # Deployment
 
-DentLink targets Cloudflare Workers with D1. Milestone 1.2 establishes the runtime baseline only; it
-does not add product features.
+DentLink targets Cloudflare Workers with D1. The runtime baseline is shared by the Milestone 1 Notes
+slice and the Milestone 2 Notifications/webhook slice.
 
 ## Runtime
 
@@ -117,9 +117,10 @@ Client-side Vite variable:
 
 - `VITE_DENTLINK_API_BASE_URL`: API origin for preview or production web builds.
 
-Current Milestone 1.2 runtime does not require committed secrets. Use `.dev.vars` for local
-non-committed Worker values and Wrangler secrets for future secret values. `.dev.vars` and
-`.dev.vars.*` are ignored by Git.
+Current runtime does not require committed secrets. Use `.dev.vars` for local non-committed Worker
+values and Wrangler secrets for future secret values. `.dev.vars` and `.dev.vars.*` are ignored by
+Git. Webhook endpoint secrets are generated through the API and stored only as server-side hashes;
+they are not Worker environment secrets.
 
 ## Local Development
 
@@ -144,6 +145,8 @@ pnpm db:migrate:production
 ```
 
 Production migrations are explicit and manual. Do not add destructive production reset scripts.
+Milestone 2 adds `0002_notifications_webhooks.sql`; apply it to preview before deploying code that
+uses notification or webhook sync changes.
 
 ## Workflows
 
@@ -162,8 +165,7 @@ preview workflow assumes `wrangler.toml` already contains the real preview D1 `d
 allowed web origin.
 
 The preview workflow also builds and deploys the Cloudflare Pages web client to
-`dentlink-web-preview` with `VITE_DENTLINK_API_BASE_URL` set from
-`DENTLINK_PREVIEW_API_BASE_URL`.
+`dentlink-web-preview` with `VITE_DENTLINK_API_BASE_URL` set from `DENTLINK_PREVIEW_API_BASE_URL`.
 
 Production deployment is manual through the `Deploy Production` workflow and requires typing
 `production`. Configure a protected GitHub `production` environment with required reviewers before

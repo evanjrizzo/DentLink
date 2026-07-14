@@ -4,13 +4,21 @@ import type {
   CurrentSession,
   EntityId,
   Folder,
+  Notification,
+  NotificationInput,
+  NotificationPatch,
+  NotificationsList,
   Note,
   NoteHistoryEvent,
   NoteInput,
   NotePatch,
   NotesList,
   SyncResponse,
-  Tag
+  Tag,
+  WebhookEndpoint,
+  WebhookEndpointInput,
+  WebhookEndpointPatch,
+  WebhooksList
 } from "@dentlink/item-model";
 
 export class DentLinkApiError extends Error {
@@ -129,6 +137,62 @@ export class DentLinkApiClient {
 
   async createTag(input: CreateTagInput): Promise<Tag> {
     return this.request<Tag>("/v1/tags", { method: "POST", body: input });
+  }
+
+  async listNotifications(): Promise<NotificationsList> {
+    return this.request<NotificationsList>("/v1/notifications");
+  }
+
+  async createNotification(input: NotificationInput): Promise<Notification> {
+    return this.request<Notification>("/v1/notifications", { method: "POST", body: input });
+  }
+
+  async updateNotification(
+    notificationId: EntityId,
+    expectedVersion: number,
+    patch: NotificationPatch
+  ): Promise<Notification> {
+    return this.request<Notification>(`/v1/notifications/${notificationId}`, {
+      method: "PATCH",
+      body: { expectedVersion, patch }
+    });
+  }
+
+  async reorderNotifications(
+    notificationOrders: Array<{ id: EntityId; expectedVersion: number; globalOrder: number }>
+  ): Promise<Notification[]> {
+    return this.request<Notification[]>("/v1/notifications/reorder", {
+      method: "POST",
+      body: { noteOrders: notificationOrders }
+    });
+  }
+
+  async listWebhooks(): Promise<WebhooksList> {
+    return this.request<WebhooksList>("/v1/webhooks");
+  }
+
+  async createWebhook(input: WebhookEndpointInput): Promise<{
+    webhook: WebhookEndpoint & { ingestUrl: string };
+    secret: string;
+  }> {
+    return this.request<{
+      webhook: WebhookEndpoint & { ingestUrl: string };
+      secret: string;
+    }>("/v1/webhooks", {
+      method: "POST",
+      body: input
+    });
+  }
+
+  async updateWebhook(
+    webhookId: EntityId,
+    expectedVersion: number,
+    patch: WebhookEndpointPatch
+  ): Promise<WebhookEndpoint & { ingestUrl: string }> {
+    return this.request<WebhookEndpoint & { ingestUrl: string }>(`/v1/webhooks/${webhookId}`, {
+      method: "PATCH",
+      body: { expectedVersion, patch }
+    });
   }
 
   async sync(cursor?: string): Promise<SyncResponse> {

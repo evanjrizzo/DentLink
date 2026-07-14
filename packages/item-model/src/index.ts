@@ -32,8 +32,11 @@ export type CurrentSession = {
 export type NoteKind = "task" | "reference";
 export type NoteStatus = "active" | "done" | "deleted";
 export type NotePriority = "none" | "low" | "medium" | "high";
+export type NotificationStatus = "active" | "done" | "dismissed" | "deleted";
+export type NotificationSeverity = "info" | "low" | "medium" | "high";
 export type ConflictStatus = "open" | "resolved";
 export type ConflictResolution = "keep_mine" | "keep_theirs" | "merge" | "keep_both";
+export type WebhookDestination = "notification" | "note";
 
 export type Folder = {
   id: EntityId;
@@ -129,6 +132,96 @@ export type NotesList = {
   tags: Tag[];
 };
 
+export type Notification = {
+  id: EntityId;
+  userId: EntityId;
+  title: string;
+  summary: string;
+  body: string;
+  source: "webhook" | "manual" | "system";
+  sourceLabel: string;
+  sourceUrl: string | null;
+  severity: NotificationSeverity;
+  status: NotificationStatus;
+  pinned: boolean;
+  rank: number;
+  globalOrder: number;
+  version: number;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  completedAt: IsoDateTime | null;
+  dismissedAt: IsoDateTime | null;
+};
+
+export type NotificationInput = {
+  title: string;
+  summary?: string;
+  body?: string;
+  sourceUrl?: string | null;
+  severity?: NotificationSeverity;
+  pinned?: boolean;
+  rank?: number;
+};
+
+export type NotificationPatch = Partial<NotificationInput> & {
+  status?: NotificationStatus;
+  globalOrder?: number;
+};
+
+export type WebhookEndpoint = {
+  id: EntityId;
+  userId: EntityId;
+  name: string;
+  slug: string;
+  destination: WebhookDestination;
+  enabled: boolean;
+  defaultSeverity: NotificationSeverity;
+  defaultPriority: NotePriority;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  lastTriggeredAt: IsoDateTime | null;
+  version: number;
+};
+
+export type WebhookEndpointInput = {
+  name: string;
+  slug: string;
+  destination: WebhookDestination;
+  defaultSeverity?: NotificationSeverity;
+  defaultPriority?: NotePriority;
+  enabled?: boolean;
+};
+
+export type WebhookEndpointPatch = Partial<
+  Pick<
+    WebhookEndpointInput,
+    "name" | "destination" | "defaultSeverity" | "defaultPriority" | "enabled"
+  >
+>;
+
+export type WebhookDelivery = {
+  id: EntityId;
+  userId: EntityId;
+  endpointId: EntityId;
+  status: "accepted" | "rejected";
+  message: string;
+  createdAt: IsoDateTime;
+};
+
+export type WebhookIngestInput = NotificationInput & {
+  kind?: NoteKind;
+  priority?: NotePriority;
+  dueAt?: IsoDateTime | null;
+};
+
+export type NotificationsList = {
+  notifications: Notification[];
+};
+
+export type WebhooksList = {
+  webhooks: Array<WebhookEndpoint & { ingestUrl: string }>;
+};
+
 export type SyncCursor = string;
 
 export type SyncChange =
@@ -136,6 +229,9 @@ export type SyncChange =
   | { type: "note"; op: "delete"; id: EntityId; userId: EntityId; cursor: SyncCursor }
   | { type: "folder"; op: "upsert"; folder: Folder; cursor: SyncCursor }
   | { type: "tag"; op: "upsert"; tag: Tag; cursor: SyncCursor }
+  | { type: "notification"; op: "upsert"; notification: Notification; cursor: SyncCursor }
+  | { type: "notification"; op: "delete"; id: EntityId; userId: EntityId; cursor: SyncCursor }
+  | { type: "webhook"; op: "upsert"; webhook: WebhookEndpoint; cursor: SyncCursor }
   | { type: "conflict"; op: "upsert"; conflict: NoteConflict; cursor: SyncCursor };
 
 export type SyncResponse = {

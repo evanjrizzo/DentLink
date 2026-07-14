@@ -16,6 +16,9 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   hash.
 - Milestone 1.1 validates the same identity and user-isolation rules against the Cloudflare D1
   storage adapter.
+- Milestone 2 applies the same server-resolved identity to Notifications and webhook endpoint
+  management. Public webhook ingestion never accepts a client-supplied user ID; ownership is derived
+  from the matched endpoint and hashed secret.
 
 ## Passwords
 
@@ -46,6 +49,10 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
 - Store IMAP credentials and provider refresh tokens only after encryption.
 - Never commit, log, expose, or include real secrets in examples.
 - Support rotation for webhook secrets and provider credentials where possible.
+- Named webhook endpoint secrets are generated from 32 cryptographically random bytes and returned
+  once at endpoint creation.
+- D1 and in-memory storage keep only the SHA-256 hash of webhook secrets. Raw webhook secrets are
+  not listed, synced, or logged.
 
 ## Webhooks and source content
 
@@ -54,6 +61,10 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
 - Validate payload shape and destination mapping.
 - Avoid rendering untrusted HTML directly.
 - Do not download attachments by default.
+- Milestone 2 webhook ingestion requires `X-DentLink-Webhook-Secret`; secrets are not embedded in
+  ingest URLs.
+- Wrong-secret, disabled, or unknown webhook endpoints return a safe not-found response.
+- Accepted deliveries are recorded and capped at 60 accepted deliveries per minute per endpoint.
 
 ## Local agents and platform actions
 

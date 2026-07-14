@@ -145,6 +145,101 @@ async function main() {
   assert(sync.status === 200 && sync.json?.cursor, "sync failed", sync);
   record("sync");
 
+  const notification = await request("/v1/notifications", {
+    method: "POST",
+    headers: auth(tokenA),
+    body: {
+      title: `Smoke notification ${runId}`,
+      summary: "notification summary",
+      body: "notification body",
+      severity: "medium"
+    }
+  });
+  assert(
+    notification.status === 201 && notification.json?.id,
+    "notification create failed",
+    notification
+  );
+
+  const pinnedNotification = await request(`/v1/notifications/${notification.json.id}`, {
+    method: "PATCH",
+    headers: auth(tokenA),
+    body: { expectedVersion: notification.json.version, patch: { pinned: true } }
+  });
+  assert(
+    pinnedNotification.status === 200 && pinnedNotification.json?.pinned === true,
+    "notification pin failed",
+    pinnedNotification
+  );
+
+  const doneNotification = await request(`/v1/notifications/${notification.json.id}`, {
+    method: "PATCH",
+    headers: auth(tokenA),
+    body: { expectedVersion: pinnedNotification.json.version, patch: { status: "done" } }
+  });
+  assert(
+    doneNotification.status === 200 && doneNotification.json?.status === "done",
+    "notification done failed",
+    doneNotification
+  );
+
+  const notificationReorder = await request("/v1/notifications/reorder", {
+    method: "POST",
+    headers: auth(tokenA),
+    body: {
+      noteOrders: [
+        {
+          id: doneNotification.json.id,
+          expectedVersion: doneNotification.json.version,
+          globalOrder: 1000
+        }
+      ]
+    }
+  });
+  assert(
+    notificationReorder.status === 200 &&
+      notificationReorder.json?.[0]?.id === doneNotification.json.id,
+    "notification reorder failed",
+    notificationReorder
+  );
+  record("notifications");
+
+  const webhook = await request("/v1/webhooks", {
+    method: "POST",
+    headers: auth(tokenA),
+    body: {
+      name: `Smoke webhook ${runId}`,
+      slug: `smoke-${runId}`,
+      destination: "notification",
+      defaultSeverity: "high"
+    }
+  });
+  assert(
+    webhook.status === 201 &&
+      webhook.json?.secret?.startsWith("webhook_") &&
+      webhook.json?.webhook?.ingestUrl,
+    "webhook create failed",
+    webhook
+  );
+
+  const deliveredWebhook = await request(`/v1/ingest/webhooks/smoke-${runId}`, {
+    method: "POST",
+    headers: { "X-DentLink-Webhook-Secret": webhook.json.secret },
+    body: { title: `Webhook notification ${runId}`, summary: "delivered from smoke test" }
+  });
+  assert(
+    deliveredWebhook.status === 202 && deliveredWebhook.json?.notification?.title?.includes(runId),
+    "webhook delivery failed",
+    deliveredWebhook
+  );
+  const webhookList = await request("/v1/webhooks", { headers: auth(tokenA) });
+  assert(
+    webhookList.status === 200 && !JSON.stringify(webhookList.json).includes(webhook.json.secret),
+    "webhook list exposed secret",
+    webhookList
+  );
+  record("webhooks");
+
   const conflict = await request(`/v1/notes/${updated.json.id}`, {
     method: "PATCH",
     headers: auth(tokenA),
@@ -211,6 +306,16 @@ async function main() {
     crossSync.status === 200 && !JSON.stringify(crossSync.json).includes(updated.json.id),
     "cross-user sync leaked",
     crossSync
+  );
+  const crossWebhookUpdate = await request(`/v1/webhooks/${webhook.json.webhook.id}`, {
+    method: "PATCH",
+    headers: auth(tokenB),
+    body: { expectedVersion: webhook.json.webhook.version, patch: { enabled: false } }
+  });
+  assert(
+    crossWebhookUpdate.status === 404,
+    "cross-user webhook update did not return safe not found",
+    crossWebhookUpdate
   );
   record("authorization");
 

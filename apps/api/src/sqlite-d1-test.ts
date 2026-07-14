@@ -12,10 +12,12 @@ export class SqliteD1TestDatabase implements D1DatabaseLike {
   readonly path: string;
   private readonly directory: string;
 
-  constructor(schemaPath: string) {
+  constructor(schemaPath: string | string[]) {
     this.directory = mkdtempSync(join(tmpdir(), "dentlink-d1-"));
     this.path = join(this.directory, "test.db");
-    execFileSync("sqlite3", [this.path, `.read ${schemaPath}`], sqliteOptions());
+    for (const path of Array.isArray(schemaPath) ? schemaPath : [schemaPath]) {
+      execFileSync("sqlite3", [this.path, `.read ${path}`], sqliteOptions());
+    }
   }
 
   prepare(sql: string): D1PreparedStatement {
