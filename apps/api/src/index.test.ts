@@ -672,6 +672,16 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       account: ConnectorAccount;
       processed: number;
       createdNotifications: number;
+      summary: {
+        discovered: number;
+        examined: number;
+        created: number;
+        updated: number;
+        duplicate: number;
+        skipped: number;
+        filtered: number;
+        failed: number;
+      };
       outcomes: Array<{
         messageId: string;
         status: string;
@@ -689,6 +699,16 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     );
     expect(sync.processed).toBe(1);
     expect(sync.createdNotifications).toBe(1);
+    expect(sync.summary).toEqual({
+      discovered: 1,
+      examined: 1,
+      created: 1,
+      updated: 0,
+      duplicate: 0,
+      skipped: 0,
+      filtered: 0,
+      failed: 0
+    });
     expect(sync.outcomes).toEqual([
       {
         messageId: "gmail-message-1",
@@ -711,6 +731,16 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     );
     expect(secondSync.processed).toBe(1);
     expect(secondSync.createdNotifications).toBe(0);
+    expect(secondSync.summary).toEqual({
+      discovered: 1,
+      examined: 1,
+      created: 0,
+      updated: 0,
+      duplicate: 1,
+      skipped: 0,
+      filtered: 0,
+      failed: 0
+    });
     expect(secondSync.outcomes).toEqual([
       {
         messageId: "gmail-message-1",
@@ -729,8 +759,8 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     );
     expect(records.records).toHaveLength(1);
     expect(records.records[0]).toMatchObject({
-      status: "notification_created",
-      processingReason: "Created a Gmail notification",
+      status: "duplicate",
+      processingReason: "Gmail message already has a source record",
       errorMessage: null
     });
     expect(records.records[0]?.processedAt).toBeTruthy();
@@ -745,6 +775,32 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       connector_account: linked.account.id
     });
     expect(JSON.stringify(records)).not.toContain("refresh-token-secret");
+
+    const diagnostics = await requestJson<{
+      summary: typeof sync.summary;
+      messages: Array<{
+        messageId: string;
+        outcome: string;
+        reason: string;
+        processedAt: string | null;
+        notificationId: string | null;
+        sourceRecordId: string;
+      }>;
+    }>(
+      store,
+      "GET",
+      `/v1/connectors/gmail/${linked.account.id}/diagnostics`,
+      undefined,
+      owner.session.token
+    );
+    expect(diagnostics.summary).toMatchObject({ examined: 1, duplicate: 1 });
+    expect(diagnostics.messages[0]).toMatchObject({
+      messageId: "gmail-message-1",
+      outcome: "duplicate",
+      reason: "Gmail message already has a source record",
+      notificationId: expect.any(String),
+      sourceRecordId: expect.any(String)
+    });
 
     const notifications = await requestJson<{ notifications: Notification[] }>(
       store,
@@ -822,6 +878,16 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       account: ConnectorAccount;
       processed: number;
       createdNotifications: number;
+      summary: {
+        discovered: number;
+        examined: number;
+        created: number;
+        updated: number;
+        duplicate: number;
+        skipped: number;
+        filtered: number;
+        failed: number;
+      };
       outcomes: Array<{ messageId: string; status: string; reason: string; recordId: string }>;
     }>(
       store,
@@ -835,6 +901,16 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
 
     expect(sync.processed).toBe(2);
     expect(sync.createdNotifications).toBe(1);
+    expect(sync.summary).toEqual({
+      discovered: 2,
+      examined: 2,
+      created: 1,
+      updated: 0,
+      duplicate: 0,
+      skipped: 0,
+      filtered: 0,
+      failed: 1
+    });
     expect(sync.account.healthStatus).toBe("degraded");
     expect(sync.account.errorCode).toBe("gmail_partial_sync_failed");
     expect(sync.outcomes.map((outcome) => outcome.status)).toEqual([
@@ -861,6 +937,91 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       processingReason: "Gmail API request failed",
       errorMessage: "Gmail API request failed"
     });
+  });
+
+  it("summarizes multi-page Gmail synchronization", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-multipage@example.com");
+    const gmailClient = fakeGmailClientWithMultiPageMessages();
+    const env = gmailTestEnv(gmailClient);
+    const start = await requestJson<{ authorizationUrl: string; expiresAt: string }>(
+      store,
+      "POST",
+      "/v1/connectors/gmail/start",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const authorizationUrl = new URL(start.authorizationUrl);
+    const callback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${authorizationUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    const linked = (await callback.json()) as { account: ConnectorAccount };
+
+    const sync = await requestJson<{
+      account: ConnectorAccount;
+      summary: {
+        discovered: number;
+        examined: number;
+        created: number;
+        updated: number;
+        duplicate: number;
+        skipped: number;
+        filtered: number;
+        failed: number;
+      };
+      outcomes: Array<{ status: string }>;
+    }>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+
+    expect(sync.summary).toEqual({
+      discovered: 3,
+      examined: 3,
+      created: 3,
+      updated: 0,
+      duplicate: 0,
+      skipped: 0,
+      filtered: 0,
+      failed: 0
+    });
+    expect(sync.outcomes.map((outcome) => outcome.status)).toEqual([
+      "notification_created",
+      "notification_created",
+      "notification_created"
+    ]);
+    expect(sync.account.syncCursor).toBe("203");
+
+    const diagnostics = await requestJson<{
+      summary: typeof sync.summary;
+      messages: Array<{ messageId: string; outcome: string; notificationId: string | null }>;
+    }>(
+      store,
+      "GET",
+      `/v1/connectors/gmail/${linked.account.id}/diagnostics`,
+      undefined,
+      owner.session.token
+    );
+    expect(diagnostics.summary).toMatchObject({ examined: 3, created: 3 });
+    expect(diagnostics.messages.map((message) => message.messageId).sort()).toEqual([
+      "gmail-page-1",
+      "gmail-page-2",
+      "gmail-page-3"
+    ]);
+    expect(diagnostics.messages.every((message) => message.notificationId)).toBe(true);
   });
 
   it("links Google Calendar, syncs agenda events, supports dismissal, and isolates users", async () => {
@@ -1939,6 +2100,58 @@ function fakeGmailClientWithPartialFailure(): GmailApiClient {
             { name: "Subject", value: "Successful message" },
             { name: "Date", value: "Tue, 14 Jul 2026 10:00:00 -0400" },
             { name: "Message-ID", value: "<message-ok@example.test>" }
+          ]
+        }
+      };
+    }
+  };
+}
+
+function fakeGmailClientWithMultiPageMessages(): GmailApiClient {
+  return {
+    async exchangeCode(code) {
+      expect(code).toBe("valid-code");
+      return { accessToken: "access-token", refreshToken: "refresh-token-secret" };
+    },
+    async refreshAccessToken(refreshToken) {
+      expect(refreshToken).toBe("refresh-token-secret");
+      return { accessToken: "access-token-refreshed" };
+    },
+    async getProfile() {
+      return { emailAddress: "owner.gmail@example.test" };
+    },
+    async listMessages(_accessToken, pageToken) {
+      if (!pageToken) {
+        return {
+          messages: [
+            { id: "gmail-page-1", threadId: "gmail-thread-page-1" },
+            { id: "gmail-page-2", threadId: "gmail-thread-page-2" }
+          ],
+          nextPageToken: "page-2"
+        };
+      }
+      expect(pageToken).toBe("page-2");
+      return {
+        messages: [{ id: "gmail-page-3", threadId: "gmail-thread-page-3" }]
+      };
+    },
+    async listHistory() {
+      return { history: [] };
+    },
+    async getMessage(_accessToken, messageId) {
+      const sequence = messageId.at(-1) ?? "1";
+      return {
+        id: messageId,
+        threadId: `gmail-thread-page-${sequence}`,
+        historyId: `20${sequence}`,
+        internalDate: "1783980000000",
+        labelIds: ["INBOX"],
+        payload: {
+          headers: [
+            { name: "From", value: "Front Desk <front@example.test>" },
+            { name: "Subject", value: `Paged message ${sequence}` },
+            { name: "Date", value: "Tue, 14 Jul 2026 10:00:00 -0400" },
+            { name: "Message-ID", value: `<message-page-${sequence}@example.test>` }
           ]
         }
       };

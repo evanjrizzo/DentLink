@@ -234,3 +234,8 @@ ingestion diagnostics without changing provider credentials or notification owne
 Gmail-created notifications continue to be user-scoped normal notifications. Their connector source
 records now retain the DentLink notification ID in normalized metadata and record `processed_at`
 when notification creation succeeds.
+
+Milestone 7 Slice 2 does not add another migration. Gmail sync summaries and the diagnostics API are
+derived from the existing user-scoped connector account plus `connector_source_records` rows.
+Diagnostics expose normalized Gmail message IDs, processing outcomes, safe reasons, processed
+timestamps, linked notification IDs, and source record IDs only.

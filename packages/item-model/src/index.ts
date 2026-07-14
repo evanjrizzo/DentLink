@@ -433,6 +433,7 @@ export type GmailSyncResult = {
   account: ConnectorAccount;
   processed: number;
   createdNotifications: number;
+  summary: GmailSyncSummary;
   outcomes: Array<{
     messageId: EntityId;
     status: Extract<
@@ -447,6 +448,40 @@ export type GmailSyncResult = {
     reason: string;
     recordId: EntityId | null;
   }>;
+};
+
+export type GmailSyncSummary = {
+  discovered: number;
+  examined: number;
+  created: number;
+  updated: number;
+  duplicate: number;
+  skipped: number;
+  filtered: number;
+  failed: number;
+};
+
+export type GmailDiagnosticMessage = {
+  messageId: EntityId;
+  outcome: Extract<
+    ConnectorSourceRecordStatus,
+    | "notification_created"
+    | "notification_updated"
+    | "skipped"
+    | "duplicate"
+    | "filtered"
+    | "failed"
+  >;
+  reason: string;
+  processedAt: IsoDateTime | null;
+  notificationId: EntityId | null;
+  sourceRecordId: EntityId;
+};
+
+export type GmailDiagnostics = {
+  account: ConnectorAccount;
+  summary: GmailSyncSummary;
+  messages: GmailDiagnosticMessage[];
 };
 
 export type GoogleCalendarSyncResult = {

@@ -9,6 +9,7 @@ import type {
   CalendarSourceFilter,
   ConnectorAccount,
   EntityId,
+  GmailDiagnostics,
   Notification,
   NotificationInput,
   NotificationSeverity,
@@ -48,6 +49,7 @@ export function DentLinkNotesApp(): ReactElement {
   const [calendarActionPending, setCalendarActionPending] = useState(false);
   const [webhooks, setWebhooks] = useState<Array<WebhookEndpoint & { ingestUrl: string }>>([]);
   const [connectorAccounts, setConnectorAccounts] = useState<ConnectorAccount[]>([]);
+  const [gmailDiagnostics, setGmailDiagnostics] = useState<Record<EntityId, GmailDiagnostics>>({});
   const [webhookDraft, setWebhookDraft] = useState({
     name: "",
     slug: "",
@@ -137,10 +139,34 @@ export function DentLinkNotesApp(): ReactElement {
     if (requestId === webhooksRequest.current) setWebhooks(response.webhooks);
   }
 
-  async function loadConnectors(): Promise<void> {
+  async function loadConnectors(): Promise<ConnectorAccount[]> {
     const requestId = (connectorsRequest.current += 1);
     const response = await client.listConnectorAccounts();
-    if (requestId === connectorsRequest.current) setConnectorAccounts(response.accounts);
+    if (requestId === connectorsRequest.current) {
+      setConnectorAccounts(response.accounts);
+      await loadGmailDiagnosticsForAccounts(response.accounts);
+    }
+    return response.accounts;
+  }
+
+  async function loadGmailDiagnosticsForAccounts(accounts: ConnectorAccount[]): Promise<void> {
+    const gmailAccounts = accounts.filter((account) => account.connectorKey === "gmail");
+    const entries = await Promise.all(
+      gmailAccounts.map(async (account) => {
+        try {
+          return [account.id, await client.getGmailDiagnostics(account.id)] as const;
+        } catch {
+          return [account.id, null] as const;
+        }
+      })
+    );
+    setGmailDiagnostics((current) => {
+      const next = { ...current };
+      for (const [accountId, diagnostics] of entries) {
+        if (diagnostics) next[accountId] = diagnostics;
+      }
+      return next;
+    });
   }
 
   async function refreshConnectorNotificationState(): Promise<void> {
@@ -381,6 +407,8 @@ export function DentLinkNotesApp(): ReactElement {
     try {
       setError(null);
       const result = await client.syncGmailAccount(account.id);
+      const diagnostics = await client.getGmailDiagnostics(account.id);
+      setGmailDiagnostics((current) => ({ ...current, [account.id]: diagnostics }));
       await refreshConnectorNotificationState();
       if (result.createdNotifications > 0) setView("notifications");
     } catch (caught) {
@@ -740,6 +768,7 @@ export function DentLinkNotesApp(): ReactElement {
           onReconnectGmail={(account) => connectGmail(account.id)}
           onSyncGmail={syncGmail}
           onDisconnectGmail={disconnectGmail}
+          gmailDiagnostics={gmailDiagnostics}
           onConnectGoogleCalendar={connectGoogleCalendar}
           onReconnectGoogleCalendar={(account) => connectGoogleCalendar(account.id)}
           onSyncGoogleCalendar={syncGoogleCalendar}
@@ -1999,6 +2028,7 @@ function downloadTextFile(filename: string, contents: string, type: string): voi
 
 function ConnectorsView(props: {
   accounts: ConnectorAccount[];
+  gmailDiagnostics: Record<EntityId, GmailDiagnostics>;
   onConnectGmail: () => Promise<void>;
   onReconnectGmail: (account: ConnectorAccount) => Promise<void>;
   onSyncGmail: (account: ConnectorAccount) => Promise<void>;
@@ -2036,6 +2066,10 @@ function ConnectorsView(props: {
               {account.lastSyncAt ? new Date(account.lastSyncAt).toLocaleString() : "Never"}
             </span>
             {account.errorMessage ? <p>{account.errorMessage}</p> : null}
+            <GmailDiagnosticsSummary
+              diagnostics={props.gmailDiagnostics[account.id]}
+              degraded={account.healthStatus === "degraded"}
+            />
             <div className="note-order">
               <button type="button" onClick={() => void props.onSyncGmail(account)}>
                 Sync Now
@@ -2076,6 +2110,72 @@ function ConnectorsView(props: {
       </div>
     </main>
   );
+}
+
+function GmailDiagnosticsSummary(props: {
+  diagnostics: GmailDiagnostics | undefined;
+  degraded: boolean;
+}): ReactElement | null {
+  if (!props.diagnostics) return null;
+  const summary = props.diagnostics.summary;
+  const recentMessages = props.diagnostics.messages.slice(0, 8);
+  return (
+    <section className="gmail-diagnostics" aria-label="Gmail sync diagnostics">
+      <strong>Last Sync</strong>
+      <div className="gmail-diagnostics-grid">
+        <span>{summary.examined} messages examined</span>
+        <span>{summary.created} notifications created</span>
+        <span>{summary.updated} updated</span>
+        <span>{summary.duplicate} duplicates</span>
+        <span>{summary.skipped} skipped</span>
+        <span>{summary.filtered} filtered</span>
+        <span>{summary.failed} failed</span>
+      </div>
+      {props.degraded && summary.failed > 0 ? (
+        <p className="connector-warning">
+          {summary.failed} Gmail message{summary.failed === 1 ? "" : "s"} could not be processed.
+          Successfully processed messages were still imported.
+        </p>
+      ) : null}
+      {recentMessages.length > 0 ? (
+        <details>
+          <summary>Recent Gmail processing outcomes</summary>
+          <div className="diagnostics-table-wrap">
+            <table className="diagnostics-table">
+              <thead>
+                <tr>
+                  <th>Message ID</th>
+                  <th>Outcome</th>
+                  <th>Reason</th>
+                  <th>Processed</th>
+                  <th>Notification</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentMessages.map((message) => (
+                  <tr key={message.sourceRecordId}>
+                    <td>{message.messageId}</td>
+                    <td>{formatOutcome(message.outcome)}</td>
+                    <td>{message.reason}</td>
+                    <td>
+                      {message.processedAt
+                        ? new Date(message.processedAt).toLocaleString()
+                        : "Not processed"}
+                    </td>
+                    <td>{message.notificationId ?? "None"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
+function formatOutcome(outcome: string): string {
+  return outcome.replaceAll("_", " ");
 }
 
 function formatEventStart(event: CalendarEvent): string {

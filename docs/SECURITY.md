@@ -93,6 +93,10 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   records. It does not store raw message bodies, attachments, OAuth tokens, or provider credentials
   in diagnostics. Partial message failures are surfaced through degraded connector health instead of
   being treated as a healthy ingestion result.
+- Gmail diagnostics are scoped to the authenticated owner of the connector account. The diagnostics
+  endpoint returns aggregate counts, provider message IDs, safe processing reasons, processed
+  timestamps, source record IDs, and linked DentLink notification IDs only; it does not expose raw
+  email bodies, MIME parts, attachments, OAuth tokens, or provider credentials.
 - Milestone 4 Google Calendar synchronization uses the read-only Calendar scope, stores normalized
   event metadata and provider identifiers, and does not create, edit, delete, RSVP to, or manage
   attendees on Google Calendar events. Calendar refresh tokens use the same AES-GCM encrypted

@@ -17,6 +17,7 @@ import type {
   ConnectorAccount,
   ConnectorSourceRecord,
   EntityId,
+  GmailDiagnostics,
   GmailSyncResult
 } from "@dentlink/item-model";
 import type { ConnectorDefinition } from "@dentlink/connector-sdk";
@@ -239,21 +240,16 @@ export async function syncGmailAccount(
     const gmail = gmailClient(env);
     const token = await gmail.refreshAccessToken(refreshToken);
     const messages = await messagesForSync(gmail, token.accessToken, syncing.syncCursor);
-    let processed = 0;
     let createdNotifications = 0;
     const outcomes: GmailSyncResult["outcomes"] = [];
     let nextCursor = syncing.syncCursor;
     for (const messageId of messages.messageIds) {
-      processed += 1;
       try {
         const existingRecord = await store.findConnectorSourceRecord(userId, syncing.id, messageId);
         if (existingRecord && !shouldRetryGmailSourceRecord(existingRecord.status)) {
-          outcomes.push({
-            messageId,
-            status: "duplicate",
-            reason: "Gmail message already has a source record",
-            recordId: existingRecord.id
-          });
+          outcomes.push(
+            await recordGmailMessageDuplicate(store, userId, syncing, existingRecord, now)
+          );
           continue;
         }
         const message = await gmail.getMessage(token.accessToken, messageId);
@@ -270,6 +266,7 @@ export async function syncGmailAccount(
     nextCursor = messages.historyId ?? nextCursor;
     const latest = await store.getConnectorAccount(userId, account.id);
     if (!latest) throw new StoreError("not_found", "Gmail account not found");
+    const summary = summarizeGmailOutcomes(messages.messageIds.length, outcomes);
     const failed = outcomes.filter((outcome) => outcome.status === "failed");
     const updated = await store.updateConnectorAccount(
       userId,
@@ -291,7 +288,13 @@ export async function syncGmailAccount(
       now
     );
     if (!updated) throw new StoreError("not_found", "Gmail account not found");
-    return { account: updated, processed, createdNotifications, outcomes };
+    return {
+      account: updated,
+      processed: summary.examined,
+      createdNotifications,
+      summary,
+      outcomes
+    };
   } catch (error) {
     const latest = await store.getConnectorAccount(userId, account.id);
     if (latest) {
@@ -312,6 +315,28 @@ export async function syncGmailAccount(
     }
     throw error;
   }
+}
+
+export async function getGmailDiagnostics(
+  store: DentLinkStore,
+  userId: EntityId,
+  accountId: EntityId
+): Promise<GmailDiagnostics> {
+  const account = await requireGmailAccount(store, userId, accountId);
+  const records = await store.listConnectorSourceRecords(userId, account.id);
+  const messages = records
+    .filter(isGmailDiagnosticRecord)
+    .sort((left, right) => {
+      const leftTime = left.processedAt ?? left.receivedAt;
+      const rightTime = right.processedAt ?? right.receivedAt;
+      return rightTime.localeCompare(leftTime);
+    })
+    .map(gmailDiagnosticMessage);
+  return {
+    account,
+    summary: summarizeGmailDiagnostics(messages),
+    messages
+  };
 }
 
 export { GoogleConfigError as GmailConfigError };
@@ -486,12 +511,7 @@ async function ingestGmailMessage(
     now
   );
   if (!created && record.status !== "failed") {
-    return {
-      messageId: message.id,
-      status: "duplicate",
-      reason: "Gmail message already has a source record",
-      recordId: record.id
-    };
+    return recordGmailMessageDuplicate(store, userId, account, record, now);
   }
   const notification = await store.createNotification(
     userId,
@@ -540,12 +560,7 @@ async function recordGmailMessageFailure(
 ): Promise<GmailSyncResult["outcomes"][number]> {
   const existing = await store.findConnectorSourceRecord(userId, account.id, messageId);
   if (existing && !shouldRetryGmailSourceRecord(existing.status)) {
-    return {
-      messageId,
-      status: "duplicate",
-      reason: "Gmail message already has a source record",
-      recordId: existing.id
-    };
+    return recordGmailMessageDuplicate(store, userId, account, existing, now);
   }
   const normalizedPayload = {
     provider: "gmail",
@@ -586,8 +601,116 @@ async function recordGmailMessageFailure(
   };
 }
 
+async function recordGmailMessageDuplicate(
+  store: DentLinkStore,
+  userId: EntityId,
+  account: ConnectorAccount,
+  record: ConnectorSourceRecord,
+  now: string
+): Promise<GmailSyncResult["outcomes"][number]> {
+  const updated = await store.updateConnectorSourceRecordProcessing(
+    userId,
+    account.id,
+    record.sourceExternalId,
+    {
+      status: "duplicate",
+      processingReason: "Gmail message already has a source record",
+      normalizedPayload: record.normalizedPayload,
+      payloadHash: record.payloadHash
+    },
+    now
+  );
+  return {
+    messageId: record.sourceExternalId,
+    status: "duplicate",
+    reason: updated.processingReason ?? "Gmail message already has a source record",
+    recordId: updated.id
+  };
+}
+
 function shouldRetryGmailSourceRecord(status: ConnectorSourceRecord["status"]): boolean {
   return status === "pending" || status === "failed";
+}
+
+function summarizeGmailOutcomes(
+  discovered: number,
+  outcomes: GmailSyncResult["outcomes"]
+): GmailSyncResult["summary"] {
+  const summary = emptyGmailSummary(discovered, outcomes.length);
+  for (const outcome of outcomes) {
+    if (outcome.status === "notification_created") summary.created += 1;
+    if (outcome.status === "notification_updated") summary.updated += 1;
+    if (outcome.status === "duplicate") summary.duplicate += 1;
+    if (outcome.status === "skipped") summary.skipped += 1;
+    if (outcome.status === "filtered") summary.filtered += 1;
+    if (outcome.status === "failed") summary.failed += 1;
+  }
+  return summary;
+}
+
+function summarizeGmailDiagnostics(
+  messages: GmailDiagnostics["messages"]
+): GmailDiagnostics["summary"] {
+  const summary = emptyGmailSummary(messages.length, messages.length);
+  for (const message of messages) {
+    if (message.outcome === "notification_created") summary.created += 1;
+    if (message.outcome === "notification_updated") summary.updated += 1;
+    if (message.outcome === "duplicate") summary.duplicate += 1;
+    if (message.outcome === "skipped") summary.skipped += 1;
+    if (message.outcome === "filtered") summary.filtered += 1;
+    if (message.outcome === "failed") summary.failed += 1;
+  }
+  return summary;
+}
+
+function emptyGmailSummary(discovered: number, examined: number): GmailSyncResult["summary"] {
+  return {
+    discovered,
+    examined,
+    created: 0,
+    updated: 0,
+    duplicate: 0,
+    skipped: 0,
+    filtered: 0,
+    failed: 0
+  };
+}
+
+function isGmailDiagnosticRecord(record: ConnectorSourceRecord): boolean {
+  return (
+    record.connectorKey === GMAIL_CONNECTOR_KEY &&
+    record.sourceType === "email" &&
+    isDiagnosticOutcome(record.status)
+  );
+}
+
+function gmailDiagnosticMessage(
+  record: ConnectorSourceRecord
+): GmailDiagnostics["messages"][number] {
+  return {
+    messageId: record.sourceExternalId,
+    outcome: record.status as GmailDiagnostics["messages"][number]["outcome"],
+    reason: record.processingReason ?? record.errorMessage ?? "No processing reason recorded",
+    processedAt: record.processedAt,
+    notificationId:
+      typeof record.normalizedPayload.notification_id === "string"
+        ? record.normalizedPayload.notification_id
+        : null,
+    sourceRecordId: record.id
+  };
+}
+
+function isDiagnosticOutcome(
+  status: ConnectorSourceRecord["status"]
+): status is GmailDiagnostics["messages"][number]["outcome"] {
+  return (
+    status === "notification_created" ||
+    status === "notification_updated" ||
+    status === "skipped" ||
+    status === "duplicate" ||
+    status === "filtered" ||
+    status === "failed"
+  );
 }
 
 async function gmailRequest(

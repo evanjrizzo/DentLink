@@ -190,6 +190,9 @@ Google Calendar or any other Google service.
   `returnTo` URL when present. JSON clients may send `Accept: application/json`.
 - `POST /v1/connectors/gmail/:accountId/sync`: authenticated manual Gmail sync for an owned Gmail
   connector account.
+- `GET /v1/connectors/gmail/:accountId/diagnostics`: authenticated diagnostics for an owned Gmail
+  connector account. Returns aggregate processing counts and recent per-message outcomes without raw
+  email bodies.
 - `POST /v1/connectors/gmail/:accountId/disconnect`: authenticated disconnect. Removes stored
   connector credentials and leaves the metadata account paused.
 
@@ -213,6 +216,8 @@ the same endpoint:
 
 - `processed`: number of Gmail message IDs attempted.
 - `createdNotifications`: number of DentLink notifications newly created.
+- `summary`: aggregate counts for `discovered`, `examined`, `created`, `updated`, `duplicate`,
+  `skipped`, `filtered`, and `failed`.
 - `outcomes`: ordered entries containing `messageId`, `status`, `reason`, and `recordId`.
 
 Outcome `status` values are `notification_created`, `notification_updated`, `skipped`, `duplicate`,
@@ -221,6 +226,13 @@ Outcome `status` values are `notification_created`, `notification_updated`, `ski
 failures returns `200` with connector `healthStatus = "degraded"` and a stable
 `errorCode = "gmail_partial_sync_failed"`; global provider, credential, or database failures still
 return normal API errors and set connector sync status to `error`.
+
+The diagnostics endpoint returns:
+
+- `account`: the safe connector account metadata.
+- `summary`: aggregate counts derived from Gmail source-record outcomes.
+- `messages`: recent entries with Gmail message ID, outcome, processing reason, processed timestamp,
+  linked DentLink notification ID where present, and source record ID.
 
 ## Milestone 4 Google Calendar endpoints
 

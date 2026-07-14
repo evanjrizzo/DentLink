@@ -239,6 +239,20 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       version: 1
     };
     let notifications: unknown[] = [];
+    let gmailDiagnostics = {
+      account: gmailAccount,
+      summary: {
+        discovered: 0,
+        examined: 0,
+        created: 0,
+        updated: 0,
+        duplicate: 0,
+        skipped: 0,
+        filtered: 0,
+        failed: 0
+      },
+      messages: [] as unknown[]
+    };
 
     await page.route("**/v1/**", async (route) => {
       const request = route.request();
@@ -273,6 +287,10 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         await fulfillJson(route, { accounts: [gmailAccount] });
         return;
       }
+      if (method === "GET" && path === `/v1/connectors/gmail/${gmailAccount.id}/diagnostics`) {
+        await fulfillJson(route, gmailDiagnostics);
+        return;
+      }
       if (method === "POST" && path === `/v1/connectors/gmail/${gmailAccount.id}/sync`) {
         const syncedAt = new Date().toISOString();
         gmailAccount.lastSyncAt = syncedAt;
@@ -289,10 +307,59 @@ test.describe("Milestone 2.1 preview browser verification", () => {
             updatedAt: syncedAt
           })
         ];
+        gmailDiagnostics = {
+          account: gmailAccount,
+          summary: {
+            discovered: 142,
+            examined: 142,
+            created: 118,
+            updated: 7,
+            duplicate: 12,
+            skipped: 3,
+            filtered: 0,
+            failed: 2
+          },
+          messages: [
+            {
+              messageId: "gmail-message-failed",
+              outcome: "failed",
+              reason: "Gmail API request failed",
+              processedAt: syncedAt,
+              notificationId: null,
+              sourceRecordId: "source_gmail_failed"
+            },
+            {
+              messageId: "gmail-message-created",
+              outcome: "notification_created",
+              reason: "Created a Gmail notification",
+              processedAt: syncedAt,
+              notificationId: "notification_gmail_synced",
+              sourceRecordId: "source_gmail_created"
+            }
+          ]
+        };
+        gmailAccount.healthStatus = "degraded";
+        gmailAccount.errorCode = "gmail_partial_sync_failed";
+        gmailAccount.errorMessage = "2 Gmail messages failed processing";
         await fulfillJson(route, {
           account: gmailAccount,
           processed: 1,
-          createdNotifications: 1
+          createdNotifications: 1,
+          summary: gmailDiagnostics.summary,
+          outcomes: [
+            {
+              messageId: "gmail-message-created",
+              status: "notification_created",
+              reason: "Created a Gmail notification",
+              recordId: "source_gmail_created"
+            },
+            {
+              messageId: "gmail-message-failed",
+              status: "failed",
+              reason: "Gmail API request failed",
+              recordId: "source_gmail_failed"
+            }
+          ]
         });
         return;
       }
@@ -318,6 +385,20 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(notificationCard(page, "Gmail synced message")).toBeVisible();
     await page.getByRole("button", { name: "Connectors" }).click();
     await expect(page.getByText("Last sync: Never")).toHaveCount(0);
+    await expect(page.getByText("142 messages examined")).toBeVisible();
+    await expect(page.getByText("118 notifications created")).toBeVisible();
+    await expect(page.getByText("7 updated")).toBeVisible();
+    await expect(page.getByText("12 duplicates")).toBeVisible();
+    await expect(page.getByText("3 skipped")).toBeVisible();
+    await expect(page.getByText("2 failed")).toBeVisible();
+    await expect(
+      page.getByText(
+        "2 Gmail messages could not be processed. Successfully processed messages were still imported."
+      )
+    ).toBeVisible();
+    await page.getByText("Recent Gmail processing outcomes").click();
+    await expect(page.getByText("gmail-message-failed")).toBeVisible();
+    await expect(page.getByText("Gmail API request failed")).toBeVisible();
 
     notifications = [
       ...notifications,

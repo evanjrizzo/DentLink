@@ -73,7 +73,9 @@ Milestone 7 Phase 1 hardens Gmail ingestion before dashboard, ranking, or AI wor
 Gmail message now records a source-record processing outcome such as `notification_created`,
 `duplicate`, or `failed` with a reason. Partial per-message failures do not hide successful
 notifications; the connector reports degraded health and keeps the failed source record visible for
-diagnostics and retry analysis.
+diagnostics and retry analysis. The Gmail connector card reads provider-specific diagnostics through
+the API client and displays aggregate sync counts plus recent source-record outcomes; clients still
+do not poll Gmail directly or infer authoritative ingestion health locally.
 
 Milestone 4 adds Google Calendar using the same provider-neutral connector framework. Google
 Calendar OAuth links a calendar connector account, encrypted refresh tokens remain in connector

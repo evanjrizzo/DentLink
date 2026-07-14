@@ -10,6 +10,7 @@ import { MemoryDentLinkStore, StoreError, type DentLinkStore } from "./storage";
 import {
   completeGmailOAuth,
   disconnectGmailAccount,
+  getGmailDiagnostics,
   GmailConfigError,
   gmailConnectorDefinition,
   startGmailOAuth,
@@ -369,6 +370,10 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     const gmailSyncMatch = path.match(/^\/v1\/connectors\/gmail\/([^/]+)\/sync$/);
     if (gmailSyncMatch && method === "POST") {
       return json(await syncGmailAccount(store, auth.user.id, gmailSyncMatch[1] ?? "", env, now));
+    }
+    const gmailDiagnosticsMatch = path.match(/^\/v1\/connectors\/gmail\/([^/]+)\/diagnostics$/);
+    if (gmailDiagnosticsMatch && method === "GET") {
+      return json(await getGmailDiagnostics(store, auth.user.id, gmailDiagnosticsMatch[1] ?? ""));
     }
     const gmailDisconnectMatch = path.match(/^\/v1\/connectors\/gmail\/([^/]+)\/disconnect$/);
     if (gmailDisconnectMatch && method === "POST") {

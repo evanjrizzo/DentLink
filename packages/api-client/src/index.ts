@@ -18,6 +18,7 @@ import type {
   CurrentSession,
   EntityId,
   Folder,
+  GmailDiagnostics,
   GmailSyncResult,
   GoogleCalendarSyncResult,
   Notification,
@@ -245,6 +246,10 @@ export class DentLinkApiClient {
     return this.request<GmailSyncResult>(`/v1/connectors/gmail/${accountId}/sync`, {
       method: "POST"
     });
+  }
+
+  async getGmailDiagnostics(accountId: EntityId): Promise<GmailDiagnostics> {
+    return this.request<GmailDiagnostics>(`/v1/connectors/gmail/${accountId}/diagnostics`);
   }
 
   async disconnectGmailAccount(accountId: EntityId): Promise<ConnectorAccount> {
