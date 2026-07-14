@@ -8,12 +8,13 @@ DentLink is a new, independent platform. It must not depend on Odysseus, the pre
 
 ## Current status
 
-Milestone 1: authentication and manual Notes vertical slice.
+Milestone 1.1: authentication and manual Notes vertical slice with D1 persistence validation.
 
 This repository contains the pnpm TypeScript workspace, shared package boundaries, a Worker-style API
-handler, D1 migration for auth and notes, shared auth/note/sync/conflict types, a typed API client, a
-small sync helper, and a responsive Notes UI shell. It does not yet contain email connectors,
-calendar providers, named webhooks, Tauri, Android, or AI calls.
+handler, Cloudflare D1 storage adapter, D1 migration for auth and notes, shared
+auth/note/sync/conflict types, a typed API client, a small sync helper, and a responsive Notes UI
+shell. It does not yet contain email connectors, calendar providers, named webhooks, Tauri, Android,
+or AI calls.
 
 ## Product shape
 
@@ -83,9 +84,26 @@ pnpm validate
 ```
 
 The validation command checks formatting, linting, TypeScript, and tests across the workspace.
+The API test suite runs the same storage contract tests against the in-memory adapter and the
+D1-compatible adapter.
 
-Milestone 1 also validates the D1 migration with:
+Run the API locally against Wrangler's local D1 binding with:
+
+```bash
+pnpm d1:migrate:local
+pnpm dev
+```
+
+The Vite web app remains available with:
+
+```bash
+pnpm --filter @dentlink/web dev
+```
+
+Migration validation can also be run directly with:
 
 ```bash
 sqlite3 /tmp/dentlink_m1_migration_check.db < migrations/0001_auth_notes.sql
+sqlite3 /tmp/dentlink_m1_migration_check.db "PRAGMA foreign_key_check;"
+sqlite3 /tmp/dentlink_m1_migration_check.db "PRAGMA integrity_check;"
 ```

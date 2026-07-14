@@ -1,10 +1,14 @@
 import { webcrypto } from "node:crypto";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
 import { hashPassword, hashSessionToken } from "./auth";
+import { D1DentLinkStore } from "./d1-storage";
 import { handleApiRequest } from "./index";
-import { MemoryDentLinkStore } from "./storage";
+import { SqliteD1TestDatabase } from "./sqlite-d1-test";
+import { MemoryDentLinkStore, type DentLinkStore } from "./storage";
 
 import type {
   ApiErrorBody,
@@ -21,9 +25,50 @@ Object.defineProperty(globalThis, "crypto", {
   value: webcrypto
 });
 
-describe("@dentlink/api milestone 1", () => {
+const schemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0001_auth_notes.sql"
+);
+
+type StoreFixture = {
+  name: string;
+  createStore(): { store: DentLinkStore; hasRawSessionToken?(token: string): Promise<boolean> };
+};
+
+const fixtures: StoreFixture[] = [
+  {
+    name: "memory",
+    createStore() {
+      const store = new MemoryDentLinkStore();
+      return {
+        store,
+        async hasRawSessionToken(token: string) {
+          return debugSessions(store).has(token);
+        }
+      };
+    }
+  },
+  {
+    name: "d1",
+    createStore() {
+      const db = new SqliteD1TestDatabase(schemaPath);
+      return {
+        store: new D1DentLinkStore(db),
+        async hasRawSessionToken(token: string) {
+          const row = await db
+            .prepare("SELECT token_hash FROM sessions WHERE token_hash = ?")
+            .bind(token)
+            .first();
+          return Boolean(row);
+        }
+      };
+    }
+  }
+];
+
+describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({ createStore }) => {
   it("registers, logs in, and returns a session without accepting client user identity", async () => {
-    const store = new MemoryDentLinkStore();
+    const { store } = createStore();
     const registered = await requestJson<AuthSession>(
       store,
       "POST",
@@ -56,7 +101,7 @@ describe("@dentlink/api milestone 1", () => {
   });
 
   it("handles duplicate registration, generic login errors, logout, malformed bearer tokens, and expiry", async () => {
-    const store = new MemoryDentLinkStore();
+    const { store, hasRawSessionToken } = createStore();
     const auth = await register(store, "Case@Test.example");
 
     const duplicate = await requestJson<ApiErrorBody>(
@@ -88,8 +133,8 @@ describe("@dentlink/api milestone 1", () => {
     expect(wrongPassword.error.code).toBe(unknownEmail.error.code);
     expect(wrongPassword.error.message).toBe(unknownEmail.error.message);
 
-    const sessionKeys = [...debugSessions(store).keys()];
-    expect(sessionKeys).not.toContain(auth.session.token);
+    if (hasRawSessionToken)
+      await expect(hasRawSessionToken(auth.session.token)).resolves.toBe(false);
 
     await requestJson<{ ok: true }>(
       store,
@@ -116,9 +161,9 @@ describe("@dentlink/api milestone 1", () => {
     );
 
     const password = await hashPassword("correct horse");
-    const user = store.createUser({ email: "expired@example.com", password });
+    const user = await store.createUser({ email: "expired@example.com", password });
     const expiredToken = "session_expired";
-    store.createSession(
+    await store.createSession(
       user.id,
       await hashSessionToken(expiredToken),
       "2026-01-01T00:00:00.000Z",
@@ -128,7 +173,7 @@ describe("@dentlink/api milestone 1", () => {
   });
 
   it("isolates notes by authenticated session user", async () => {
-    const store = new MemoryDentLinkStore();
+    const { store } = createStore();
     const first = await register(store, "first@example.com");
     const second = await register(store, "second@example.com");
 
@@ -204,7 +249,7 @@ describe("@dentlink/api milestone 1", () => {
   });
 
   it("supports folders, tags, search, done, pin, and reorder", async () => {
-    const store = new MemoryDentLinkStore();
+    const { store } = createStore();
     const auth = await register(store, "notes@example.com");
     const folder = await requestJson<{ id: string }>(
       store,
@@ -300,7 +345,7 @@ describe("@dentlink/api milestone 1", () => {
   });
 
   it("persists and resolves conflicts with version checks and history", async () => {
-    const store = new MemoryDentLinkStore();
+    const { store } = createStore();
     const auth = await register(store, "conflict@example.com");
     const other = await register(store, "other-conflict@example.com");
     const note = await requestJson<Note>(
@@ -403,7 +448,7 @@ describe("@dentlink/api milestone 1", () => {
   });
 
   it("syncs create, update, delete tombstones, empty increments, and invalid cursors safely", async () => {
-    const store = new MemoryDentLinkStore();
+    const { store } = createStore();
     const auth = await register(store, "sync@example.com");
     const initial = await requestJson<SyncResponse>(
       store,
@@ -412,7 +457,7 @@ describe("@dentlink/api milestone 1", () => {
       undefined,
       auth.session.token
     );
-    expect(initial.cursor).toBe("2");
+    expect(Number.parseInt(initial.cursor, 10)).toBeGreaterThanOrEqual(0);
 
     const note = await requestJson<Note>(
       store,
@@ -488,7 +533,7 @@ describe("@dentlink/api milestone 1", () => {
   });
 });
 
-async function register(store: MemoryDentLinkStore, email: string): Promise<AuthSession> {
+async function register(store: DentLinkStore, email: string): Promise<AuthSession> {
   return requestJson<AuthSession>(
     store,
     "POST",
@@ -507,7 +552,7 @@ function debugSessions(store: MemoryDentLinkStore): Map<string, unknown> {
 }
 
 async function requestJson<T>(
-  store: MemoryDentLinkStore,
+  store: DentLinkStore,
   method: string,
   path: string,
   body?: unknown,

@@ -1,3 +1,4 @@
+import { D1DentLinkStore, type D1DatabaseLike } from "./d1-storage";
 import { generateSessionToken, hashPassword, hashSessionToken, verifyPassword } from "./auth";
 import { MemoryDentLinkStore, StoreError, type DentLinkStore } from "./storage";
 import {
@@ -17,12 +18,13 @@ import type { AuthSession, NoteConflict } from "@dentlink/item-model";
 
 export type ApiEnv = {
   store?: DentLinkStore;
+  DB?: D1DatabaseLike;
 };
 
 const defaultStore = new MemoryDentLinkStore();
 
 export async function handleApiRequest(request: Request, env: ApiEnv = {}): Promise<Response> {
-  const store = env.store ?? defaultStore;
+  const store = env.store ?? (env.DB ? new D1DentLinkStore(env.DB) : defaultStore);
   const url = new URL(request.url);
   const path = url.pathname;
   const method = request.method.toUpperCase();
@@ -32,9 +34,9 @@ export async function handleApiRequest(request: Request, env: ApiEnv = {}): Prom
     if (method === "POST" && path === "/v1/auth/register") {
       const credentials = parseCredentials(await readJson(request));
       const password = await hashPassword(credentials.password);
-      const user = store.createUser({ email: credentials.email, password });
+      const user = await store.createUser({ email: credentials.email, password });
       const token = generateSessionToken();
-      const session = store.createSession(
+      const session = await store.createSession(
         user.id,
         await hashSessionToken(token),
         now,
@@ -51,12 +53,12 @@ export async function handleApiRequest(request: Request, env: ApiEnv = {}): Prom
 
     if (method === "POST" && path === "/v1/auth/login") {
       const credentials = parseCredentials(await readJson(request));
-      const user = store.findUserByEmail(credentials.email);
+      const user = await store.findUserByEmail(credentials.email);
       if (!user || !(await verifyPassword(credentials.password, user.password))) {
         return error("invalid_credentials", "Email or password is incorrect", 401);
       }
       const token = generateSessionToken();
-      const session = store.createSession(
+      const session = await store.createSession(
         user.id,
         await hashSessionToken(token),
         now,
@@ -70,20 +72,20 @@ export async function handleApiRequest(request: Request, env: ApiEnv = {}): Prom
 
     const token = bearerToken(request);
     const tokenHash = token ? await hashSessionToken(token) : null;
-    const auth = tokenHash ? store.findSessionByTokenHash(tokenHash, now) : null;
+    const auth = tokenHash ? await store.findSessionByTokenHash(tokenHash, now) : null;
     if (method === "GET" && path === "/v1/auth/session") {
       if (!auth) return error("unauthorized", "Authentication required", 401);
       return json(auth);
     }
     if (method === "POST" && path === "/v1/auth/logout") {
-      if (tokenHash) store.deleteSessionByTokenHash(tokenHash);
+      if (tokenHash) await store.deleteSessionByTokenHash(tokenHash);
       return json({ ok: true });
     }
     if (!auth) return error("unauthorized", "Authentication required", 401);
 
     if (method === "GET" && path === "/v1/notes") {
       return json(
-        store.listNotes(auth.user.id, {
+        await store.listNotes(auth.user.id, {
           search: parseSearch(url.searchParams.get("search")),
           folderId: url.searchParams.get("folderId") ?? undefined,
           tagIds: url.searchParams.getAll("tagId")
@@ -92,13 +94,13 @@ export async function handleApiRequest(request: Request, env: ApiEnv = {}): Prom
     }
     if (method === "POST" && path === "/v1/notes") {
       return json(
-        store.createNote(auth.user.id, parseNoteInput(await readJson(request)), now),
+        await store.createNote(auth.user.id, parseNoteInput(await readJson(request)), now),
         201
       );
     }
     if (method === "POST" && path === "/v1/notes/reorder") {
       return noteResult(
-        store.reorderNotes(auth.user.id, parseReorder(await readJson(request)), now)
+        await store.reorderNotes(auth.user.id, parseReorder(await readJson(request)), now)
       );
     }
 
@@ -106,12 +108,12 @@ export async function handleApiRequest(request: Request, env: ApiEnv = {}): Prom
     if (noteMatch && method === "PATCH") {
       const { expectedVersion, patch } = parseNotePatch(await readJson(request));
       return noteResult(
-        store.updateNote(auth.user.id, noteMatch[1] ?? "", expectedVersion, patch, now)
+        await store.updateNote(auth.user.id, noteMatch[1] ?? "", expectedVersion, patch, now)
       );
     }
     if (noteMatch && method === "DELETE") {
       return noteResult(
-        store.deleteNote(
+        await store.deleteNote(
           auth.user.id,
           noteMatch[1] ?? "",
           parseExpectedVersion(await readJson(request)),
@@ -121,25 +123,31 @@ export async function handleApiRequest(request: Request, env: ApiEnv = {}): Prom
     }
 
     if (method === "POST" && path === "/v1/folders") {
-      return json(store.createFolder(auth.user.id, parseName(await readJson(request)), now), 201);
+      return json(
+        await store.createFolder(auth.user.id, parseName(await readJson(request)), now),
+        201
+      );
     }
     if (method === "POST" && path === "/v1/tags") {
-      return json(store.createTag(auth.user.id, parseName(await readJson(request)), now), 201);
+      return json(
+        await store.createTag(auth.user.id, parseName(await readJson(request)), now),
+        201
+      );
     }
     if (method === "GET" && path === "/v1/sync") {
-      return json(store.sync(auth.user.id, parseCursor(url.searchParams.get("cursor"))));
+      return json(await store.sync(auth.user.id, parseCursor(url.searchParams.get("cursor"))));
     }
     const historyMatch = path.match(/^\/v1\/notes\/([^/]+)\/history$/);
     if (historyMatch && method === "GET") {
-      return json({ history: store.listHistory(auth.user.id, historyMatch[1] ?? "") });
+      return json({ history: await store.listHistory(auth.user.id, historyMatch[1] ?? "") });
     }
     if (method === "GET" && path === "/v1/conflicts") {
-      return json(store.listConflicts(auth.user.id).map((conflict) => ({ conflict })));
+      return json((await store.listConflicts(auth.user.id)).map((conflict) => ({ conflict })));
     }
     const conflictMatch = path.match(/^\/v1\/conflicts\/([^/]+)\/resolve$/);
     if (conflictMatch && method === "POST") {
       const body = parseConflictResolution(await readJson(request));
-      const conflict = store.resolveConflict(
+      const conflict = await store.resolveConflict(
         auth.user.id,
         conflictMatch[1] ?? "",
         body.expectedVersion,
@@ -166,6 +174,12 @@ export const apiAppBoundary = {
   name: "@dentlink/api",
   responsibility: "Backend API and ingestion boundary"
 } as const;
+
+export default {
+  fetch(request: Request, env: ApiEnv): Promise<Response> {
+    return handleApiRequest(request, env);
+  }
+};
 
 function noteResult(value: unknown): Response {
   if (isConflict(value)) return json({ conflict: value }, 409);

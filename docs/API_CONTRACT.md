@@ -89,3 +89,6 @@ resolution determines user identity.
 Delete operations are soft deletes in the notes table and emit sync tombstones. Conflict responses
 use HTTP `409`; typed clients surface these as explicit conflict errors rather than silently
 overwriting local state.
+
+Milestone 1.1 keeps these endpoint shapes unchanged while adding a Cloudflare D1 storage adapter.
+Clients should not observe different API behavior between the in-memory adapter and D1 adapter.

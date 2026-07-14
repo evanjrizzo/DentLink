@@ -71,7 +71,7 @@ Editable records keep revisions with editor metadata and version numbers. Mutati
 
 Summaries, normalized metadata, history, and user-created notes persist until deletion. Raw email body cache is limited, initially 7 to 30 days. Attachments are not downloaded by default.
 
-## Milestone 1 D1 schema
+## Milestone 1.1 D1 schema
 
 `migrations/0001_auth_notes.sql` creates the first durable schema:
 
@@ -86,6 +86,12 @@ Summaries, normalized metadata, history, and user-created notes persist until de
 - `sync_changes`: deterministic cursor-based changes for notes, folders, tags, conflicts, and delete tombstones.
 
 Every table containing user data includes `user_id` directly or through a user-scoped parent record.
+The production storage adapter uses this schema through Cloudflare D1 and the same storage contract
+as the in-memory adapter.
 
 Milestone 1 sync cursors are numeric change-log positions. Clients should treat them as opaque and
 send back only the cursor returned by the API.
+
+Versioned D1 note mutations use SQL affected-row checks with `id`, `user_id`, and `version`
+conditions. Failed checks create persisted conflict records instead of performing unconditional
+updates.

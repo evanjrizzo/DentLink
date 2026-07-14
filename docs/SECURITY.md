@@ -11,6 +11,7 @@ Priorities: cross-user exposure, stolen credentials, session theft, webhook abus
 - Apply authorization checks before loading or mutating user-owned records.
 - Milestone 1 uses bearer session tokens resolved server-side before Notes, folder, tag, sync, or conflict access.
 - Raw session tokens are returned only at registration/login. Server storage keeps a SHA-256 token hash.
+- Milestone 1.1 validates the same identity and user-isolation rules against the Cloudflare D1 storage adapter.
 
 ## Passwords
 
@@ -24,6 +25,7 @@ Priorities: cross-user exposure, stolen credentials, session theft, webhook abus
 - Session tokens expire after 30 days in Milestone 1.
 - Logout removes the server-side session hash, so the prior bearer token cannot be reused.
 - `GET /v1/auth/session` confirms identity without echoing the raw bearer token.
+- The D1 adapter stores only token hashes in `sessions.token_hash`; raw bearer tokens are not persisted.
 
 ## Credentials and secrets
 

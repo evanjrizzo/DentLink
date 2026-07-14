@@ -26,50 +26,55 @@ export type CreateUserRecord = {
 };
 
 export interface DentLinkStore {
-  createUser(input: CreateUserRecord): User;
-  findUserByEmail(email: string): (User & { password: PasswordRecord }) | null;
-  createSession(userId: EntityId, tokenHash: string, now: string, expiresAt: string): Session;
-  findSessionByTokenHash(tokenHash: string, now: string): CurrentSession | null;
-  deleteSessionByTokenHash(tokenHash: string): void;
+  createUser(input: CreateUserRecord): Promise<User>;
+  findUserByEmail(email: string): Promise<(User & { password: PasswordRecord }) | null>;
+  createSession(
+    userId: EntityId,
+    tokenHash: string,
+    now: string,
+    expiresAt: string
+  ): Promise<Session>;
+  findSessionByTokenHash(tokenHash: string, now: string): Promise<CurrentSession | null>;
+  deleteSessionByTokenHash(tokenHash: string): Promise<void>;
   listNotes(
     userId: EntityId,
     query: { search?: string; folderId?: string; tagIds?: string[] }
-  ): {
+  ): Promise<{
     notes: Note[];
     folders: Folder[];
     tags: Tag[];
-  };
-  createNote(userId: EntityId, input: NoteInput, now: string): Note;
+  }>;
+  createNote(userId: EntityId, input: NoteInput, now: string): Promise<Note>;
   updateNote(
     userId: EntityId,
     noteId: EntityId,
     expectedVersion: number,
     patch: NotePatch,
     now: string
-  ): Note | NoteConflict;
+  ): Promise<Note | NoteConflict>;
   deleteNote(
     userId: EntityId,
     noteId: EntityId,
     expectedVersion: number,
     now: string
-  ): Note | NoteConflict;
+  ): Promise<Note | NoteConflict>;
   reorderNotes(
     userId: EntityId,
     noteOrders: Array<{ id: EntityId; expectedVersion: number; globalOrder: number }>,
     now: string
-  ): Note[] | NoteConflict;
-  createFolder(userId: EntityId, name: string, now: string): Folder;
-  createTag(userId: EntityId, name: string, now: string): Tag;
-  listConflicts(userId: EntityId): NoteConflict[];
+  ): Promise<Note[] | NoteConflict>;
+  createFolder(userId: EntityId, name: string, now: string): Promise<Folder>;
+  createTag(userId: EntityId, name: string, now: string): Promise<Tag>;
+  listConflicts(userId: EntityId): Promise<NoteConflict[]>;
   resolveConflict(
     userId: EntityId,
     conflictId: EntityId,
     expectedVersion: number,
     resolution: ConflictResolution,
     now: string
-  ): NoteConflict | null;
-  sync(userId: EntityId, cursor: string): { cursor: string; changes: SyncChange[] };
-  listHistory(userId: EntityId, noteId: EntityId): NoteHistoryEvent[];
+  ): Promise<NoteConflict | null>;
+  sync(userId: EntityId, cursor: string): Promise<{ cursor: string; changes: SyncChange[] }>;
+  listHistory(userId: EntityId, noteId: EntityId): Promise<NoteHistoryEvent[]>;
 }
 
 export class MemoryDentLinkStore implements DentLinkStore {
@@ -85,7 +90,7 @@ export class MemoryDentLinkStore implements DentLinkStore {
   private changes: SyncChange[] = [];
   private sequence = 0;
 
-  createUser(input: CreateUserRecord): User {
+  async createUser(input: CreateUserRecord): Promise<User> {
     const email = normalizeEmail(input.email);
     if (this.usersByEmail.has(email)) {
       throw new StoreError("email_exists", "A user with that email already exists");
@@ -101,19 +106,24 @@ export class MemoryDentLinkStore implements DentLinkStore {
     return publicUser(user);
   }
 
-  findUserByEmail(email: string): (User & { password: PasswordRecord }) | null {
+  async findUserByEmail(email: string): Promise<(User & { password: PasswordRecord }) | null> {
     const id = this.usersByEmail.get(normalizeEmail(email));
     const user = id ? this.users.get(id) : undefined;
     return user ? { ...user, password: { ...user.password } } : null;
   }
 
-  createSession(userId: EntityId, tokenHash: string, now: string, expiresAt: string): Session {
+  async createSession(
+    userId: EntityId,
+    tokenHash: string,
+    now: string,
+    expiresAt: string
+  ): Promise<Session> {
     const session: Session = { id: this.nextId("session"), userId, createdAt: now, expiresAt };
     this.sessions.set(tokenHash, session);
     return { ...session };
   }
 
-  findSessionByTokenHash(tokenHash: string, now: string): CurrentSession | null {
+  async findSessionByTokenHash(tokenHash: string, now: string): Promise<CurrentSession | null> {
     const session = this.sessions.get(tokenHash);
     if (!session || session.expiresAt <= now) return null;
     const user = this.users.get(session.userId);
@@ -124,11 +134,14 @@ export class MemoryDentLinkStore implements DentLinkStore {
     };
   }
 
-  deleteSessionByTokenHash(tokenHash: string): void {
+  async deleteSessionByTokenHash(tokenHash: string): Promise<void> {
     this.sessions.delete(tokenHash);
   }
 
-  listNotes(userId: EntityId, query: { search?: string; folderId?: string; tagIds?: string[] }) {
+  async listNotes(
+    userId: EntityId,
+    query: { search?: string; folderId?: string; tagIds?: string[] }
+  ): Promise<{ notes: Note[]; folders: Folder[]; tags: Tag[] }> {
     const search = query.search?.trim().toLowerCase();
     const tagFilter = new Set(query.tagIds ?? []);
     const notes = [...this.notes.values()]
@@ -154,7 +167,7 @@ export class MemoryDentLinkStore implements DentLinkStore {
     };
   }
 
-  createNote(userId: EntityId, input: NoteInput, now: string): Note {
+  async createNote(userId: EntityId, input: NoteInput, now: string): Promise<Note> {
     const note: Note = {
       id: this.nextId("note"),
       userId,
@@ -183,13 +196,13 @@ export class MemoryDentLinkStore implements DentLinkStore {
     return stored;
   }
 
-  updateNote(
+  async updateNote(
     userId: EntityId,
     noteId: EntityId,
     expectedVersion: number,
     patch: NotePatch,
     now: string
-  ): Note | NoteConflict {
+  ): Promise<Note | NoteConflict> {
     const existing = this.requireNote(userId, noteId);
     if (existing.version !== expectedVersion) {
       return this.createConflict(userId, existing, expectedVersion, patch, now);
@@ -224,20 +237,20 @@ export class MemoryDentLinkStore implements DentLinkStore {
     return stored;
   }
 
-  deleteNote(
+  async deleteNote(
     userId: EntityId,
     noteId: EntityId,
     expectedVersion: number,
     now: string
-  ): Note | NoteConflict {
+  ): Promise<Note | NoteConflict> {
     return this.updateNote(userId, noteId, expectedVersion, { status: "deleted" }, now);
   }
 
-  reorderNotes(
+  async reorderNotes(
     userId: EntityId,
     noteOrders: Array<{ id: EntityId; expectedVersion: number; globalOrder: number }>,
     now: string
-  ): Note[] | NoteConflict {
+  ): Promise<Note[] | NoteConflict> {
     const updated: Note[] = [];
     for (const order of noteOrders) {
       const note = this.requireNote(userId, order.id);
@@ -268,7 +281,7 @@ export class MemoryDentLinkStore implements DentLinkStore {
     return updated.sort(compareNotes);
   }
 
-  createFolder(userId: EntityId, name: string, now: string): Folder {
+  async createFolder(userId: EntityId, name: string, now: string): Promise<Folder> {
     const folder = {
       id: this.nextId("folder"),
       userId,
@@ -281,7 +294,7 @@ export class MemoryDentLinkStore implements DentLinkStore {
     return { ...folder };
   }
 
-  createTag(userId: EntityId, name: string, now: string): Tag {
+  async createTag(userId: EntityId, name: string, now: string): Promise<Tag> {
     const tag = {
       id: this.nextId("tag"),
       userId,
@@ -294,19 +307,19 @@ export class MemoryDentLinkStore implements DentLinkStore {
     return { ...tag };
   }
 
-  listConflicts(userId: EntityId): NoteConflict[] {
+  async listConflicts(userId: EntityId): Promise<NoteConflict[]> {
     return [...this.conflicts.values()].filter(
       (conflict) => conflict.userId === userId && conflict.status === "open"
     );
   }
 
-  resolveConflict(
+  async resolveConflict(
     userId: EntityId,
     conflictId: EntityId,
     expectedVersion: number,
     resolution: ConflictResolution,
     now: string
-  ): NoteConflict | null {
+  ): Promise<NoteConflict | null> {
     const conflict = this.conflicts.get(conflictId);
     if (!conflict || conflict.userId !== userId) return null;
     if (conflict.version !== expectedVersion) {
@@ -325,7 +338,7 @@ export class MemoryDentLinkStore implements DentLinkStore {
     return resolved;
   }
 
-  sync(userId: EntityId, cursor: string): { cursor: string; changes: SyncChange[] } {
+  async sync(userId: EntityId, cursor: string): Promise<{ cursor: string; changes: SyncChange[] }> {
     const since = Number.parseInt(cursor, 10);
     if (!/^\d+$/.test(cursor) || !Number.isSafeInteger(since)) {
       throw new StoreError("invalid_cursor", "Sync cursor is invalid");
@@ -338,7 +351,7 @@ export class MemoryDentLinkStore implements DentLinkStore {
     };
   }
 
-  listHistory(userId: EntityId, noteId: EntityId): NoteHistoryEvent[] {
+  async listHistory(userId: EntityId, noteId: EntityId): Promise<NoteHistoryEvent[]> {
     return this.history.filter((event) => event.userId === userId && event.noteId === noteId);
   }
 

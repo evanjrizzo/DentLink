@@ -1,0 +1,895 @@
+import {
+  StoreError,
+  type CreateUserRecord,
+  type DentLinkStore,
+  type PasswordRecord
+} from "./storage";
+
+import type {
+  ConflictResolution,
+  CurrentSession,
+  EntityId,
+  Folder,
+  Note,
+  NoteConflict,
+  NoteHistoryEvent,
+  NoteInput,
+  NotePatch,
+  Session,
+  SyncChange,
+  Tag,
+  User
+} from "@dentlink/item-model";
+
+type Primitive = string | number | null;
+type SyncPayload =
+  | Omit<Extract<SyncChange, { type: "note"; op: "upsert" }>, "cursor">
+  | Omit<Extract<SyncChange, { type: "note"; op: "delete" }>, "cursor">
+  | Omit<Extract<SyncChange, { type: "folder" }>, "cursor">
+  | Omit<Extract<SyncChange, { type: "tag" }>, "cursor">
+  | Omit<Extract<SyncChange, { type: "conflict" }>, "cursor">;
+
+export type D1Result<T = unknown> = {
+  results?: T[];
+  success?: boolean;
+  meta?: { changes?: number; last_row_id?: number };
+};
+
+export type D1PreparedStatement = {
+  bind(...values: Primitive[]): D1PreparedStatement;
+  first<T = unknown>(): Promise<T | null>;
+  all<T = unknown>(): Promise<D1Result<T>>;
+  run<T = unknown>(): Promise<D1Result<T>>;
+};
+
+export type D1DatabaseLike = {
+  prepare(sql: string): D1PreparedStatement;
+  batch?<T = unknown>(statements: D1PreparedStatement[]): Promise<Array<D1Result<T>>>;
+};
+
+type UserRow = {
+  id: string;
+  email: string;
+  password_hash: string;
+  password_salt: string;
+  password_iterations: number;
+  created_at: string;
+};
+
+type SessionRow = {
+  id: string;
+  user_id: string;
+  expires_at: string;
+  created_at: string;
+};
+
+type FolderRow = {
+  id: string;
+  user_id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type TagRow = FolderRow;
+
+type NoteRow = {
+  id: string;
+  user_id: string;
+  kind: "task" | "reference";
+  title: string;
+  body: string;
+  folder_id: string | null;
+  due_at: string | null;
+  priority: "none" | "low" | "medium" | "high";
+  pinned: number;
+  status: "active" | "done" | "deleted";
+  global_order: number;
+  source_url: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+};
+
+type ConflictRow = {
+  id: string;
+  user_id: string;
+  note_id: string;
+  expected_version: number;
+  actual_version: number;
+  attempted_patch_json: string;
+  server_note_json: string;
+  status: "open" | "resolved";
+  version: number;
+  resolution: ConflictResolution | null;
+  created_at: string;
+  resolved_at: string | null;
+};
+
+type HistoryRow = {
+  id: string;
+  user_id: string;
+  note_id: string;
+  action: NoteHistoryEvent["action"];
+  version: number;
+  snapshot_json: string;
+  created_at: string;
+};
+
+type SyncRow = {
+  cursor: number;
+  payload_json: string;
+};
+
+export class D1DentLinkStore implements DentLinkStore {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async createUser(input: CreateUserRecord): Promise<User> {
+    const user = {
+      id: nextId("user"),
+      email: normalizeEmail(input.email),
+      createdAt: new Date().toISOString()
+    };
+    try {
+      await this.db
+        .prepare(
+          `INSERT INTO users (id, email, password_hash, password_salt, password_iterations, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          user.id,
+          user.email,
+          input.password.hash,
+          input.password.salt,
+          input.password.iterations,
+          user.createdAt
+        )
+        .run();
+    } catch (error) {
+      throw mapConstraintError(error, "email_exists", "A user with that email already exists");
+    }
+    return user;
+  }
+
+  async findUserByEmail(email: string): Promise<(User & { password: PasswordRecord }) | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT id, email, password_hash, password_salt, password_iterations, created_at
+         FROM users
+         WHERE email = ?`
+      )
+      .bind(normalizeEmail(email))
+      .first<UserRow>();
+    if (!row) return null;
+    return {
+      id: row.id,
+      email: row.email,
+      createdAt: row.created_at,
+      password: {
+        hash: row.password_hash,
+        salt: row.password_salt,
+        iterations: row.password_iterations
+      }
+    };
+  }
+
+  async createSession(
+    userId: EntityId,
+    tokenHash: string,
+    now: string,
+    expiresAt: string
+  ): Promise<Session> {
+    const session = { id: nextId("session"), userId, createdAt: now, expiresAt };
+    await this.db
+      .prepare(
+        `INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .bind(session.id, userId, tokenHash, expiresAt, now)
+      .run();
+    return session;
+  }
+
+  async findSessionByTokenHash(tokenHash: string, now: string): Promise<CurrentSession | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT s.id, s.user_id, s.expires_at, s.created_at,
+                u.email, u.created_at AS user_created_at
+         FROM sessions s
+         JOIN users u ON u.id = s.user_id
+         WHERE s.token_hash = ?
+           AND s.expires_at > ?
+           AND s.revoked_at IS NULL`
+      )
+      .bind(tokenHash, now)
+      .first<SessionRow & { email: string; user_created_at: string }>();
+    if (!row) return null;
+    return {
+      user: { id: row.user_id, email: row.email, createdAt: row.user_created_at },
+      session: { expiresAt: row.expires_at }
+    };
+  }
+
+  async deleteSessionByTokenHash(tokenHash: string): Promise<void> {
+    await this.db.prepare(`DELETE FROM sessions WHERE token_hash = ?`).bind(tokenHash).run();
+  }
+
+  async listNotes(
+    userId: EntityId,
+    query: { search?: string; folderId?: string; tagIds?: string[] }
+  ): Promise<{ notes: Note[]; folders: Folder[]; tags: Tag[] }> {
+    const where = ["user_id = ?", "status != 'deleted'"];
+    const values: Primitive[] = [userId];
+    if (query.folderId) {
+      where.push("folder_id = ?");
+      values.push(query.folderId);
+    }
+    if (query.search) {
+      where.push("(lower(title) LIKE ? OR lower(body) LIKE ?)");
+      const search = `%${query.search.toLowerCase()}%`;
+      values.push(search, search);
+    }
+    for (const tagId of query.tagIds ?? []) {
+      where.push(
+        `EXISTS (
+          SELECT 1 FROM note_tags nt
+          WHERE nt.note_id = notes.id
+            AND nt.user_id = notes.user_id
+            AND nt.tag_id = ?
+        )`
+      );
+      values.push(tagId);
+    }
+    const notes = await this.noteRows(
+      `SELECT * FROM notes WHERE ${where.join(" AND ")}
+       ORDER BY pinned DESC, global_order ASC, updated_at ASC`,
+      values
+    );
+    const folders = await this.all<FolderRow>(
+      `SELECT * FROM folders WHERE user_id = ? ORDER BY name ASC`,
+      [userId]
+    );
+    const tags = await this.all<TagRow>(`SELECT * FROM tags WHERE user_id = ? ORDER BY name ASC`, [
+      userId
+    ]);
+    return {
+      notes,
+      folders: folders.map(folderFromRow),
+      tags: tags.map(tagFromRow)
+    };
+  }
+
+  async createNote(userId: EntityId, input: NoteInput, now: string): Promise<Note> {
+    await this.assertFolder(userId, input.folderId ?? null);
+    const tagIds = input.tagIds ?? [];
+    await this.assertTags(userId, tagIds);
+    const note = await this.toStoredNote(
+      {
+        id: nextId("note"),
+        userId,
+        kind: input.kind,
+        title: input.title.trim(),
+        body: input.body?.trim() ?? "",
+        folderId: input.folderId ?? null,
+        tags: [],
+        dueAt: input.dueAt ?? null,
+        priority: input.priority ?? "none",
+        pinned: input.pinned ?? false,
+        status: "active",
+        globalOrder: await this.nextOrder(userId),
+        sourceUrl: input.sourceUrl ?? null,
+        version: 1,
+        createdAt: now,
+        updatedAt: now,
+        completedAt: null
+      },
+      tagIds
+    );
+    const statements = [
+      this.db
+        .prepare(
+          `INSERT INTO notes
+           (id, user_id, kind, title, body, folder_id, due_at, priority, pinned, status,
+            global_order, source_url, version, created_at, updated_at, completed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          note.id,
+          note.userId,
+          note.kind,
+          note.title,
+          note.body,
+          note.folderId,
+          note.dueAt,
+          note.priority,
+          bool(note.pinned),
+          note.status,
+          note.globalOrder,
+          note.sourceUrl,
+          note.version,
+          note.createdAt,
+          note.updatedAt,
+          note.completedAt
+        ),
+      ...tagIds.map((tagId) =>
+        this.db
+          .prepare(`INSERT INTO note_tags (note_id, tag_id, user_id) VALUES (?, ?, ?)`)
+          .bind(note.id, tagId, userId)
+      ),
+      this.historyStatement(userId, note, "created", now),
+      this.changeStatement(userId, "note", note.id, "upsert", { type: "note", op: "upsert", note })
+    ];
+    await this.batch(statements);
+    return note;
+  }
+
+  async updateNote(
+    userId: EntityId,
+    noteId: EntityId,
+    expectedVersion: number,
+    patch: NotePatch,
+    now: string
+  ): Promise<Note | NoteConflict> {
+    const existing = await this.requireNote(userId, noteId);
+    await this.assertFolder(
+      userId,
+      patch.folderId === undefined ? existing.folderId : patch.folderId
+    );
+    if (patch.tagIds) await this.assertTags(userId, patch.tagIds);
+    const next = await this.toStoredNote(
+      {
+        ...existing,
+        kind: patch.kind ?? existing.kind,
+        title: patch.title === undefined ? existing.title : patch.title.trim(),
+        body: patch.body === undefined ? existing.body : patch.body.trim(),
+        folderId: patch.folderId === undefined ? existing.folderId : patch.folderId,
+        dueAt: patch.dueAt === undefined ? existing.dueAt : patch.dueAt,
+        priority: patch.priority ?? existing.priority,
+        pinned: patch.pinned ?? existing.pinned,
+        status: patch.status ?? existing.status,
+        globalOrder: patch.globalOrder ?? existing.globalOrder,
+        sourceUrl: patch.sourceUrl === undefined ? existing.sourceUrl : patch.sourceUrl,
+        version: existing.version + 1,
+        updatedAt: now,
+        completedAt:
+          patch.status === "done" ? now : patch.status === "active" ? null : existing.completedAt
+      },
+      patch.tagIds ?? existing.tags.map((tag) => tag.id)
+    );
+    const update = await this.db
+      .prepare(
+        `UPDATE notes
+         SET kind = ?, title = ?, body = ?, folder_id = ?, due_at = ?, priority = ?, pinned = ?,
+             status = ?, global_order = ?, source_url = ?, version = ?, updated_at = ?, completed_at = ?
+         WHERE id = ?
+           AND user_id = ?
+           AND status != 'deleted'
+           AND version = ?`
+      )
+      .bind(
+        next.kind,
+        next.title,
+        next.body,
+        next.folderId,
+        next.dueAt,
+        next.priority,
+        bool(next.pinned),
+        next.status,
+        next.globalOrder,
+        next.sourceUrl,
+        next.version,
+        next.updatedAt,
+        next.completedAt,
+        noteId,
+        userId,
+        expectedVersion
+      )
+      .run();
+    if ((update.meta?.changes ?? 0) !== 1) {
+      const current = await this.requireNote(userId, noteId);
+      return this.createConflict(userId, current, expectedVersion, patch, now);
+    }
+    const tagStatements =
+      patch.tagIds === undefined
+        ? []
+        : [
+            this.db
+              .prepare(`DELETE FROM note_tags WHERE note_id = ? AND user_id = ?`)
+              .bind(noteId, userId),
+            ...patch.tagIds.map((tagId) =>
+              this.db
+                .prepare(`INSERT INTO note_tags (note_id, tag_id, user_id) VALUES (?, ?, ?)`)
+                .bind(noteId, tagId, userId)
+            )
+          ];
+    await this.batch([
+      ...tagStatements,
+      this.historyStatement(userId, next, actionForPatch(patch), now),
+      this.changeStatement(
+        userId,
+        "note",
+        next.id,
+        next.status === "deleted" ? "delete" : "upsert",
+        next.status === "deleted"
+          ? { type: "note", op: "delete", id: next.id, userId }
+          : { type: "note", op: "upsert", note: next }
+      )
+    ]);
+    return next;
+  }
+
+  async deleteNote(
+    userId: EntityId,
+    noteId: EntityId,
+    expectedVersion: number,
+    now: string
+  ): Promise<Note | NoteConflict> {
+    return this.updateNote(userId, noteId, expectedVersion, { status: "deleted" }, now);
+  }
+
+  async reorderNotes(
+    userId: EntityId,
+    noteOrders: Array<{ id: EntityId; expectedVersion: number; globalOrder: number }>,
+    now: string
+  ): Promise<Note[] | NoteConflict> {
+    const existing = new Map<string, Note>();
+    for (const order of noteOrders) {
+      existing.set(order.id, await this.requireNote(userId, order.id));
+    }
+    const updates = [];
+    for (const order of noteOrders) {
+      const note = existing.get(order.id);
+      if (!note) throw new StoreError("not_found", "Note not found");
+      if (note.version !== order.expectedVersion) {
+        return this.createConflict(
+          userId,
+          note,
+          order.expectedVersion,
+          { globalOrder: order.globalOrder },
+          now
+        );
+      }
+      updates.push(
+        this.db
+          .prepare(
+            `UPDATE notes
+             SET global_order = ?, version = version + 1, updated_at = ?
+             WHERE id = ?
+               AND user_id = ?
+               AND status != 'deleted'
+               AND version = ?`
+          )
+          .bind(order.globalOrder, now, order.id, userId, order.expectedVersion)
+      );
+    }
+    const results = await this.batch(updates);
+    const failed = results.findIndex((result) => (result.meta?.changes ?? 0) !== 1);
+    if (failed !== -1) {
+      const order = noteOrders[failed];
+      const note = await this.requireNote(userId, order?.id ?? "");
+      return this.createConflict(
+        userId,
+        note,
+        order?.expectedVersion ?? 0,
+        { globalOrder: order?.globalOrder },
+        now
+      );
+    }
+    const notes = [];
+    for (const order of noteOrders) {
+      const note = await this.requireNote(userId, order.id);
+      await this.batch([
+        this.historyStatement(userId, note, "reordered", now),
+        this.changeStatement(userId, "note", note.id, "upsert", {
+          type: "note",
+          op: "upsert",
+          note
+        })
+      ]);
+      notes.push(note);
+    }
+    return notes.sort(compareNotes);
+  }
+
+  async createFolder(userId: EntityId, name: string, now: string): Promise<Folder> {
+    const folder = {
+      id: nextId("folder"),
+      userId,
+      name: name.trim(),
+      createdAt: now,
+      updatedAt: now
+    };
+    await this.batch([
+      this.db
+        .prepare(
+          `INSERT INTO folders (id, user_id, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`
+        )
+        .bind(folder.id, folder.userId, folder.name, folder.createdAt, folder.updatedAt),
+      this.changeStatement(userId, "folder", folder.id, "upsert", {
+        type: "folder",
+        op: "upsert",
+        folder
+      })
+    ]);
+    return folder;
+  }
+
+  async createTag(userId: EntityId, name: string, now: string): Promise<Tag> {
+    const tag = { id: nextId("tag"), userId, name: name.trim(), createdAt: now, updatedAt: now };
+    await this.batch([
+      this.db
+        .prepare(
+          `INSERT INTO tags (id, user_id, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`
+        )
+        .bind(tag.id, tag.userId, tag.name, tag.createdAt, tag.updatedAt),
+      this.changeStatement(userId, "tag", tag.id, "upsert", { type: "tag", op: "upsert", tag })
+    ]);
+    return tag;
+  }
+
+  async listConflicts(userId: EntityId): Promise<NoteConflict[]> {
+    const rows = await this.all<ConflictRow>(
+      `SELECT * FROM note_conflicts WHERE user_id = ? AND status = 'open' ORDER BY created_at ASC`,
+      [userId]
+    );
+    return rows.map(conflictFromRow);
+  }
+
+  async resolveConflict(
+    userId: EntityId,
+    conflictId: EntityId,
+    expectedVersion: number,
+    resolution: ConflictResolution,
+    now: string
+  ): Promise<NoteConflict | null> {
+    const conflict = await this.getConflict(userId, conflictId);
+    if (!conflict) return null;
+    const result = await this.db
+      .prepare(
+        `UPDATE note_conflicts
+         SET status = 'resolved', resolution = ?, resolved_at = ?, version = version + 1
+         WHERE id = ?
+           AND user_id = ?
+           AND version = ?`
+      )
+      .bind(resolution, now, conflictId, userId, expectedVersion)
+      .run();
+    if ((result.meta?.changes ?? 0) !== 1) {
+      throw new StoreError("conflict_version_mismatch", "Conflict was already changed");
+    }
+    const resolved = await this.getConflict(userId, conflictId);
+    if (!resolved) return null;
+    await this.batch([
+      this.historyStatement(userId, resolved.serverNote, "conflict_resolved", now),
+      this.changeStatement(userId, "conflict", resolved.id, "upsert", {
+        type: "conflict",
+        op: "upsert",
+        conflict: resolved
+      })
+    ]);
+    return resolved;
+  }
+
+  async sync(userId: EntityId, cursor: string): Promise<{ cursor: string; changes: SyncChange[] }> {
+    const since = Number.parseInt(cursor, 10);
+    if (!/^\d+$/.test(cursor) || !Number.isSafeInteger(since)) {
+      throw new StoreError("invalid_cursor", "Sync cursor is invalid");
+    }
+    const rows = await this.all<SyncRow>(
+      `SELECT cursor, payload_json
+       FROM sync_changes
+       WHERE user_id = ? AND cursor > ?
+       ORDER BY cursor ASC`,
+      [userId, since]
+    );
+    const latest = await this.db
+      .prepare(`SELECT COALESCE(MAX(cursor), 0) AS cursor FROM sync_changes WHERE user_id = ?`)
+      .bind(userId)
+      .first<{ cursor: number }>();
+    return {
+      cursor: String(latest?.cursor ?? 0),
+      changes: rows.map(
+        (row) => ({ ...JSON.parse(row.payload_json), cursor: String(row.cursor) }) as SyncChange
+      )
+    };
+  }
+
+  async listHistory(userId: EntityId, noteId: EntityId): Promise<NoteHistoryEvent[]> {
+    const rows = await this.all<HistoryRow>(
+      `SELECT * FROM note_history WHERE user_id = ? AND note_id = ? ORDER BY created_at ASC, id ASC`,
+      [userId, noteId]
+    );
+    return rows.map(historyFromRow);
+  }
+
+  private async requireNote(userId: EntityId, noteId: EntityId): Promise<Note> {
+    const notes = await this.noteRows(
+      `SELECT * FROM notes WHERE id = ? AND user_id = ? AND status != 'deleted'`,
+      [noteId, userId]
+    );
+    const note = notes[0];
+    if (!note) throw new StoreError("not_found", "Note not found");
+    return note;
+  }
+
+  private async noteRows(sql: string, values: Primitive[]): Promise<Note[]> {
+    const rows = await this.all<NoteRow>(sql, values);
+    return Promise.all(rows.map((row) => this.noteFromRow(row)));
+  }
+
+  private async noteFromRow(row: NoteRow): Promise<Note> {
+    return this.toStoredNote(noteFromRow(row), await this.tagIdsForNote(row.user_id, row.id));
+  }
+
+  private async toStoredNote(note: Note, tagIds: string[]): Promise<Note> {
+    const tags = tagIds.length === 0 ? [] : await this.tagsByIds(note.userId, tagIds);
+    return { ...note, tags: tags.sort(compareNames) };
+  }
+
+  private async tagIdsForNote(userId: EntityId, noteId: EntityId): Promise<string[]> {
+    const rows = await this.all<{ tag_id: string }>(
+      `SELECT tag_id FROM note_tags WHERE user_id = ? AND note_id = ? ORDER BY tag_id ASC`,
+      [userId, noteId]
+    );
+    return rows.map((row) => row.tag_id);
+  }
+
+  private async tagsByIds(userId: EntityId, tagIds: string[]): Promise<Tag[]> {
+    const tags = [];
+    for (const tagId of tagIds) {
+      const row = await this.db
+        .prepare(`SELECT * FROM tags WHERE user_id = ? AND id = ?`)
+        .bind(userId, tagId)
+        .first<TagRow>();
+      if (row) tags.push(tagFromRow(row));
+    }
+    return tags;
+  }
+
+  private async assertFolder(
+    userId: EntityId,
+    folderId: EntityId | null | undefined
+  ): Promise<void> {
+    if (!folderId) return;
+    const row = await this.db
+      .prepare(`SELECT id FROM folders WHERE user_id = ? AND id = ?`)
+      .bind(userId, folderId)
+      .first<{ id: string }>();
+    if (!row) throw new StoreError("invalid_folder", "Folder not found");
+  }
+
+  private async assertTags(userId: EntityId, tagIds: EntityId[]): Promise<void> {
+    for (const tagId of tagIds) {
+      const row = await this.db
+        .prepare(`SELECT id FROM tags WHERE user_id = ? AND id = ?`)
+        .bind(userId, tagId)
+        .first<{ id: string }>();
+      if (!row) throw new StoreError("invalid_tag", "Tag not found");
+    }
+  }
+
+  private async nextOrder(userId: EntityId): Promise<number> {
+    const row = await this.db
+      .prepare(`SELECT COALESCE(MAX(global_order), 0) AS max_order FROM notes WHERE user_id = ?`)
+      .bind(userId)
+      .first<{ max_order: number }>();
+    return (row?.max_order ?? 0) + 1000;
+  }
+
+  private async createConflict(
+    userId: EntityId,
+    serverNote: Note,
+    expectedVersion: number,
+    attemptedPatch: NotePatch,
+    now: string
+  ): Promise<NoteConflict> {
+    const conflict: NoteConflict = {
+      id: nextId("conflict"),
+      userId,
+      noteId: serverNote.id,
+      expectedVersion,
+      actualVersion: serverNote.version,
+      attemptedPatch,
+      serverNote,
+      status: "open",
+      version: 1,
+      createdAt: now,
+      resolvedAt: null,
+      resolution: null
+    };
+    await this.batch([
+      this.db
+        .prepare(
+          `INSERT INTO note_conflicts
+           (id, user_id, note_id, expected_version, actual_version, attempted_patch_json,
+            server_note_json, status, version, resolution, created_at, resolved_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          conflict.id,
+          userId,
+          serverNote.id,
+          expectedVersion,
+          serverNote.version,
+          JSON.stringify(attemptedPatch),
+          JSON.stringify(serverNote),
+          conflict.status,
+          conflict.version,
+          conflict.resolution,
+          conflict.createdAt,
+          conflict.resolvedAt
+        ),
+      this.historyStatement(userId, serverNote, "conflict_created", now),
+      this.changeStatement(userId, "conflict", conflict.id, "upsert", {
+        type: "conflict",
+        op: "upsert",
+        conflict
+      })
+    ]);
+    return conflict;
+  }
+
+  private async getConflict(userId: EntityId, conflictId: EntityId): Promise<NoteConflict | null> {
+    const row = await this.db
+      .prepare(`SELECT * FROM note_conflicts WHERE id = ? AND user_id = ?`)
+      .bind(conflictId, userId)
+      .first<ConflictRow>();
+    return row ? conflictFromRow(row) : null;
+  }
+
+  private historyStatement(
+    userId: EntityId,
+    note: Note,
+    action: NoteHistoryEvent["action"],
+    now: string
+  ): D1PreparedStatement {
+    return this.db
+      .prepare(
+        `INSERT INTO note_history
+         (id, user_id, note_id, action, version, snapshot_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(nextId("history"), userId, note.id, action, note.version, JSON.stringify(note), now);
+  }
+
+  private changeStatement(
+    userId: EntityId,
+    entityType: "note" | "folder" | "tag" | "conflict",
+    entityId: string,
+    operation: "upsert" | "delete",
+    payload: SyncPayload
+  ): D1PreparedStatement {
+    return this.db
+      .prepare(
+        `INSERT INTO sync_changes (user_id, entity_type, entity_id, operation, payload_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .bind(
+        userId,
+        entityType,
+        entityId,
+        operation,
+        JSON.stringify(payload),
+        new Date().toISOString()
+      );
+  }
+
+  private async all<T>(sql: string, values: Primitive[] = []): Promise<T[]> {
+    const result = await this.db
+      .prepare(sql)
+      .bind(...values)
+      .all<T>();
+    return result.results ?? [];
+  }
+
+  private async batch(statements: D1PreparedStatement[]): Promise<Array<D1Result>> {
+    if (statements.length === 0) return [];
+    if (this.db.batch) return this.db.batch(statements);
+    const results = [];
+    for (const statement of statements) results.push(await statement.run());
+    return results;
+  }
+}
+
+function noteFromRow(row: NoteRow): Note {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    kind: row.kind,
+    title: row.title,
+    body: row.body,
+    folderId: row.folder_id,
+    tags: [],
+    dueAt: row.due_at,
+    priority: row.priority,
+    pinned: Boolean(row.pinned),
+    status: row.status,
+    globalOrder: row.global_order,
+    sourceUrl: row.source_url,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at
+  };
+}
+
+function folderFromRow(row: FolderRow): Folder {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    name: row.name,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function tagFromRow(row: TagRow): Tag {
+  return folderFromRow(row);
+}
+
+function historyFromRow(row: HistoryRow): NoteHistoryEvent {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    noteId: row.note_id,
+    action: row.action,
+    version: row.version,
+    snapshot: JSON.parse(row.snapshot_json) as Note,
+    createdAt: row.created_at
+  };
+}
+
+function conflictFromRow(row: ConflictRow): NoteConflict {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    noteId: row.note_id,
+    expectedVersion: row.expected_version,
+    actualVersion: row.actual_version,
+    attemptedPatch: JSON.parse(row.attempted_patch_json) as NotePatch,
+    serverNote: JSON.parse(row.server_note_json) as Note,
+    status: row.status,
+    version: row.version,
+    createdAt: row.created_at,
+    resolvedAt: row.resolved_at,
+    resolution: row.resolution
+  };
+}
+
+function actionForPatch(patch: NotePatch): NoteHistoryEvent["action"] {
+  if (patch.status === "deleted") return "deleted";
+  if (patch.status === "done") return "done";
+  if (patch.status === "active") return "reopened";
+  if (patch.globalOrder !== undefined) return "reordered";
+  return "updated";
+}
+
+function compareNames(left: { name: string }, right: { name: string }): number {
+  return left.name.localeCompare(right.name);
+}
+
+function compareNotes(left: Note, right: Note): number {
+  if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+  return left.globalOrder - right.globalOrder || left.updatedAt.localeCompare(right.updatedAt);
+}
+
+function nextId(prefix: string): string {
+  return `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
+}
+
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function bool(value: boolean): number {
+  return value ? 1 : 0;
+}
+
+function mapConstraintError(error: unknown, code: string, message: string): StoreError {
+  if (error instanceof Error && /constraint|unique/i.test(error.message)) {
+    return new StoreError(code, message);
+  }
+  if (error instanceof StoreError) return error;
+  throw error;
+}
