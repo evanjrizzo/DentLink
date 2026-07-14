@@ -13,6 +13,8 @@ import { MemoryDentLinkStore, type DentLinkStore } from "./storage";
 import type {
   ApiErrorBody,
   AuthSession,
+  ConnectorAccount,
+  ConnectorSourceRecord,
   ConflictResponse,
   Notification,
   Note,
@@ -34,6 +36,10 @@ const schemaPath = resolve(
 const milestone2SchemaPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../migrations/0002_notifications_webhooks.sql"
+);
+const milestone3SchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0003_connector_framework.sql"
 );
 
 type StoreFixture = {
@@ -57,7 +63,7 @@ const fixtures: StoreFixture[] = [
   {
     name: "d1",
     createStore() {
-      const db = new SqliteD1TestDatabase([schemaPath, milestone2SchemaPath]);
+      const db = new SqliteD1TestDatabase([schemaPath, milestone2SchemaPath, milestone3SchemaPath]);
       return {
         store: new D1DentLinkStore(db),
         async hasRawSessionToken(token: string) {
@@ -396,6 +402,175 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       auth.session.token,
       400
     );
+  });
+
+  it("manages provider-neutral connector accounts without provider-specific APIs", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "connector-owner@example.com");
+    const other = await register(store, "connector-other@example.com");
+
+    const catalog = await requestJson<{ connectors: Array<{ key: string; name: string }> }>(
+      store,
+      "GET",
+      "/v1/connectors/catalog",
+      undefined,
+      owner.session.token
+    );
+    expect(catalog.connectors.map((connector) => connector.key)).toEqual([
+      "generic-email",
+      "generic-calendar"
+    ]);
+    expect(JSON.stringify(catalog)).not.toMatch(/gmail|outlook|imap|graph/i);
+
+    const rejected = await requestJson<ApiErrorBody>(
+      store,
+      "POST",
+      "/v1/connectors/accounts",
+      {
+        connectorKey: "gmail",
+        displayName: "Gmail should wait"
+      },
+      owner.session.token,
+      400
+    );
+    expect(rejected.error.code).toBe("unknown_connector");
+
+    const account = await requestJson<ConnectorAccount>(
+      store,
+      "POST",
+      "/v1/connectors/accounts",
+      {
+        connectorKey: "generic-email",
+        displayName: "Personal mail",
+        settings: { label: "Inbox" },
+        credentialRef: "credential_ref_test",
+        credentialStatus: "configured"
+      },
+      owner.session.token,
+      201
+    );
+    expect(account.status).toBe("paused");
+    expect(account.credentialRef).toBe("credential_ref_test");
+    expect(JSON.stringify(account)).not.toMatch(/password|refresh_token|access_token/i);
+
+    const listed = await requestJson<{ accounts: ConnectorAccount[] }>(
+      store,
+      "GET",
+      "/v1/connectors/accounts",
+      undefined,
+      owner.session.token
+    );
+    expect(listed.accounts.map((item) => item.id)).toContain(account.id);
+
+    const otherList = await requestJson<{ accounts: ConnectorAccount[] }>(
+      store,
+      "GET",
+      "/v1/connectors/accounts",
+      undefined,
+      other.session.token
+    );
+    expect(otherList.accounts).toEqual([]);
+
+    await requestJson<ApiErrorBody>(
+      store,
+      "PATCH",
+      `/v1/connectors/accounts/${account.id}`,
+      { expectedVersion: account.version, patch: { status: "connected" } },
+      other.session.token,
+      404
+    );
+
+    const updated = await requestJson<ConnectorAccount>(
+      store,
+      "PATCH",
+      `/v1/connectors/accounts/${account.id}`,
+      {
+        expectedVersion: account.version,
+        patch: {
+          status: "connected",
+          healthStatus: "healthy",
+          syncStatus: "idle",
+          syncCursor: "cursor-1",
+          lastSyncAt: "2026-07-14T00:00:00.000Z"
+        }
+      },
+      owner.session.token
+    );
+    expect(updated.status).toBe("connected");
+    expect(updated.version).toBe(account.version + 1);
+
+    await requestJson<ApiErrorBody>(
+      store,
+      "PATCH",
+      `/v1/connectors/accounts/${account.id}`,
+      { expectedVersion: account.version, patch: { status: "paused" } },
+      owner.session.token,
+      409
+    );
+
+    const record = await requestJson<ConnectorSourceRecord>(
+      store,
+      "POST",
+      "/v1/connectors/source-records",
+      {
+        accountId: account.id,
+        sourceExternalId: "provider-record-1",
+        sourceType: "email",
+        payloadHash: "sha256:test",
+        normalizedPayload: {
+          title: "Normalized only",
+          sourceUrl: "https://source.example.test/message/1"
+        }
+      },
+      owner.session.token,
+      201
+    );
+    expect(record.connectorKey).toBe("generic-email");
+    expect(JSON.stringify(record)).not.toMatch(/raw|password|secret|token/i);
+
+    const records = await requestJson<{ records: ConnectorSourceRecord[] }>(
+      store,
+      "GET",
+      `/v1/connectors/accounts/${account.id}/source-records`,
+      undefined,
+      owner.session.token
+    );
+    expect(records.records.map((item) => item.sourceExternalId)).toEqual(["provider-record-1"]);
+
+    const crossRecords = await requestJson<{ records: ConnectorSourceRecord[] }>(
+      store,
+      "GET",
+      `/v1/connectors/accounts/${account.id}/source-records`,
+      undefined,
+      other.session.token
+    );
+    expect(crossRecords.records).toEqual([]);
+
+    const sync = await requestJson<SyncResponse>(
+      store,
+      "GET",
+      "/v1/sync?cursor=0",
+      undefined,
+      owner.session.token
+    );
+    expect(sync.changes.some((change) => change.type === "connector_account")).toBe(true);
+
+    const deleted = await requestJson<ConnectorAccount>(
+      store,
+      "DELETE",
+      `/v1/connectors/accounts/${account.id}`,
+      { expectedVersion: updated.version },
+      owner.session.token
+    );
+    expect(deleted.status).toBe("deleted");
+    const afterDelete = await requestJson<{ accounts: ConnectorAccount[] }>(
+      store,
+      "GET",
+      "/v1/connectors/accounts",
+      undefined,
+      owner.session.token
+    );
+    expect(afterDelete.accounts.map((item) => item.id)).not.toContain(account.id);
   });
 
   it("persists and resolves conflicts with version checks and history", async () => {

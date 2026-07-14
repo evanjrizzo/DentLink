@@ -240,6 +240,100 @@ async function main() {
   );
   record("webhooks");
 
+  const catalog = await request("/v1/connectors/catalog", { headers: auth(tokenA) });
+  assert(
+    catalog.status === 200 &&
+      catalog.json?.connectors?.some((connector) => connector.key === "generic-email") &&
+      !JSON.stringify(catalog.json).match(/gmail|outlook|imap|graph/i),
+    "connector catalog failed",
+    catalog
+  );
+
+  const rejectedProvider = await request("/v1/connectors/accounts", {
+    method: "POST",
+    headers: auth(tokenA),
+    body: { connectorKey: "gmail", displayName: "Should not exist" }
+  });
+  assert(
+    rejectedProvider.status === 400,
+    "provider-specific connector was unexpectedly accepted",
+    rejectedProvider
+  );
+
+  const connectorAccount = await request("/v1/connectors/accounts", {
+    method: "POST",
+    headers: auth(tokenA),
+    body: {
+      connectorKey: "generic-email",
+      displayName: `Smoke connector ${runId}`,
+      settings: { label: "Smoke" },
+      credentialRef: `smoke-credential-${runId}`,
+      credentialStatus: "configured"
+    }
+  });
+  assert(
+    connectorAccount.status === 201 && connectorAccount.json?.id,
+    "connector account create failed",
+    connectorAccount
+  );
+
+  const connectorAccountList = await request("/v1/connectors/accounts", { headers: auth(tokenA) });
+  assert(
+    connectorAccountList.status === 200 &&
+      connectorAccountList.json?.accounts?.some(
+        (account) => account.id === connectorAccount.json.id
+      ),
+    "connector account list failed",
+    connectorAccountList
+  );
+
+  const connectorAccountUpdate = await request(
+    `/v1/connectors/accounts/${connectorAccount.json.id}`,
+    {
+      method: "PATCH",
+      headers: auth(tokenA),
+      body: {
+        expectedVersion: connectorAccount.json.version,
+        patch: { status: "connected", healthStatus: "healthy", syncStatus: "idle" }
+      }
+    }
+  );
+  assert(
+    connectorAccountUpdate.status === 200 &&
+      connectorAccountUpdate.json?.version === connectorAccount.json.version + 1,
+    "connector account update failed",
+    connectorAccountUpdate
+  );
+
+  const sourceRecord = await request("/v1/connectors/source-records", {
+    method: "POST",
+    headers: auth(tokenA),
+    body: {
+      accountId: connectorAccount.json.id,
+      sourceExternalId: `message-${runId}`,
+      sourceType: "email",
+      payloadHash: `sha256:${runId}`,
+      normalizedPayload: { title: `Connector item ${runId}`, sourceUrl: "https://example.invalid" }
+    }
+  });
+  assert(
+    sourceRecord.status === 201 && sourceRecord.json?.id,
+    "connector source record create failed",
+    sourceRecord
+  );
+
+  const sourceRecords = await request(
+    `/v1/connectors/accounts/${connectorAccount.json.id}/source-records`,
+    { headers: auth(tokenA) }
+  );
+  assert(
+    sourceRecords.status === 200 &&
+      sourceRecords.json?.records?.some((record) => record.id === sourceRecord.json.id),
+    "connector source record list failed",
+    sourceRecords
+  );
+  record("connectors");
+
   const conflict = await request(`/v1/notes/${updated.json.id}`, {
     method: "PATCH",
     headers: auth(tokenA),
@@ -317,9 +411,36 @@ async function main() {
     "cross-user webhook update did not return safe not found",
     crossWebhookUpdate
   );
+  const crossConnectorUpdate = await request(
+    `/v1/connectors/accounts/${connectorAccount.json.id}`,
+    {
+      method: "PATCH",
+      headers: auth(tokenB),
+      body: {
+        expectedVersion: connectorAccountUpdate.json.version,
+        patch: { status: "paused" }
+      }
+    }
+  );
+  assert(
+    crossConnectorUpdate.status === 404,
+    "cross-user connector update did not return safe not found",
+    crossConnectorUpdate
+  );
   record("authorization");
 
   const beforeDeleteCursor = sync.json.cursor;
+  const connectorDeleted = await request(`/v1/connectors/accounts/${connectorAccount.json.id}`, {
+    method: "DELETE",
+    headers: auth(tokenA),
+    body: { expectedVersion: connectorAccountUpdate.json.version }
+  });
+  assert(
+    connectorDeleted.status === 200 && connectorDeleted.json?.status === "deleted",
+    "connector account delete failed",
+    connectorDeleted
+  );
+
   const deleted = await request(`/v1/notes/${updated.json.id}`, {
     method: "DELETE",
     headers: auth(tokenA),

@@ -37,6 +37,12 @@ export type NotificationSeverity = "info" | "low" | "medium" | "high";
 export type ConflictStatus = "open" | "resolved";
 export type ConflictResolution = "keep_mine" | "keep_theirs" | "merge" | "keep_both";
 export type WebhookDestination = "notification" | "note";
+export type ConnectorKind = "email" | "calendar" | "notification" | "generic";
+export type ConnectorAccountStatus = "connected" | "paused" | "error" | "deleted";
+export type ConnectorHealthStatus = "unknown" | "healthy" | "degraded" | "error";
+export type ConnectorSyncStatus = "idle" | "syncing" | "error";
+export type ConnectorSourceRecordType = "email" | "calendar_event" | "notification" | "generic";
+export type ConnectorSourceRecordStatus = "pending" | "processed" | "failed";
 
 export type Folder = {
   id: EntityId;
@@ -222,6 +228,83 @@ export type WebhooksList = {
   webhooks: Array<WebhookEndpoint & { ingestUrl: string }>;
 };
 
+export type ConnectorAccount = {
+  id: EntityId;
+  userId: EntityId;
+  connectorKey: string;
+  displayName: string;
+  status: ConnectorAccountStatus;
+  healthStatus: ConnectorHealthStatus;
+  syncStatus: ConnectorSyncStatus;
+  settings: Record<string, string | number | boolean | null>;
+  credentialRef: string | null;
+  credentialStatus: "not_configured" | "configured";
+  syncCursor: string | null;
+  lastSyncAt: IsoDateTime | null;
+  nextSyncAt: IsoDateTime | null;
+  lastHealthAt: IsoDateTime | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  version: number;
+};
+
+export type ConnectorAccountInput = {
+  connectorKey: string;
+  displayName: string;
+  settings?: Record<string, string | number | boolean | null>;
+  credentialRef?: string | null;
+  credentialStatus?: "not_configured" | "configured";
+};
+
+export type ConnectorAccountPatch = Partial<
+  Pick<
+    ConnectorAccount,
+    | "displayName"
+    | "status"
+    | "healthStatus"
+    | "syncStatus"
+    | "settings"
+    | "credentialRef"
+    | "credentialStatus"
+    | "syncCursor"
+    | "lastSyncAt"
+    | "nextSyncAt"
+    | "lastHealthAt"
+    | "errorCode"
+    | "errorMessage"
+  >
+>;
+
+export type ConnectorSourceRecord = {
+  id: EntityId;
+  userId: EntityId;
+  accountId: EntityId;
+  connectorKey: string;
+  sourceExternalId: string;
+  sourceType: ConnectorSourceRecordType;
+  payloadHash: string;
+  normalizedPayload: Record<string, unknown>;
+  status: ConnectorSourceRecordStatus;
+  receivedAt: IsoDateTime;
+  processedAt: IsoDateTime | null;
+  errorMessage: string | null;
+  version: number;
+};
+
+export type ConnectorSourceRecordInput = {
+  accountId: EntityId;
+  sourceExternalId: string;
+  sourceType: ConnectorSourceRecordType;
+  payloadHash: string;
+  normalizedPayload: Record<string, unknown>;
+};
+
+export type ConnectorAccountsList = {
+  accounts: ConnectorAccount[];
+};
+
 export type SyncCursor = string;
 
 export type SyncChange =
@@ -233,6 +316,8 @@ export type SyncChange =
   | { type: "notification"; op: "delete"; id: EntityId; userId: EntityId; cursor: SyncCursor }
   | { type: "webhook"; op: "upsert"; webhook: WebhookEndpoint; cursor: SyncCursor }
   | { type: "webhook"; op: "delete"; id: EntityId; userId: EntityId; cursor: SyncCursor }
+  | { type: "connector_account"; op: "upsert"; account: ConnectorAccount; cursor: SyncCursor }
+  | { type: "connector_account"; op: "delete"; id: EntityId; userId: EntityId; cursor: SyncCursor }
   | { type: "conflict"; op: "upsert"; conflict: NoteConflict; cursor: SyncCursor };
 
 export type SyncResponse = {

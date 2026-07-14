@@ -45,6 +45,11 @@ A connector defines its manifest, authentication method, permissions, settings s
 
 Cloud connectors run in the backend where practical. Local or device-specific integrations run through trusted local agents. The primary Worker must not execute arbitrary third-party connector code.
 
+Milestone 3 implements the framework pieces only: generic connector definitions, account metadata,
+source-record bookkeeping, storage adapters, sync changes, and typed API/client contracts. Real
+provider connectors such as Gmail or calendar providers must plug into this framework in later
+milestones instead of adding special-case API routes or storage paths.
+
 ## Sync architecture
 
 Clients use cursor-based incremental synchronization, optimistic local updates, offline mutation queues, retry, conflict detection, and server reconciliation. Sync responses contain normalized records and enough metadata for clients to update local caches without recalculating authoritative rank.

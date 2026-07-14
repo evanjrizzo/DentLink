@@ -11,8 +11,8 @@ inspected only as behavioral references.
 
 ## Current status
 
-Milestone 2: authentication, manual Notes, named webhook ingestion, and Notifications with a
-Cloudflare preview API and web deployment baseline.
+Milestone 3: authentication, manual Notes, named webhook ingestion, Notifications, and
+provider-neutral connector plumbing with a Cloudflare preview API and web deployment baseline.
 
 This repository contains the pnpm TypeScript workspace, shared package boundaries, a Worker-style
 API handler, Cloudflare D1 storage adapter, D1 migrations for auth, notes, notifications, and
@@ -95,7 +95,9 @@ pnpm validate
 
 The validation command checks formatting, linting, TypeScript, and tests across the workspace. The
 API test suite runs the same storage contract tests against the in-memory adapter and the
-D1-compatible adapter.
+D1-compatible adapter. The Milestone 3 connector framework stores connector account metadata and
+normalized source records, but does not implement Gmail, Google Calendar, Outlook, Microsoft Graph,
+IMAP, AI summaries, mobile, desktop, widgets, or push notifications.
 
 Use Node.js `22.13.1` and pnpm `9.15.4`. Run the API locally against Wrangler's local D1 binding
 with:
@@ -114,10 +116,11 @@ pnpm --filter @dentlink/web dev
 Migration validation can also be run directly with:
 
 ```bash
-sqlite3 /tmp/dentlink_m2_migration_check.db < migrations/0001_auth_notes.sql
-sqlite3 /tmp/dentlink_m2_migration_check.db < migrations/0002_notifications_webhooks.sql
-sqlite3 /tmp/dentlink_m2_migration_check.db "PRAGMA foreign_key_check;"
-sqlite3 /tmp/dentlink_m2_migration_check.db "PRAGMA integrity_check;"
+sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0001_auth_notes.sql
+sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0002_notifications_webhooks.sql
+sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0003_connector_framework.sql
+sqlite3 /tmp/dentlink_m3_migration_check.db "PRAGMA foreign_key_check;"
+sqlite3 /tmp/dentlink_m3_migration_check.db "PRAGMA integrity_check;"
 ```
 
 Deployment, preview, production, smoke-test, and rollback instructions live in `docs/DEPLOYMENT.md`.

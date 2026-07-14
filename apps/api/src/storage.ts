@@ -1,5 +1,10 @@
 import type {
   ConflictResolution,
+  ConnectorAccount,
+  ConnectorAccountInput,
+  ConnectorAccountPatch,
+  ConnectorSourceRecord,
+  ConnectorSourceRecordInput,
   CurrentSession,
   EntityId,
   Folder,
@@ -72,6 +77,34 @@ export interface DentLinkStore {
   ): Promise<Note[] | NoteConflict>;
   createFolder(userId: EntityId, name: string, now: string): Promise<Folder>;
   createTag(userId: EntityId, name: string, now: string): Promise<Tag>;
+  listConnectorAccounts(userId: EntityId): Promise<{ accounts: ConnectorAccount[] }>;
+  createConnectorAccount(
+    userId: EntityId,
+    input: ConnectorAccountInput,
+    now: string
+  ): Promise<ConnectorAccount>;
+  updateConnectorAccount(
+    userId: EntityId,
+    accountId: EntityId,
+    expectedVersion: number,
+    patch: ConnectorAccountPatch,
+    now: string
+  ): Promise<ConnectorAccount | null>;
+  deleteConnectorAccount(
+    userId: EntityId,
+    accountId: EntityId,
+    expectedVersion: number,
+    now: string
+  ): Promise<ConnectorAccount | null>;
+  createConnectorSourceRecord(
+    userId: EntityId,
+    input: ConnectorSourceRecordInput,
+    now: string
+  ): Promise<ConnectorSourceRecord>;
+  listConnectorSourceRecords(
+    userId: EntityId,
+    accountId: EntityId
+  ): Promise<ConnectorSourceRecord[]>;
   listNotifications(userId: EntityId): Promise<{ notifications: Notification[] }>;
   createNotification(
     userId: EntityId,
@@ -135,6 +168,8 @@ export class MemoryDentLinkStore implements DentLinkStore {
   private notes = new Map<EntityId, Note>();
   private folders = new Map<EntityId, Folder>();
   private tags = new Map<EntityId, Tag>();
+  private connectorAccounts = new Map<EntityId, ConnectorAccount>();
+  private connectorSourceRecords = new Map<EntityId, ConnectorSourceRecord>();
   private notifications = new Map<EntityId, Notification>();
   private webhooks = new Map<EntityId, WebhookEndpoint & { secretHash: string }>();
   private webhookDeliveries: Array<{
@@ -366,6 +401,161 @@ export class MemoryDentLinkStore implements DentLinkStore {
     this.tags.set(tag.id, tag);
     this.recordChange({ type: "tag", op: "upsert", tag, cursor: "0" });
     return { ...tag };
+  }
+
+  async listConnectorAccounts(userId: EntityId): Promise<{ accounts: ConnectorAccount[] }> {
+    return {
+      accounts: [...this.connectorAccounts.values()]
+        .filter((account) => account.userId === userId && account.status !== "deleted")
+        .sort(compareConnectorAccounts)
+        .map((account) => ({ ...account, settings: { ...account.settings } }))
+    };
+  }
+
+  async createConnectorAccount(
+    userId: EntityId,
+    input: ConnectorAccountInput,
+    now: string
+  ): Promise<ConnectorAccount> {
+    if (
+      [...this.connectorAccounts.values()].some(
+        (account) =>
+          account.userId === userId &&
+          account.connectorKey === input.connectorKey &&
+          account.displayName === input.displayName.trim() &&
+          account.status !== "deleted"
+      )
+    ) {
+      throw new StoreError("connector_account_exists", "Connector account already exists");
+    }
+    const account: ConnectorAccount = {
+      id: this.nextId("connector"),
+      userId,
+      connectorKey: input.connectorKey,
+      displayName: input.displayName.trim(),
+      status: "paused",
+      healthStatus: "unknown",
+      syncStatus: "idle",
+      settings: input.settings ?? {},
+      credentialRef: input.credentialRef ?? null,
+      credentialStatus: input.credentialStatus ?? "not_configured",
+      syncCursor: null,
+      lastSyncAt: null,
+      nextSyncAt: null,
+      lastHealthAt: null,
+      errorCode: null,
+      errorMessage: null,
+      createdAt: now,
+      updatedAt: now,
+      version: 1
+    };
+    this.connectorAccounts.set(account.id, account);
+    this.recordChange({ type: "connector_account", op: "upsert", account, cursor: "0" });
+    return { ...account, settings: { ...account.settings } };
+  }
+
+  async updateConnectorAccount(
+    userId: EntityId,
+    accountId: EntityId,
+    expectedVersion: number,
+    patch: ConnectorAccountPatch,
+    now: string
+  ): Promise<ConnectorAccount | null> {
+    const existing = this.connectorAccounts.get(accountId);
+    if (!existing || existing.userId !== userId || existing.status === "deleted") return null;
+    if (existing.version !== expectedVersion) {
+      throw new StoreError("version_mismatch", "Connector account changed on the server");
+    }
+    const next: ConnectorAccount = {
+      ...existing,
+      displayName:
+        patch.displayName === undefined ? existing.displayName : patch.displayName.trim(),
+      status: patch.status ?? existing.status,
+      healthStatus: patch.healthStatus ?? existing.healthStatus,
+      syncStatus: patch.syncStatus ?? existing.syncStatus,
+      settings: patch.settings ?? existing.settings,
+      credentialRef:
+        patch.credentialRef === undefined ? existing.credentialRef : patch.credentialRef,
+      credentialStatus: patch.credentialStatus ?? existing.credentialStatus,
+      syncCursor: patch.syncCursor === undefined ? existing.syncCursor : patch.syncCursor,
+      lastSyncAt: patch.lastSyncAt === undefined ? existing.lastSyncAt : patch.lastSyncAt,
+      nextSyncAt: patch.nextSyncAt === undefined ? existing.nextSyncAt : patch.nextSyncAt,
+      lastHealthAt: patch.lastHealthAt === undefined ? existing.lastHealthAt : patch.lastHealthAt,
+      errorCode: patch.errorCode === undefined ? existing.errorCode : patch.errorCode,
+      errorMessage: patch.errorMessage === undefined ? existing.errorMessage : patch.errorMessage,
+      updatedAt: now,
+      version: existing.version + 1
+    };
+    this.connectorAccounts.set(next.id, next);
+    this.recordChange(
+      next.status === "deleted"
+        ? { type: "connector_account", op: "delete", id: next.id, userId, cursor: "0" }
+        : { type: "connector_account", op: "upsert", account: next, cursor: "0" }
+    );
+    return { ...next, settings: { ...next.settings } };
+  }
+
+  async deleteConnectorAccount(
+    userId: EntityId,
+    accountId: EntityId,
+    expectedVersion: number,
+    now: string
+  ): Promise<ConnectorAccount | null> {
+    return this.updateConnectorAccount(
+      userId,
+      accountId,
+      expectedVersion,
+      { status: "deleted", syncStatus: "idle" },
+      now
+    );
+  }
+
+  async createConnectorSourceRecord(
+    userId: EntityId,
+    input: ConnectorSourceRecordInput,
+    now: string
+  ): Promise<ConnectorSourceRecord> {
+    const account = this.connectorAccounts.get(input.accountId);
+    if (!account || account.userId !== userId || account.status === "deleted") {
+      throw new StoreError("not_found", "Connector account not found");
+    }
+    if (
+      [...this.connectorSourceRecords.values()].some(
+        (record) =>
+          record.accountId === input.accountId && record.sourceExternalId === input.sourceExternalId
+      )
+    ) {
+      throw new StoreError("connector_record_exists", "Connector source record already exists");
+    }
+    const record: ConnectorSourceRecord = {
+      id: this.nextId("source"),
+      userId,
+      accountId: input.accountId,
+      connectorKey: account.connectorKey,
+      sourceExternalId: input.sourceExternalId,
+      sourceType: input.sourceType,
+      payloadHash: input.payloadHash,
+      normalizedPayload: input.normalizedPayload,
+      status: "pending",
+      receivedAt: now,
+      processedAt: null,
+      errorMessage: null,
+      version: 1
+    };
+    this.connectorSourceRecords.set(record.id, record);
+    return copyConnectorSourceRecord(record);
+  }
+
+  async listConnectorSourceRecords(
+    userId: EntityId,
+    accountId: EntityId
+  ): Promise<ConnectorSourceRecord[]> {
+    const account = this.connectorAccounts.get(accountId);
+    if (!account || account.userId !== userId || account.status === "deleted") return [];
+    return [...this.connectorSourceRecords.values()]
+      .filter((record) => record.userId === userId && record.accountId === accountId)
+      .sort((left, right) => left.receivedAt.localeCompare(right.receivedAt))
+      .map(copyConnectorSourceRecord);
   }
 
   async listNotifications(userId: EntityId): Promise<{ notifications: Notification[] }> {
@@ -827,6 +1017,10 @@ function compareNotifications(left: Notification, right: Notification): number {
   );
 }
 
+function compareConnectorAccounts(left: ConnectorAccount, right: ConnectorAccount): number {
+  return left.displayName.localeCompare(right.displayName);
+}
+
 function publicWebhook(webhook: WebhookEndpoint & { secretHash?: string }): WebhookEndpoint {
   return {
     id: webhook.id,
@@ -862,6 +1056,20 @@ function changeBelongsTo(change: SyncChange, userId: EntityId): boolean {
   if (change.type === "notification" && change.op === "delete") return change.userId === userId;
   if (change.type === "webhook" && change.op === "upsert") return change.webhook.userId === userId;
   if (change.type === "webhook" && change.op === "delete") return change.userId === userId;
+  if (change.type === "connector_account" && change.op === "upsert")
+    return change.account.userId === userId;
+  if (change.type === "connector_account" && change.op === "delete")
+    return change.userId === userId;
   if (change.type === "conflict") return change.conflict.userId === userId;
   return true;
+}
+
+function copyConnectorSourceRecord(record: ConnectorSourceRecord): ConnectorSourceRecord {
+  return {
+    ...record,
+    normalizedPayload: JSON.parse(JSON.stringify(record.normalizedPayload)) as Record<
+      string,
+      unknown
+    >
+  };
 }

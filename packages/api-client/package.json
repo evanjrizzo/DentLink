@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@dentlink/connector-sdk": "workspace:*",
     "@dentlink/item-model": "workspace:*"
   }
 }

@@ -1,5 +1,8 @@
 import type {
   ConflictResolution,
+  ConnectorAccountInput,
+  ConnectorAccountPatch,
+  ConnectorSourceRecordInput,
   NotificationInput,
   NotificationPatch,
   NotificationSeverity,
@@ -21,6 +24,9 @@ const MAX_SLUG_LENGTH = 80;
 const MAX_TAGS = 20;
 const MAX_URL_LENGTH = 2048;
 const MAX_SEARCH_LENGTH = 200;
+const MAX_CONNECTOR_KEY_LENGTH = 80;
+const MAX_EXTERNAL_ID_LENGTH = 256;
+const MAX_HASH_LENGTH = 128;
 
 export function parseCredentials(value: unknown): { email: string; password: string } {
   const object = asObject(value);
@@ -202,6 +208,93 @@ export function parseWebhookIngest(value: unknown): WebhookIngestInput {
   };
 }
 
+export function parseConnectorAccountInput(value: unknown): ConnectorAccountInput {
+  const object = asObject(value);
+  const connectorKey = boundedString(object.connectorKey, "connectorKey", MAX_CONNECTOR_KEY_LENGTH)
+    .trim()
+    .toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(connectorKey)) {
+    throw new ValidationError("invalid_connector", "Connector key is invalid");
+  }
+  const displayName = boundedString(object.displayName, "displayName", MAX_NAME_LENGTH).trim();
+  if (displayName.length === 0)
+    throw new ValidationError("invalid_name", "Display name is required");
+  return {
+    connectorKey,
+    displayName,
+    settings: parseSettings(object.settings),
+    credentialRef: boundedOptionalNullableString(
+      object.credentialRef,
+      "credentialRef",
+      MAX_NAME_LENGTH
+    ),
+    credentialStatus: parseCredentialStatus(object.credentialStatus)
+  };
+}
+
+export function parseConnectorAccountPatch(value: unknown): {
+  expectedVersion: number;
+  patch: ConnectorAccountPatch;
+} {
+  const object = asObject(value);
+  const patch = asObject(object.patch);
+  return {
+    expectedVersion: asVersion(object.expectedVersion),
+    patch: {
+      displayName:
+        patch.displayName === undefined
+          ? undefined
+          : boundedString(patch.displayName, "displayName", MAX_NAME_LENGTH).trim(),
+      status: parseConnectorAccountStatus(patch.status),
+      healthStatus: parseConnectorHealthStatus(patch.healthStatus),
+      syncStatus: parseConnectorSyncStatus(patch.syncStatus),
+      settings: patch.settings === undefined ? undefined : parseSettings(patch.settings),
+      credentialRef: boundedOptionalNullableString(
+        patch.credentialRef,
+        "credentialRef",
+        MAX_NAME_LENGTH
+      ),
+      credentialStatus:
+        patch.credentialStatus === undefined
+          ? undefined
+          : parseCredentialStatus(patch.credentialStatus),
+      syncCursor: boundedOptionalNullableString(patch.syncCursor, "syncCursor", MAX_NAME_LENGTH),
+      lastSyncAt: validatedOptionalDueAt(patch.lastSyncAt),
+      nextSyncAt: validatedOptionalDueAt(patch.nextSyncAt),
+      lastHealthAt: validatedOptionalDueAt(patch.lastHealthAt),
+      errorCode: boundedOptionalNullableString(patch.errorCode, "errorCode", MAX_NAME_LENGTH),
+      errorMessage: boundedOptionalNullableString(
+        patch.errorMessage,
+        "errorMessage",
+        MAX_TITLE_LENGTH
+      )
+    }
+  };
+}
+
+export function parseConnectorSourceRecordInput(value: unknown): ConnectorSourceRecordInput {
+  const object = asObject(value);
+  const sourceExternalId = boundedString(
+    object.sourceExternalId,
+    "sourceExternalId",
+    MAX_EXTERNAL_ID_LENGTH
+  ).trim();
+  if (sourceExternalId.length === 0) {
+    throw new ValidationError("invalid_source_external_id", "Source external id is required");
+  }
+  const payloadHash = boundedString(object.payloadHash, "payloadHash", MAX_HASH_LENGTH).trim();
+  if (!/^[A-Za-z0-9:_-]+$/.test(payloadHash)) {
+    throw new ValidationError("invalid_payload_hash", "Payload hash is invalid");
+  }
+  return {
+    accountId: boundedString(object.accountId, "accountId", MAX_NAME_LENGTH),
+    sourceExternalId,
+    sourceType: parseSourceRecordType(object.sourceType),
+    payloadHash,
+    normalizedPayload: parseNormalizedPayload(object.normalizedPayload)
+  };
+}
+
 export function parseReorder(
   value: unknown
 ): Array<{ id: string; expectedVersion: number; globalOrder: number }> {
@@ -354,6 +447,80 @@ function parseSeverity(value: unknown): NotificationSeverity {
 function parseDestination(value: unknown): WebhookDestination {
   if (value === "notification" || value === "note") return value;
   throw new ValidationError("invalid_destination", "Webhook destination is invalid");
+}
+
+function parseCredentialStatus(value: unknown): "not_configured" | "configured" | undefined {
+  if (value === undefined) return undefined;
+  if (value === "not_configured" || value === "configured") return value;
+  throw new ValidationError("invalid_credential_status", "Credential status is invalid");
+}
+
+function parseConnectorAccountStatus(value: unknown): ConnectorAccountPatch["status"] | undefined {
+  if (value === undefined) return undefined;
+  if (value === "connected" || value === "paused" || value === "error" || value === "deleted")
+    return value;
+  throw new ValidationError("invalid_status", "Connector account status is invalid");
+}
+
+function parseConnectorHealthStatus(
+  value: unknown
+): ConnectorAccountPatch["healthStatus"] | undefined {
+  if (value === undefined) return undefined;
+  if (value === "unknown" || value === "healthy" || value === "degraded" || value === "error")
+    return value;
+  throw new ValidationError("invalid_health_status", "Connector health status is invalid");
+}
+
+function parseConnectorSyncStatus(value: unknown): ConnectorAccountPatch["syncStatus"] | undefined {
+  if (value === undefined) return undefined;
+  if (value === "idle" || value === "syncing" || value === "error") return value;
+  throw new ValidationError("invalid_sync_status", "Connector sync status is invalid");
+}
+
+function parseSourceRecordType(value: unknown): ConnectorSourceRecordInput["sourceType"] {
+  if (
+    value === "email" ||
+    value === "calendar_event" ||
+    value === "notification" ||
+    value === "generic"
+  ) {
+    return value;
+  }
+  throw new ValidationError("invalid_source_type", "Connector source type is invalid");
+}
+
+function parseSettings(value: unknown): Record<string, string | number | boolean | null> {
+  if (value === undefined) return {};
+  const object = asObject(value);
+  const entries = Object.entries(object);
+  if (entries.length > 20) throw new ValidationError("too_many_settings", "Too many settings");
+  const parsed: Record<string, string | number | boolean | null> = {};
+  for (const [key, setting] of entries) {
+    if (!/^[A-Za-z0-9_.-]{1,80}$/.test(key)) {
+      throw new ValidationError("invalid_setting", "Setting key is invalid");
+    }
+    if (
+      setting === null ||
+      typeof setting === "string" ||
+      typeof setting === "number" ||
+      typeof setting === "boolean"
+    ) {
+      if (typeof setting === "string") assertMax(setting, MAX_TITLE_LENGTH, key);
+      parsed[key] = setting;
+      continue;
+    }
+    throw new ValidationError("invalid_setting", "Setting value is invalid");
+  }
+  return parsed;
+}
+
+function parseNormalizedPayload(value: unknown): Record<string, unknown> {
+  const object = asObject(value);
+  const serialized = JSON.stringify(object);
+  if (serialized.length > 20_000) {
+    throw new ValidationError("invalid_payload", "Normalized payload is too large");
+  }
+  return JSON.parse(serialized) as Record<string, unknown>;
 }
 
 function parseNotificationStatus(value: unknown): NotificationPatch["status"] {

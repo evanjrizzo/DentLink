@@ -119,3 +119,29 @@ mutation. Webhook raw secrets are returned only at endpoint creation; the schema
 Milestone 2 indexes cover user/status/order notification listing, notification sync/update scans,
 endpoint lookup by slug/enabled state, user webhook listing, webhook delivery history, and the
 extended sync change log.
+
+## Milestone 3 D1 schema
+
+`migrations/0003_connector_framework.sql` extends the durable schema with provider-neutral
+connector plumbing:
+
+- `connector_accounts`: user-scoped connector account metadata with catalog key, display name,
+  connection status, health status, sync status, settings JSON, credential reference/status,
+  sync/health timestamps, last error metadata, version, and timestamps.
+- `connector_source_records`: user-scoped normalized source-record bookkeeping tied to a connector
+  account, external source ID, source type, payload hash, normalized payload JSON, processing
+  status, version, and timestamps.
+- `sync_changes`: rebuilt in place to permit `connector_account` entity changes while preserving
+  existing cursors and payloads.
+
+Connector accounts are soft-deleted with status `deleted` and emit sync tombstones. Source records
+must belong to an owned non-deleted connector account and enforce uniqueness by
+`(account_id, source_external_id)`.
+
+Milestone 3 deliberately stores connector metadata and normalized source-record bookkeeping only. It
+does not store Gmail, Google Calendar, Outlook, Microsoft Graph, IMAP, or other provider-specific
+payloads, and it does not introduce authoritative ranking changes.
+
+Indexes cover account lookup by user/status, user/connector key, health checks, source records by
+user/account, source-record processing state, external source identity, and the extended sync change
+log.

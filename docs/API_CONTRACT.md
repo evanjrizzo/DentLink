@@ -151,3 +151,30 @@ Webhook endpoints route payloads to one of two destinations:
 Notification and webhook changes are included in `/v1/sync` through the same numeric cursor log used
 by Milestone 1. Notification and webhook deletes are emitted as tombstones. Webhook secrets and
 hashes are never included in sync payloads.
+
+## Milestone 3 endpoints
+
+Milestone 3 adds provider-neutral connector plumbing without adding any real provider integration.
+The catalog intentionally exposes generic connector families only; provider keys such as `gmail`,
+`google-calendar`, `outlook`, `microsoft-graph`, and `imap` are rejected until later milestones
+implement those connectors through the framework.
+
+- `GET /v1/connectors/catalog`: list safe connector definitions, auth type, capabilities, and
+  settings schema. Requires authentication.
+- `GET /v1/connectors/accounts`: list the authenticated user's non-deleted connector accounts.
+- `POST /v1/connectors/accounts`: create a connector account metadata record for a catalog key.
+- `PATCH /v1/connectors/accounts/:id`: update account metadata with `expectedVersion`.
+- `DELETE /v1/connectors/accounts/:id`: soft-delete an account with `expectedVersion`.
+- `GET /v1/connectors/accounts/:id/source-records`: list normalized source records for an owned
+  connector account.
+- `POST /v1/connectors/source-records`: create a normalized source-record bookkeeping entry for an
+  owned non-deleted connector account.
+
+Connector account responses may include `credentialRef` and `credentialStatus`, but never include
+raw provider credentials, OAuth tokens, refresh tokens, passwords, salts, hashes, or authorization
+headers. Source records store normalized payloads only; raw provider payload retention is reserved
+for future connector-specific storage decisions.
+
+Connector account mutations participate in `/v1/sync` as `connector_account` upserts and delete
+tombstones. Source records are user-scoped bookkeeping records and are not promoted into user-facing
+items by Milestone 3.

@@ -1,7 +1,7 @@
 # Deployment
 
 DentLink targets Cloudflare Workers with D1. The runtime baseline is shared by the Milestone 1 Notes
-slice and the Milestone 2 Notifications/webhook slice.
+slice, the Milestone 2 Notifications/webhook slice, and the Milestone 3 connector framework.
 
 ## Runtime
 
@@ -145,8 +145,9 @@ pnpm db:migrate:production
 ```
 
 Production migrations are explicit and manual. Do not add destructive production reset scripts.
-Milestone 2 adds `0002_notifications_webhooks.sql`; apply it to preview before deploying code that
-uses notification or webhook sync changes.
+Milestone 2 adds `0002_notifications_webhooks.sql`; Milestone 3 adds
+`0003_connector_framework.sql`. Apply migrations to preview before deploying code that uses the
+corresponding sync change types.
 
 ## Workflows
 
@@ -183,8 +184,9 @@ Run against any deployed or local API:
 DENTLINK_SMOKE_BASE_URL=http://127.0.0.1:8787 pnpm smoke:api
 ```
 
-The script creates temporary users and notes through the public API. It does not print bearer tokens
-or passwords.
+The script creates temporary users, notes, notifications, webhooks, and generic connector records
+through the public API. It does not print bearer tokens, passwords, webhook secrets, or connector
+credential references.
 
 ## Browser Verification
 

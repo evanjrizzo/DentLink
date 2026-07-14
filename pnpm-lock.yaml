@@ -56,6 +56,9 @@ importers:
       '@dentlink/api-client':
         specifier: workspace:*
         version: link:../../packages/api-client
+      '@dentlink/connector-sdk':
+        specifier: workspace:*
+        version: link:../../packages/connector-sdk
       '@dentlink/item-model':
         specifier: workspace:*
         version: link:../../packages/item-model
@@ -101,6 +104,9 @@ importers:
 
   packages/api-client:
     dependencies:
+      '@dentlink/connector-sdk':
+        specifier: workspace:*
+        version: link:../connector-sdk
       '@dentlink/item-model':
         specifier: workspace:*
         version: link:../item-model

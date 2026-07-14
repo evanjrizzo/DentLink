@@ -8,6 +8,9 @@ import {
 } from "./auth";
 import { MemoryDentLinkStore, StoreError, type DentLinkStore } from "./storage";
 import {
+  parseConnectorAccountInput,
+  parseConnectorAccountPatch,
+  parseConnectorSourceRecordInput,
   parseCredentials,
   parseConflictResolution,
   parseCursor,
@@ -25,6 +28,7 @@ import {
   ValidationError
 } from "./validation";
 
+import type { ConnectorDefinition } from "@dentlink/connector-sdk";
 import type { AuthSession, NoteConflict } from "@dentlink/item-model";
 
 export type ApiEnv = {
@@ -36,6 +40,45 @@ export type ApiEnv = {
 };
 
 const defaultStore = new MemoryDentLinkStore();
+
+const connectorCatalog: ConnectorDefinition[] = [
+  {
+    key: "generic-email",
+    name: "Generic email connector",
+    kind: "email",
+    authType: "oauth2",
+    capabilities: ["poll", "normalize_notifications"],
+    settings: [
+      {
+        key: "label",
+        label: "Display label",
+        type: "string",
+        required: false
+      }
+    ],
+    version: 1
+  },
+  {
+    key: "generic-calendar",
+    name: "Generic calendar connector",
+    kind: "calendar",
+    authType: "oauth2",
+    capabilities: ["poll", "normalize_calendar"],
+    settings: [
+      {
+        key: "includeDeclined",
+        label: "Include declined events",
+        type: "boolean",
+        required: false
+      }
+    ],
+    version: 1
+  }
+];
+
+function connectorByKey(key: string): ConnectorDefinition | null {
+  return connectorCatalog.find((connector) => connector.key === key) ?? null;
+}
 
 export async function handleApiRequest(request: Request, env: ApiEnv = {}): Promise<Response> {
   const cors = corsForRequest(request, env);
@@ -188,6 +231,63 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     if (method === "POST" && path === "/v1/tags") {
       return json(
         await store.createTag(auth.user.id, parseName(await readJson(request)), now),
+        201
+      );
+    }
+    if (method === "GET" && path === "/v1/connectors/catalog") {
+      return json({ connectors: connectorCatalog });
+    }
+    if (method === "GET" && path === "/v1/connectors/accounts") {
+      return json(await store.listConnectorAccounts(auth.user.id));
+    }
+    if (method === "POST" && path === "/v1/connectors/accounts") {
+      const input = parseConnectorAccountInput(await readJson(request));
+      if (!connectorByKey(input.connectorKey)) {
+        return error("unknown_connector", "Connector is not available", 400);
+      }
+      return json(await store.createConnectorAccount(auth.user.id, input, now), 201);
+    }
+    const connectorAccountMatch = path.match(/^\/v1\/connectors\/accounts\/([^/]+)$/);
+    if (connectorAccountMatch && method === "PATCH") {
+      const body = parseConnectorAccountPatch(await readJson(request));
+      const account = await store.updateConnectorAccount(
+        auth.user.id,
+        connectorAccountMatch[1] ?? "",
+        body.expectedVersion,
+        body.patch,
+        now
+      );
+      if (!account) return error("not_found", "Connector account not found", 404);
+      return json(account);
+    }
+    if (connectorAccountMatch && method === "DELETE") {
+      const account = await store.deleteConnectorAccount(
+        auth.user.id,
+        connectorAccountMatch[1] ?? "",
+        parseExpectedVersion(await readJson(request)),
+        now
+      );
+      if (!account) return error("not_found", "Connector account not found", 404);
+      return json(account);
+    }
+    const connectorRecordsMatch = path.match(
+      /^\/v1\/connectors\/accounts\/([^/]+)\/source-records$/
+    );
+    if (connectorRecordsMatch && method === "GET") {
+      return json({
+        records: await store.listConnectorSourceRecords(
+          auth.user.id,
+          connectorRecordsMatch[1] ?? ""
+        )
+      });
+    }
+    if (method === "POST" && path === "/v1/connectors/source-records") {
+      return json(
+        await store.createConnectorSourceRecord(
+          auth.user.id,
+          parseConnectorSourceRecordInput(await readJson(request)),
+          now
+        ),
         201
       );
     }

@@ -135,15 +135,31 @@ Implemented scope:
 Out of scope and still not implemented: Gmail, Google Calendar, Microsoft 365, IMAP, AI, Tauri,
 Android, widgets, push notifications, provider connectors, and webhook provider templates.
 
-## Milestone 3: Calendar foundation and ICS
+## Milestone 3: Connector framework and integration plumbing
+
+Status: implemented.
+
+Implemented scope:
+
+- Provider-neutral connector catalog contracts for future email and calendar families.
+- User-scoped connector account metadata with status, health, sync state, settings, credential
+  reference fields, version checks, sync changes, and soft deletion.
+- User-scoped connector source records for normalized provider input bookkeeping.
+- D1 migration and in-memory/D1 storage parity for connector account and source-record plumbing.
+- API, typed client, shared model, connector SDK, storage contract tests, and smoke-test coverage.
+
+Out of scope and still not implemented: Gmail API, Google Calendar API, Outlook, Microsoft Graph,
+IMAP, AI summaries, ranking changes, mobile, desktop, widgets, and push notifications.
+
+## Milestone 3.1: Gmail connector
+
+Implement Gmail as the first real connector using the Milestone 3 framework. Gmail must not be
+special-cased outside the connector abstraction.
+
+## Milestone 4: Calendar foundation and ICS
 
 Implement calendar data model, DentLink-local events, ICS import/export, agenda/grid views,
 filtering, annotations, and agenda-only dismissal.
-
-## Milestone 4: Google integrations
-
-Add Google OAuth, Gmail ingestion, Google Calendar ingestion, connector health, token encryption,
-and least-privilege scopes.
 
 ## Milestone 5: Microsoft and IMAP
 

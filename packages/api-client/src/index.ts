@@ -1,6 +1,12 @@
 import type {
   AuthSession,
   ConflictResponse,
+  ConnectorAccount,
+  ConnectorAccountInput,
+  ConnectorAccountPatch,
+  ConnectorAccountsList,
+  ConnectorSourceRecord,
+  ConnectorSourceRecordInput,
   CurrentSession,
   EntityId,
   Folder,
@@ -20,6 +26,7 @@ import type {
   WebhookEndpointPatch,
   WebhooksList
 } from "@dentlink/item-model";
+import type { ConnectorDefinition } from "@dentlink/connector-sdk";
 
 export class DentLinkApiError extends Error {
   readonly code: string;
@@ -137,6 +144,59 @@ export class DentLinkApiClient {
 
   async createTag(input: CreateTagInput): Promise<Tag> {
     return this.request<Tag>("/v1/tags", { method: "POST", body: input });
+  }
+
+  async listConnectorCatalog(): Promise<{ connectors: ConnectorDefinition[] }> {
+    return this.request<{ connectors: ConnectorDefinition[] }>("/v1/connectors/catalog");
+  }
+
+  async listConnectorAccounts(): Promise<ConnectorAccountsList> {
+    return this.request<ConnectorAccountsList>("/v1/connectors/accounts");
+  }
+
+  async createConnectorAccount(input: ConnectorAccountInput): Promise<ConnectorAccount> {
+    return this.request<ConnectorAccount>("/v1/connectors/accounts", {
+      method: "POST",
+      body: input
+    });
+  }
+
+  async updateConnectorAccount(
+    accountId: EntityId,
+    expectedVersion: number,
+    patch: ConnectorAccountPatch
+  ): Promise<ConnectorAccount> {
+    return this.request<ConnectorAccount>(`/v1/connectors/accounts/${accountId}`, {
+      method: "PATCH",
+      body: { expectedVersion, patch }
+    });
+  }
+
+  async deleteConnectorAccount(
+    accountId: EntityId,
+    expectedVersion: number
+  ): Promise<ConnectorAccount> {
+    return this.request<ConnectorAccount>(`/v1/connectors/accounts/${accountId}`, {
+      method: "DELETE",
+      body: { expectedVersion }
+    });
+  }
+
+  async createConnectorSourceRecord(
+    input: ConnectorSourceRecordInput
+  ): Promise<ConnectorSourceRecord> {
+    return this.request<ConnectorSourceRecord>("/v1/connectors/source-records", {
+      method: "POST",
+      body: input
+    });
+  }
+
+  async listConnectorSourceRecords(
+    accountId: EntityId
+  ): Promise<{ records: ConnectorSourceRecord[] }> {
+    return this.request<{ records: ConnectorSourceRecord[] }>(
+      `/v1/connectors/accounts/${accountId}/source-records`
+    );
   }
 
   async listNotifications(): Promise<NotificationsList> {

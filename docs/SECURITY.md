@@ -19,6 +19,8 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
 - Milestone 2 applies the same server-resolved identity to Notifications and webhook endpoint
   management. Public webhook ingestion never accepts a client-supplied user ID; ownership is derived
   from the matched endpoint and hashed secret.
+- Milestone 3 applies the same server-resolved identity to connector account and source-record
+  management. Connector accounts and source records are always queried by authenticated user scope.
 
 ## Passwords
 
@@ -53,6 +55,11 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   once at endpoint creation.
 - D1 and in-memory storage keep only the SHA-256 hash of webhook secrets. Raw webhook secrets are
   not listed, synced, or logged.
+- Milestone 3 connector accounts store credential references and credential status only. They do
+  not store or return raw OAuth tokens, refresh tokens, passwords, provider API keys, hashes, salts,
+  or authorization headers.
+- Provider-specific credential encryption and rotation remain required before any real provider
+  connector, such as Gmail, is implemented.
 
 ## Webhooks and source content
 
@@ -68,6 +75,9 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
 - Deleted webhook endpoints are removed from active storage and cannot be reused for ingestion.
 - Milestone 2.1 does not deduplicate webhook request replays. Replayed valid requests create another
   accepted delivery until a future idempotency key contract is added.
+- Milestone 3 source records store normalized payload metadata for connector bookkeeping. Raw
+  provider payload retention, attachment handling, and replay/idempotency behavior must be defined
+  by future provider connectors before they ingest real external content.
 
 ## Local agents and platform actions
 
