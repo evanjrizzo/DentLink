@@ -33,7 +33,9 @@ export type NoteKind = "task" | "reference";
 export type NoteStatus = "active" | "done" | "deleted";
 export type NotePriority = "none" | "low" | "medium" | "high";
 export type NotificationStatus = "active" | "done" | "dismissed" | "deleted";
+export type CalendarEventSource = "local" | "google-calendar";
 export type CalendarEventStatus = "active" | "cancelled" | "dismissed" | "deleted";
+export type CalendarSourceFilter = "all" | CalendarEventSource;
 export type NotificationSeverity = "info" | "low" | "medium" | "high";
 export type ConflictStatus = "open" | "resolved";
 export type ConflictResolution = "keep_mine" | "keep_theirs" | "merge" | "keep_both";
@@ -229,10 +231,11 @@ export type NotificationsList = {
 export type CalendarEvent = {
   id: EntityId;
   userId: EntityId;
-  connectorAccountId: EntityId;
-  provider: "google-calendar";
-  providerEventId: string;
-  calendarId: string;
+  source: CalendarEventSource;
+  connectorAccountId: EntityId | null;
+  provider: "google-calendar" | null;
+  providerEventId: string | null;
+  calendarId: string | null;
   calendarSummary: string;
   title: string;
   description: string;
@@ -244,6 +247,12 @@ export type CalendarEvent = {
   endDate: string | null;
   timezone: string | null;
   allDay: boolean;
+  recurrenceRule: string | null;
+  category: string | null;
+  color: string | null;
+  reminderMinutes: number | null;
+  importedUid: string | null;
+  annotation: CalendarEventAnnotation | null;
   status: CalendarEventStatus;
   version: number;
   createdAt: IsoDateTime;
@@ -255,8 +264,60 @@ export type CalendarEventsList = {
   events: CalendarEvent[];
 };
 
-export type CalendarEventPatch = {
+export type CalendarEventAnnotation = {
+  id: EntityId;
+  userId: EntityId;
+  eventId: EntityId;
+  notes: string;
+  pinned: boolean;
+  completed: boolean;
+  hidden: boolean;
+  tagIds: EntityId[];
+  tags: Tag[];
+  version: number;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+};
+
+export type CalendarEventInput = {
+  title: string;
+  description?: string;
+  startAt: IsoDateTime;
+  endAt: IsoDateTime;
+  startDate?: string | null;
+  endDate?: string | null;
+  timezone?: string | null;
+  allDay?: boolean;
+  location?: string | null;
+  sourceUrl?: string | null;
+  recurrenceRule?: string | null;
+  category?: string | null;
+  color?: string | null;
+  reminderMinutes?: number | null;
+  importedUid?: string | null;
+};
+
+export type CalendarEventPatch = Partial<CalendarEventInput> & {
   status?: Extract<CalendarEventStatus, "active" | "dismissed">;
+};
+
+export type LocalCalendarEventPatch = Partial<CalendarEventInput> & {
+  status?: Extract<CalendarEventStatus, "active" | "deleted">;
+};
+
+export type CalendarEventAnnotationPatch = {
+  notes?: string;
+  pinned?: boolean;
+  completed?: boolean;
+  hidden?: boolean;
+  tagIds?: EntityId[];
+};
+
+export type CalendarIcsImportResult = {
+  imported: number;
+  skippedDuplicates: number;
+  events: CalendarEvent[];
+  warnings: string[];
 };
 
 export type WebhooksList = {

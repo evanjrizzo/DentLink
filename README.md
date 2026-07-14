@@ -11,9 +11,9 @@ inspected only as behavioral references.
 
 ## Current status
 
-Milestone 4: authentication, manual Notes, named webhook ingestion, Notifications,
-provider-neutral connector plumbing, Gmail, and Google Calendar synchronization with a Cloudflare
-preview API and web deployment baseline.
+Milestone 5: authentication, manual Notes, named webhook ingestion, Notifications,
+provider-neutral connector plumbing, Gmail, read-only Google Calendar synchronization, and
+DentLink Local calendar events with ICS import/export.
 
 This repository contains the pnpm TypeScript workspace, shared package boundaries, a Worker-style
 API handler, Cloudflare D1 storage adapter, D1 migrations for auth, notes, notifications, and
@@ -98,8 +98,9 @@ pnpm validate
 The validation command checks formatting, linting, TypeScript, and tests across the workspace. The
 API test suite runs the same storage contract tests against the in-memory adapter and the
 D1-compatible adapter. Gmail and Google Calendar tests use fake Google clients and verify OAuth
-state handling, encrypted credential storage, idempotent sync, normalized item mapping, and
-disconnect behavior without requiring real Google credentials.
+state handling, encrypted credential storage, idempotent sync, normalized item mapping, local
+calendar CRUD, annotations, ICS import/export, and disconnect behavior without requiring real Google
+credentials.
 
 Use Node.js `22.13.1` and pnpm `9.15.4`. Run the API locally against Wrangler's local D1 binding
 with:
@@ -123,6 +124,7 @@ sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0002_notifications_webh
 sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0003_connector_framework.sql
 sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0004_gmail_connector.sql
 sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0005_google_calendar_connector.sql
+sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0006_calendar_foundation_ics.sql
 sqlite3 /tmp/dentlink_m3_migration_check.db "PRAGMA foreign_key_check;"
 sqlite3 /tmp/dentlink_m3_migration_check.db "PRAGMA integrity_check;"
 ```

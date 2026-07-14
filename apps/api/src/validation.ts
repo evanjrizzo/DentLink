@@ -1,6 +1,10 @@
 import type {
   ConflictResolution,
+  CalendarEventAnnotationPatch,
+  CalendarEventInput,
   CalendarEventPatch,
+  CalendarSourceFilter,
+  LocalCalendarEventPatch,
   ConnectorAccountInput,
   ConnectorAccountPatch,
   ConnectorSourceRecordInput,
@@ -28,6 +32,11 @@ const MAX_SEARCH_LENGTH = 200;
 const MAX_CONNECTOR_KEY_LENGTH = 80;
 const MAX_EXTERNAL_ID_LENGTH = 256;
 const MAX_HASH_LENGTH = 128;
+export const MAX_ICS_IMPORT_BYTES = 512_000;
+const MAX_RECURRENCE_LENGTH = 512;
+const MAX_COLOR_LENGTH = 32;
+const MAX_REMINDER_MINUTES = 60 * 24 * 365;
+const MAX_CALENDAR_RANGE_DAYS = 430;
 
 export function parseCredentials(value: unknown): { email: string; password: string } {
   const object = asObject(value);
@@ -170,6 +179,99 @@ export function parseCalendarEventPatch(value: unknown): {
           : invalid("invalid_status")
     }
   };
+}
+
+export function parseLocalCalendarEventInput(value: unknown): CalendarEventInput {
+  const object = asObject(value);
+  return calendarEventInputFromObject(object, false);
+}
+
+export function parseLocalCalendarEventPatch(value: unknown): {
+  expectedVersion: number;
+  patch: LocalCalendarEventPatch;
+} {
+  const object = asObject(value);
+  const patch = asObject(object.patch);
+  const parsed = calendarEventInputFromObject(patch, true);
+  return {
+    expectedVersion: asVersion(object.expectedVersion),
+    patch: {
+      ...parsed,
+      status:
+        patch.status === undefined || patch.status === "active" || patch.status === "deleted"
+          ? patch.status
+          : invalid("invalid_status")
+    }
+  };
+}
+
+export function parseCalendarAnnotationPatch(value: unknown): {
+  expectedVersion?: number;
+  patch: CalendarEventAnnotationPatch;
+} {
+  const object = asObject(value);
+  const patch = asObject(object.patch ?? value);
+  return {
+    expectedVersion:
+      object.expectedVersion === undefined ? undefined : asVersion(object.expectedVersion),
+    patch: {
+      notes: boundedOptionalString(patch.notes, "notes", MAX_BODY_LENGTH),
+      pinned: optionalBoolean(patch.pinned, "pinned"),
+      completed: optionalBoolean(patch.completed, "completed"),
+      hidden: optionalBoolean(patch.hidden, "hidden"),
+      tagIds: boundedOptionalStringArray(patch.tagIds, "tagIds")
+    }
+  };
+}
+
+export function parseCalendarQuery(url: URL): {
+  timeMin: string;
+  timeMax: string;
+  source: CalendarSourceFilter;
+  includeHidden: boolean;
+} {
+  const now = new Date();
+  const defaultMin = new Date(now);
+  defaultMin.setUTCDate(defaultMin.getUTCDate() - 30);
+  const defaultMax = new Date(now);
+  defaultMax.setUTCMonth(defaultMax.getUTCMonth() + 12);
+  const timeMin = parseDateParam(
+    url.searchParams.get("timeMin"),
+    defaultMin.toISOString(),
+    "timeMin"
+  );
+  const timeMax = parseDateParam(
+    url.searchParams.get("timeMax"),
+    defaultMax.toISOString(),
+    "timeMax"
+  );
+  if (timeMax <= timeMin)
+    throw new ValidationError("invalid_range", "timeMax must be after timeMin");
+  if (
+    new Date(timeMax).getTime() - new Date(timeMin).getTime() >
+    MAX_CALENDAR_RANGE_DAYS * 86_400_000
+  ) {
+    throw new ValidationError("range_too_large", "Calendar range is too large");
+  }
+  const source = url.searchParams.get("source") ?? "all";
+  if (source !== "all" && source !== "local" && source !== "google-calendar") {
+    throw new ValidationError("invalid_source", "Calendar source filter is invalid");
+  }
+  return {
+    timeMin,
+    timeMax,
+    source,
+    includeHidden: url.searchParams.get("includeHidden") === "true"
+  };
+}
+
+export function parseIcsImportBody(value: unknown): { ics: string } {
+  const object = asObject(value);
+  const ics = asString(object.ics, "ics");
+  if (new TextEncoder().encode(ics).byteLength > MAX_ICS_IMPORT_BYTES) {
+    throw new ValidationError("ics_too_large", "ICS import is too large");
+  }
+  return { ics };
 }
 
 export function parseWebhookEndpointInput(value: unknown): WebhookEndpointInput {
@@ -546,6 +648,105 @@ function parseNotificationStatus(value: unknown): NotificationPatch["status"] {
   if (value === "active" || value === "done" || value === "dismissed" || value === "deleted")
     return value;
   throw new ValidationError("invalid_status", "Status is invalid");
+}
+
+function calendarEventInputFromObject(
+  object: Record<string, unknown>,
+  partial: boolean
+): CalendarEventInput {
+  const title =
+    object.title === undefined && partial
+      ? undefined
+      : boundedString(object.title, "title", MAX_TITLE_LENGTH).trim();
+  if (title !== undefined && title.length === 0) {
+    throw new ValidationError("invalid_title", "Title is required");
+  }
+  const startAt =
+    object.startAt === undefined && partial
+      ? undefined
+      : validatedDateTime(asString(object.startAt, "startAt"), "startAt");
+  const endAt =
+    object.endAt === undefined && partial
+      ? undefined
+      : validatedDateTime(asString(object.endAt, "endAt"), "endAt");
+  if (startAt && endAt && endAt <= startAt) {
+    throw new ValidationError("invalid_time_range", "Event end must be after start");
+  }
+  const recurrenceRule = boundedOptionalNullableString(
+    object.recurrenceRule,
+    "recurrenceRule",
+    MAX_RECURRENCE_LENGTH
+  );
+  if (recurrenceRule && !/^RRULE:/i.test(recurrenceRule) && !/^FREQ=/i.test(recurrenceRule)) {
+    throw new ValidationError("invalid_recurrence", "Recurrence rule is invalid");
+  }
+  const color = boundedOptionalNullableString(object.color, "color", MAX_COLOR_LENGTH);
+  if (color && !/^#[0-9A-Fa-f]{6}$/.test(color)) {
+    throw new ValidationError("invalid_color", "Color must be a hex color");
+  }
+  const reminderMinutes = optionalNullableNumber(object.reminderMinutes, "reminderMinutes");
+  if (
+    reminderMinutes !== undefined &&
+    reminderMinutes !== null &&
+    (!Number.isInteger(reminderMinutes) ||
+      reminderMinutes < 0 ||
+      reminderMinutes > MAX_REMINDER_MINUTES)
+  ) {
+    throw new ValidationError("invalid_reminder", "Reminder minutes are invalid");
+  }
+  const sourceUrl = boundedOptionalNullableString(object.sourceUrl, "sourceUrl", MAX_URL_LENGTH);
+  validateSafeUrl(sourceUrl);
+  return {
+    title: title as string,
+    description: boundedOptionalString(object.description, "description", MAX_BODY_LENGTH),
+    startAt: startAt as string,
+    endAt: endAt as string,
+    startDate: boundedOptionalNullableString(object.startDate, "startDate", MAX_NAME_LENGTH),
+    endDate: boundedOptionalNullableString(object.endDate, "endDate", MAX_NAME_LENGTH),
+    timezone: boundedOptionalNullableString(object.timezone, "timezone", MAX_NAME_LENGTH),
+    allDay: optionalBoolean(object.allDay, "allDay"),
+    location: boundedOptionalNullableString(object.location, "location", MAX_TITLE_LENGTH),
+    sourceUrl,
+    recurrenceRule,
+    category: boundedOptionalNullableString(object.category, "category", MAX_NAME_LENGTH),
+    color,
+    reminderMinutes,
+    importedUid: boundedOptionalNullableString(
+      object.importedUid,
+      "importedUid",
+      MAX_EXTERNAL_ID_LENGTH
+    )
+  };
+}
+
+function validatedDateTime(value: string, field: string): string {
+  if (Number.isNaN(Date.parse(value))) {
+    throw new ValidationError("invalid_datetime", `${field} is invalid`);
+  }
+  return new Date(value).toISOString();
+}
+
+function parseDateParam(value: string | null, fallback: string, field: string): string {
+  if (!value) return fallback;
+  return validatedDateTime(value, field);
+}
+
+function optionalNullableNumber(value: unknown, field: string): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  return asNumber(value, field);
+}
+
+function validateSafeUrl(value: string | null | undefined): void {
+  if (!value) return;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" && url.protocol !== "http:") {
+      throw new Error("bad protocol");
+    }
+  } catch {
+    throw new ValidationError("invalid_url", "URL is invalid");
+  }
 }
 
 function parseSlug(value: unknown): string {

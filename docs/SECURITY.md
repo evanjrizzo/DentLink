@@ -93,6 +93,15 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   event metadata and provider identifiers, and does not create, edit, delete, RSVP to, or manage
   attendees on Google Calendar events. Calendar refresh tokens use the same AES-GCM encrypted
   connector credential storage as Gmail. Agenda dismissal is DentLink-local state only.
+- Milestone 5 ICS import accepts only authenticated, size-limited posted ICS text. DentLink does
+  not fetch remote ICS URLs, read local filesystem paths, or execute/render HTML from event
+  descriptions. Imported URLs are validated before being stored as source links.
+- Milestone 5 local calendar event APIs reject provider ownership fields and require
+  server-resolved user scope plus version checks. Google Calendar event fields remain read-only;
+  DentLink annotations are stored separately and cannot mutate provider data.
+- Milestone 5 ICS export emits only the authenticated user's allowed DentLink Local events by
+  default and uses calendar download headers without exposing provider credentials or connector
+  secrets.
 
 ## Local agents and platform actions
 

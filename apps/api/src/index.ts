@@ -26,7 +26,10 @@ import {
   type GoogleCalendarApiClient,
   type GoogleCalendarRuntimeEnv
 } from "./google-calendar";
+import { IcsError, parseIcsCalendar, serializeIcsCalendar } from "./ics";
 import {
+  parseCalendarAnnotationPatch,
+  parseCalendarQuery,
   parseConnectorAccountInput,
   parseConnectorAccountPatch,
   parseConnectorSourceRecordInput,
@@ -35,6 +38,9 @@ import {
   parseConflictResolution,
   parseCursor,
   parseExpectedVersion,
+  parseIcsImportBody,
+  parseLocalCalendarEventInput,
+  parseLocalCalendarEventPatch,
   parseName,
   parseNotificationInput,
   parseNotificationPatch,
@@ -398,15 +404,102 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
       );
     }
     if (method === "GET" && path === "/v1/calendar/events") {
-      return json(await store.listCalendarEvents(auth.user.id, now));
+      return json(await store.listCalendarEvents(auth.user.id, parseCalendarQuery(url)));
+    }
+    if (method === "POST" && path === "/v1/calendar/events") {
+      return json(
+        await store.createLocalCalendarEvent(
+          auth.user.id,
+          parseLocalCalendarEventInput(await readJson(request)),
+          now
+        ),
+        201
+      );
+    }
+    if (method === "POST" && path === "/v1/calendar/ics/import") {
+      const { ics } = parseIcsImportBody(await readJson(request));
+      const imported = [];
+      let skippedDuplicates = 0;
+      const warnings: string[] = [];
+      for (const parsed of parseIcsCalendar(ics)) {
+        try {
+          imported.push(await store.createLocalCalendarEvent(auth.user.id, parsed, now));
+          warnings.push(...parsed.warnings);
+        } catch (caught) {
+          if (caught instanceof StoreError && caught.code === "calendar_event_exists") {
+            skippedDuplicates += 1;
+            continue;
+          }
+          throw caught;
+        }
+      }
+      return json(
+        { imported: imported.length, skippedDuplicates, events: imported, warnings },
+        201
+      );
+    }
+    if (method === "GET" && path === "/v1/calendar/ics/export") {
+      const events = await store.listCalendarEvents(auth.user.id, {
+        ...parseCalendarQuery(url),
+        source: "local",
+        includeHidden: false
+      });
+      return new Response(serializeIcsCalendar(events.events, now), {
+        status: 200,
+        headers: {
+          "Content-Type": "text/calendar; charset=utf-8",
+          "Content-Disposition": 'attachment; filename="dentlink-calendar.ics"'
+        }
+      });
     }
     const calendarEventMatch = path.match(/^\/v1\/calendar\/events\/([^/]+)$/);
+    if (calendarEventMatch && method === "GET") {
+      const event = await store.getCalendarEvent(auth.user.id, calendarEventMatch[1] ?? "");
+      if (!event) return error("not_found", "Calendar event not found", 404);
+      return json(event);
+    }
     if (calendarEventMatch && method === "PATCH") {
       const { expectedVersion, patch } = parseCalendarEventPatch(await readJson(request));
       return json(
         await store.updateCalendarEvent(
           auth.user.id,
           calendarEventMatch[1] ?? "",
+          expectedVersion,
+          patch,
+          now
+        )
+      );
+    }
+    const localCalendarEventMatch = path.match(/^\/v1\/calendar\/local-events\/([^/]+)$/);
+    if (localCalendarEventMatch && method === "PATCH") {
+      const { expectedVersion, patch } = parseLocalCalendarEventPatch(await readJson(request));
+      return json(
+        await store.updateLocalCalendarEvent(
+          auth.user.id,
+          localCalendarEventMatch[1] ?? "",
+          expectedVersion,
+          patch,
+          now
+        )
+      );
+    }
+    if (localCalendarEventMatch && method === "DELETE") {
+      return json(
+        await store.deleteLocalCalendarEvent(
+          auth.user.id,
+          localCalendarEventMatch[1] ?? "",
+          parseExpectedVersion(await readJson(request)),
+          now
+        )
+      );
+    }
+    const calendarAnnotationMatch = path.match(/^\/v1\/calendar\/events\/([^/]+)\/annotation$/);
+    if (calendarAnnotationMatch && method === "PATCH") {
+      const { expectedVersion, patch } = parseCalendarAnnotationPatch(await readJson(request));
+      return json(
+        await store.upsertCalendarEventAnnotation(
+          auth.user.id,
+          calendarAnnotationMatch[1] ?? "",
           expectedVersion,
           patch,
           now
@@ -530,6 +623,7 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     return error("not_found", "Endpoint not found", 404);
   } catch (caught) {
     if (caught instanceof ValidationError) return error(caught.code, caught.message, 400);
+    if (caught instanceof IcsError) return error(caught.code, caught.message, 400);
     if (caught instanceof GmailConfigError)
       return error("google_not_configured", caught.message, 503);
     if (caught instanceof StoreError) {

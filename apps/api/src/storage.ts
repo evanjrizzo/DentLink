@@ -1,7 +1,12 @@
 import type {
   ConflictResolution,
+  CalendarEventAnnotation,
+  CalendarEventAnnotationPatch,
+  CalendarEventInput,
   CalendarEvent,
   CalendarEventPatch,
+  LocalCalendarEventPatch,
+  CalendarSourceFilter,
   ConnectorAccount,
   ConnectorAccountInput,
   ConnectorAccountPatch,
@@ -153,12 +158,46 @@ export interface DentLinkStore {
     kind: ConnectorCredentialKind
   ): Promise<ConnectorCredential | null>;
   deleteConnectorCredentials(userId: EntityId, accountId: EntityId): Promise<void>;
-  listCalendarEvents(userId: EntityId, now: string): Promise<{ events: CalendarEvent[] }>;
+  listCalendarEvents(
+    userId: EntityId,
+    query: {
+      timeMin: string;
+      timeMax: string;
+      source?: CalendarSourceFilter;
+      includeHidden?: boolean;
+    }
+  ): Promise<{ events: CalendarEvent[] }>;
+  createLocalCalendarEvent(
+    userId: EntityId,
+    input: CalendarEventInput,
+    now: string
+  ): Promise<CalendarEvent>;
+  getCalendarEvent(userId: EntityId, eventId: EntityId): Promise<CalendarEvent | null>;
+  updateLocalCalendarEvent(
+    userId: EntityId,
+    eventId: EntityId,
+    expectedVersion: number,
+    patch: LocalCalendarEventPatch,
+    now: string
+  ): Promise<CalendarEvent>;
+  deleteLocalCalendarEvent(
+    userId: EntityId,
+    eventId: EntityId,
+    expectedVersion: number,
+    now: string
+  ): Promise<CalendarEvent>;
+  upsertCalendarEventAnnotation(
+    userId: EntityId,
+    eventId: EntityId,
+    expectedVersion: number | undefined,
+    patch: CalendarEventAnnotationPatch,
+    now: string
+  ): Promise<CalendarEventAnnotation>;
   upsertCalendarEvent(
     userId: EntityId,
     input: Omit<
       CalendarEvent,
-      "id" | "userId" | "version" | "createdAt" | "updatedAt" | "dismissedAt"
+      "id" | "userId" | "version" | "createdAt" | "updatedAt" | "dismissedAt" | "annotation"
     >,
     now: string
   ): Promise<{ event: CalendarEvent; created: boolean }>;
@@ -237,6 +276,7 @@ export class MemoryDentLinkStore implements DentLinkStore {
   private connectorOAuthStates = new Map<string, ConnectorOAuthState>();
   private connectorCredentials = new Map<EntityId, ConnectorCredential>();
   private calendarEvents = new Map<EntityId, CalendarEvent>();
+  private calendarAnnotations = new Map<EntityId, CalendarEventAnnotation>();
   private notifications = new Map<EntityId, Notification>();
   private webhooks = new Map<EntityId, WebhookEndpoint & { secretHash: string }>();
   private webhookDeliveries: Array<{
@@ -750,7 +790,15 @@ export class MemoryDentLinkStore implements DentLinkStore {
     }
   }
 
-  async listCalendarEvents(userId: EntityId, now: string): Promise<{ events: CalendarEvent[] }> {
+  async listCalendarEvents(
+    userId: EntityId,
+    query: {
+      timeMin: string;
+      timeMax: string;
+      source?: CalendarSourceFilter;
+      includeHidden?: boolean;
+    }
+  ): Promise<{ events: CalendarEvent[] }> {
     return {
       events: [...this.calendarEvents.values()]
         .filter(
@@ -758,21 +806,140 @@ export class MemoryDentLinkStore implements DentLinkStore {
             event.userId === userId &&
             event.status !== "deleted" &&
             event.status !== "dismissed" &&
-            event.endAt >= now
+            event.endAt >= query.timeMin &&
+            event.startAt <= query.timeMax &&
+            (query.source === undefined ||
+              query.source === "all" ||
+              event.source === query.source) &&
+            (query.includeHidden || !this.annotationForEvent(event.id)?.hidden)
         )
         .sort(compareCalendarEvents)
         .map(copyCalendarEvent)
     };
   }
 
+  async createLocalCalendarEvent(
+    userId: EntityId,
+    input: CalendarEventInput,
+    now: string
+  ): Promise<CalendarEvent> {
+    if (
+      input.importedUid &&
+      [...this.calendarEvents.values()].some(
+        (event) =>
+          event.userId === userId &&
+          event.source === "local" &&
+          event.importedUid === input.importedUid &&
+          event.status !== "deleted"
+      )
+    ) {
+      throw new StoreError("calendar_event_exists", "Calendar event already exists");
+    }
+    const event = this.localCalendarEventFromInput(userId, input, now);
+    this.calendarEvents.set(event.id, event);
+    this.recordChange({ type: "calendar_event", op: "upsert", event, cursor: "0" });
+    return copyCalendarEvent(event);
+  }
+
+  async getCalendarEvent(userId: EntityId, eventId: EntityId): Promise<CalendarEvent | null> {
+    const event = this.calendarEvents.get(eventId);
+    if (!event || event.userId !== userId || event.status === "deleted") return null;
+    return copyCalendarEvent(event);
+  }
+
+  async updateLocalCalendarEvent(
+    userId: EntityId,
+    eventId: EntityId,
+    expectedVersion: number,
+    patch: LocalCalendarEventPatch,
+    now: string
+  ): Promise<CalendarEvent> {
+    const existing = this.calendarEvents.get(eventId);
+    if (!existing || existing.userId !== userId || existing.status === "deleted") {
+      throw new StoreError("not_found", "Calendar event not found");
+    }
+    if (existing.source !== "local") {
+      throw new StoreError("provider_event_readonly", "Provider calendar events are read-only");
+    }
+    if (existing.version !== expectedVersion) {
+      throw new StoreError("version_mismatch", "Calendar event changed on the server");
+    }
+    const next = this.applyLocalCalendarPatch(existing, patch, now);
+    this.calendarEvents.set(next.id, next);
+    this.recordChange(
+      next.status === "deleted"
+        ? { type: "calendar_event", op: "delete", id: next.id, userId, cursor: "0" }
+        : { type: "calendar_event", op: "upsert", event: next, cursor: "0" }
+    );
+    return copyCalendarEvent(next);
+  }
+
+  async deleteLocalCalendarEvent(
+    userId: EntityId,
+    eventId: EntityId,
+    expectedVersion: number,
+    now: string
+  ): Promise<CalendarEvent> {
+    return this.updateLocalCalendarEvent(
+      userId,
+      eventId,
+      expectedVersion,
+      { status: "deleted" },
+      now
+    );
+  }
+
+  async upsertCalendarEventAnnotation(
+    userId: EntityId,
+    eventId: EntityId,
+    expectedVersion: number | undefined,
+    patch: CalendarEventAnnotationPatch,
+    now: string
+  ): Promise<CalendarEventAnnotation> {
+    const event = this.calendarEvents.get(eventId);
+    if (!event || event.userId !== userId || event.status === "deleted") {
+      throw new StoreError("not_found", "Calendar event not found");
+    }
+    const existing = this.annotationForEvent(eventId);
+    if (existing && expectedVersion !== undefined && existing.version !== expectedVersion) {
+      throw new StoreError("version_mismatch", "Calendar annotation changed on the server");
+    }
+    const tagIds = patch.tagIds ?? existing?.tagIds ?? [];
+    const annotation: CalendarEventAnnotation = {
+      ...(existing ?? {
+        id: this.nextId("calendar-annotation"),
+        userId,
+        eventId,
+        version: 0,
+        createdAt: now
+      }),
+      notes: patch.notes ?? existing?.notes ?? "",
+      pinned: patch.pinned ?? existing?.pinned ?? false,
+      completed: patch.completed ?? existing?.completed ?? false,
+      hidden: patch.hidden ?? existing?.hidden ?? false,
+      tagIds,
+      tags: tagIds
+        .map((tagId) => this.tags.get(tagId))
+        .filter((tag): tag is Tag => tag !== undefined && tag.userId === userId),
+      version: (existing?.version ?? 0) + 1,
+      updatedAt: now
+    };
+    this.calendarAnnotations.set(annotation.id, annotation);
+    const nextEvent = { ...event, annotation, updatedAt: now, version: event.version + 1 };
+    this.calendarEvents.set(event.id, nextEvent);
+    this.recordChange({ type: "calendar_event", op: "upsert", event: nextEvent, cursor: "0" });
+    return copyCalendarAnnotation(annotation);
+  }
+
   async upsertCalendarEvent(
     userId: EntityId,
     input: Omit<
       CalendarEvent,
-      "id" | "userId" | "version" | "createdAt" | "updatedAt" | "dismissedAt"
+      "id" | "userId" | "version" | "createdAt" | "updatedAt" | "dismissedAt" | "annotation"
     >,
     now: string
   ): Promise<{ event: CalendarEvent; created: boolean }> {
+    if (!input.connectorAccountId) throw new StoreError("not_found", "Connector account not found");
     const account = await this.getConnectorAccount(userId, input.connectorAccountId);
     if (!account) throw new StoreError("not_found", "Connector account not found");
     const existing = [...this.calendarEvents.values()].find(
@@ -790,6 +957,8 @@ export class MemoryDentLinkStore implements DentLinkStore {
         dismissedAt: null
       }),
       ...input,
+      source: "google-calendar",
+      annotation: existing?.annotation ?? null,
       status:
         input.status === "cancelled" || existing?.status !== "dismissed"
           ? input.status
@@ -1238,6 +1407,89 @@ export class MemoryDentLinkStore implements DentLinkStore {
     return `${prefix}_${this.sequence.toString(36)}`;
   }
 
+  private localCalendarEventFromInput(
+    userId: EntityId,
+    input: CalendarEventInput,
+    now: string
+  ): CalendarEvent {
+    return {
+      id: this.nextId("calendar"),
+      userId,
+      source: "local",
+      connectorAccountId: null,
+      provider: null,
+      providerEventId: null,
+      calendarId: null,
+      calendarSummary: input.category ?? "DentLink Local",
+      title: input.title.trim(),
+      description: input.description?.trim() ?? "",
+      location: input.location?.trim() || null,
+      sourceUrl: input.sourceUrl ?? null,
+      startAt: input.startAt,
+      endAt: input.endAt,
+      startDate: input.startDate ?? null,
+      endDate: input.endDate ?? null,
+      timezone: input.timezone ?? null,
+      allDay: input.allDay ?? false,
+      recurrenceRule: normalizeRecurrence(input.recurrenceRule),
+      category: input.category?.trim() || null,
+      color: input.color ?? null,
+      reminderMinutes: input.reminderMinutes ?? null,
+      importedUid: input.importedUid ?? null,
+      annotation: null,
+      status: "active",
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+      dismissedAt: null
+    };
+  }
+
+  private applyLocalCalendarPatch(
+    existing: CalendarEvent,
+    patch: LocalCalendarEventPatch,
+    now: string
+  ): CalendarEvent {
+    const category =
+      patch.category === undefined ? existing.category : patch.category?.trim() || null;
+    return {
+      ...existing,
+      title: patch.title === undefined ? existing.title : patch.title.trim(),
+      description:
+        patch.description === undefined ? existing.description : patch.description.trim(),
+      location: patch.location === undefined ? existing.location : patch.location?.trim() || null,
+      sourceUrl: patch.sourceUrl === undefined ? existing.sourceUrl : patch.sourceUrl,
+      startAt: patch.startAt ?? existing.startAt,
+      endAt: patch.endAt ?? existing.endAt,
+      startDate: patch.startDate === undefined ? existing.startDate : patch.startDate,
+      endDate: patch.endDate === undefined ? existing.endDate : patch.endDate,
+      timezone: patch.timezone === undefined ? existing.timezone : patch.timezone,
+      allDay: patch.allDay ?? existing.allDay,
+      recurrenceRule:
+        patch.recurrenceRule === undefined
+          ? existing.recurrenceRule
+          : normalizeRecurrence(patch.recurrenceRule),
+      category,
+      calendarSummary:
+        patch.category === undefined ? existing.calendarSummary : (category ?? "DentLink Local"),
+      color: patch.color === undefined ? existing.color : patch.color,
+      reminderMinutes:
+        patch.reminderMinutes === undefined ? existing.reminderMinutes : patch.reminderMinutes,
+      importedUid: patch.importedUid === undefined ? existing.importedUid : patch.importedUid,
+      status: patch.status ?? existing.status,
+      version: existing.version + 1,
+      updatedAt: now,
+      dismissedAt: patch.status === "deleted" ? null : existing.dismissedAt
+    };
+  }
+
+  private annotationForEvent(eventId: EntityId): CalendarEventAnnotation | null {
+    return (
+      [...this.calendarAnnotations.values()].find((annotation) => annotation.eventId === eventId) ??
+      null
+    );
+  }
+
   private assertWebhookRateLimit(endpointId: EntityId, now: string): void {
     const windowStart = new Date(new Date(now).getTime() - 60_000).toISOString();
     const recentDeliveries = this.webhookDeliveries.filter(
@@ -1361,5 +1613,21 @@ function copyConnectorSourceRecord(record: ConnectorSourceRecord): ConnectorSour
 }
 
 function copyCalendarEvent(event: CalendarEvent): CalendarEvent {
-  return { ...event };
+  return {
+    ...event,
+    annotation: event.annotation ? copyCalendarAnnotation(event.annotation) : null
+  };
+}
+
+function copyCalendarAnnotation(annotation: CalendarEventAnnotation): CalendarEventAnnotation {
+  return {
+    ...annotation,
+    tagIds: [...annotation.tagIds],
+    tags: annotation.tags.map((tag) => ({ ...tag }))
+  };
+}
+
+function normalizeRecurrence(value: string | null | undefined): string | null {
+  if (!value) return null;
+  return value.toUpperCase().startsWith("RRULE:") ? value : `RRULE:${value}`;
 }

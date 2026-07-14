@@ -118,7 +118,7 @@ textarea {
 
 .notifications-shell,
 .webhooks-shell,
-.agenda-shell {
+.calendar-shell {
   display: grid;
   gap: 12px;
   padding: 20px;
@@ -196,15 +196,440 @@ textarea {
   opacity: 0.68;
 }
 
-.calendar-time {
+.calendar-shell {
+  width: min(1480px, 100%);
+  margin: 0 auto;
+}
+
+.calendar-toolbar,
+.calendar-panel,
+.calendar-card,
+.event-details {
+  border: 1px solid #d7dce5;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.calendar-toolbar {
   display: flex;
   flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px;
+}
+
+.calendar-toolbar-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
+}
+
+.calendar-toolbar-group label,
+.calendar-date-field span,
+.form-field label,
+.file-picker span {
+  color: #384252;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.calendar-date-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.calendar-management {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(280px, 0.85fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.calendar-panel {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.calendar-panel h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.calendar-panel p {
+  margin: 4px 0 0;
   color: #5a6472;
 }
 
+.local-event-form {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.4fr) repeat(3, minmax(150px, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.form-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.form-field input,
+.form-field select,
+.form-field textarea,
+.file-picker input,
+.calendar-toolbar select,
+.calendar-toolbar input {
+  width: 100%;
+  border: 1px solid #c8ced8;
+  border-radius: 6px;
+  padding: 9px 10px;
+}
+
+.form-field input[type="color"] {
+  min-height: 40px;
+  padding: 3px;
+}
+
+.span-2 {
+  grid-column: span 2;
+}
+
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  color: #384252;
+  font-weight: 650;
+}
+
+.field-error {
+  color: #b42318;
+  font-size: 13px;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: end;
+}
+
+.file-picker {
+  display: grid;
+  gap: 6px;
+}
+
+.file-name,
+.calendar-status,
+.muted-text {
+  color: #5a6472;
+}
+
+.agenda-view {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
+}
+
+.calendar-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border-left: 5px solid var(--event-accent, #2563eb);
+  padding: 14px;
+}
+
+.calendar-card.cancelled,
+.calendar-card.dismissed {
+  opacity: 0.68;
+}
+
+.calendar-card-header,
+.event-actions,
+.calendar-time,
+.calendar-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.calendar-card-header {
+  justify-content: space-between;
+}
+
+.calendar-card strong,
+.timed-event strong,
+.event-chip strong {
+  overflow-wrap: anywhere;
+}
+
+.source-badge,
+.annotation-flags {
+  display: inline-flex;
+  align-items: center;
+  width: max-content;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: #eef2ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.source-badge.local {
+  background: #ecfdf3;
+  color: #137a3a;
+}
+
+.annotation-flags {
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.calendar-time {
+  color: #5a6472;
+}
+
+.event-actions {
+  align-items: center;
+}
+
+.event-actions a,
 .notification-card a {
   color: #1d4ed8;
+}
+
+.calendar-grid-panel,
+.month-view {
+  border: 1px solid #d7dce5;
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.calendar-all-day-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  border-bottom: 1px solid #e7ebf2;
+  padding: 10px;
+}
+
+.day-time-grid {
+  display: grid;
+  grid-template-columns: 72px minmax(620px, 1fr);
+  min-height: calc(18 * 64px);
+}
+
+.time-labels {
+  display: grid;
+  grid-template-rows: repeat(18, 64px);
+  border-right: 1px solid #e7ebf2;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 12px;
+  text-align: right;
+}
+
+.time-labels span {
+  padding: 6px 8px 0 0;
+}
+
+.time-grid-column {
+  position: relative;
+  min-height: calc(18 * 64px);
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 63px,
+      #e7ebf2 63px,
+      #e7ebf2 64px
+    ),
+    #ffffff;
+}
+
+.time-grid-line {
+  height: 64px;
+}
+
+.timed-event,
+.event-chip,
+.month-date-button,
+.more-events {
+  border-color: var(--event-accent, #2563eb);
+}
+
+.timed-event {
+  position: absolute;
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  overflow: hidden;
+  border-left: 4px solid var(--event-accent, #2563eb);
+  background: #ffffff;
+  padding: 5px 7px;
+  text-align: left;
+}
+
+.event-chip {
+  display: grid;
+  gap: 2px;
+  min-height: 30px;
+  border-left: 4px solid var(--event-accent, #2563eb);
+  background: #ffffff;
+  padding: 5px 7px;
+  text-align: left;
+}
+
+.event-chip span,
+.timed-event span {
+  color: #5a6472;
+  font-size: 12px;
+}
+
+.week-scroll {
+  overflow-x: auto;
+}
+
+.week-grid {
+  display: grid;
+  grid-template-columns: 72px repeat(7, minmax(150px, 1fr));
+  min-width: 1160px;
+}
+
+.week-day-header,
+.week-corner {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  border: 0;
+  border-right: 1px solid #e7ebf2;
+  border-bottom: 1px solid #e7ebf2;
+  border-radius: 0;
+  background: #f8fafc;
+  font-weight: 700;
+}
+
+.week-day-header.today,
+.month-cell.today .month-date-button {
+  background: #dbeafe;
+}
+
+.week-all-day-label,
+.week-all-day-cell {
+  border-right: 1px solid #e7ebf2;
+  border-bottom: 1px solid #e7ebf2;
+  padding: 8px;
+}
+
+.week-all-day-label {
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: right;
+}
+
+.week-all-day-cell {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  min-height: 72px;
+}
+
+.month-view {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(120px, 1fr));
+}
+
+.month-weekday {
+  border-right: 1px solid #e7ebf2;
+  border-bottom: 1px solid #e7ebf2;
+  background: #f8fafc;
+  padding: 8px;
+  color: #384252;
+  font-weight: 700;
+}
+
+.month-cell {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-height: 132px;
+  border-right: 1px solid #e7ebf2;
+  border-bottom: 1px solid #e7ebf2;
+  padding: 8px;
+}
+
+.month-cell.muted {
+  background: #f8fafc;
+  color: #7c8796;
+}
+
+.month-cell.selected {
+  box-shadow: inset 0 0 0 2px #2563eb;
+}
+
+.month-date-button {
+  width: 34px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 999px;
+  font-weight: 700;
+}
+
+.month-events {
+  display: grid;
+  gap: 4px;
+}
+
+.more-events {
+  min-height: 28px;
+  padding: 0 8px;
+  color: #1d4ed8;
+  font-size: 12px;
+}
+
+.event-details {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 20;
+  display: grid;
+  gap: 12px;
+  width: min(420px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  box-shadow: 0 24px 70px rgb(15 23 42 / 18%);
+  padding: 16px;
+}
+
+.event-details h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.event-details dl {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 8px 12px;
+  margin: 0;
+}
+
+.event-details dt {
+  color: #5a6472;
+  font-weight: 700;
+}
+
+.event-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .note-card {
@@ -255,5 +680,54 @@ textarea {
     align-items: flex-start;
     flex-direction: column;
     gap: 4px;
+  }
+
+  .calendar-shell {
+    padding: 12px;
+  }
+
+  .calendar-management,
+  .local-event-form {
+    grid-template-columns: 1fr;
+  }
+
+  .span-2 {
+    grid-column: auto;
+  }
+
+  .calendar-toolbar {
+    align-items: stretch;
+  }
+
+  .calendar-toolbar-group,
+  .calendar-date-field {
+    width: 100%;
+  }
+
+  .calendar-toolbar-group button,
+  .calendar-toolbar-group select,
+  .calendar-date-field input {
+    flex: 1 1 auto;
+  }
+
+  .agenda-view {
+    grid-template-columns: 1fr;
+  }
+
+  .day-time-grid {
+    overflow-x: auto;
+  }
+
+  .month-view {
+    grid-template-columns: repeat(7, minmax(96px, 1fr));
+    overflow-x: auto;
+  }
+
+  .month-cell {
+    min-height: 116px;
+  }
+
+  .event-details dl {
+    grid-template-columns: 1fr;
   }
 }

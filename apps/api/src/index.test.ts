@@ -24,6 +24,7 @@ import type {
   NoteHistoryEvent,
   NotesList,
   SyncResponse,
+  Tag,
   WebhookEndpoint
 } from "@dentlink/item-model";
 
@@ -52,6 +53,10 @@ const milestone4SchemaPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../migrations/0005_google_calendar_connector.sql"
 );
+const milestone5SchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0006_calendar_foundation_ics.sql"
+);
 
 type StoreFixture = {
   name: string;
@@ -79,7 +84,8 @@ const fixtures: StoreFixture[] = [
         milestone2SchemaPath,
         milestone3SchemaPath,
         milestone31SchemaPath,
-        milestone4SchemaPath
+        milestone4SchemaPath,
+        milestone5SchemaPath
       ]);
       return {
         store: new D1DentLinkStore(db),
@@ -828,7 +834,9 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       "Patient consult",
       "Cancelled review"
     ]);
+    expect(agenda.events.every((event) => event.source === "google-calendar")).toBe(true);
     expect(agenda.events[0]).toMatchObject({
+      source: "google-calendar",
       allDay: true,
       startDate: "2026-07-15",
       endDate: "2026-07-16",
@@ -838,7 +846,10 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       allDay: false,
       location: "Operatory 2"
     });
-    expect(agenda.events[2]?.status).toBe("cancelled");
+    expect(agenda.events[2]).toMatchObject({
+      source: "google-calendar",
+      status: "cancelled"
+    });
 
     const repeatSync = await requestJson<{
       account: ConnectorAccount;
@@ -856,6 +867,18 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     expect(repeatSync.processed).toBe(0);
     expect(repeatSync.upsertedEvents).toBe(0);
     expect(repeatSync.account.syncCursor).toBe("calendar-sync-2");
+    const repeatedAgenda = await requestJson<{ events: CalendarEvent[] }>(
+      store,
+      "GET",
+      "/v1/calendar/events",
+      undefined,
+      owner.session.token
+    );
+    expect(repeatedAgenda.events).toHaveLength(3);
+    expect(repeatedAgenda.events.every((event) => event.source === "google-calendar")).toBe(true);
+    expect(repeatedAgenda.events.find((event) => event.status === "cancelled")?.source).toBe(
+      "google-calendar"
+    );
 
     const records = await requestJson<{ records: ConnectorSourceRecord[] }>(
       store,
@@ -1027,6 +1050,226 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       owner.session.token
     );
     expect(afterRepeatAgenda.events).toHaveLength(3);
+  });
+
+  it("supports local calendar CRUD, annotations, filters, sync, and ICS import/export", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "calendar-local@example.com");
+    const other = await register(store, "calendar-local-other@example.com");
+    const googleCalendarClient = fakeGoogleCalendarClient();
+    const env = googleCalendarTestEnv(googleCalendarClient);
+
+    const local = await requestJson<CalendarEvent>(
+      store,
+      "POST",
+      "/v1/calendar/events",
+      {
+        title: "Local consult",
+        description: "DentLink-owned event",
+        startAt: "2026-07-20T14:00:00.000Z",
+        endAt: "2026-07-20T14:30:00.000Z",
+        timezone: "America/New_York",
+        location: "Operatory 1",
+        sourceUrl: "https://example.test/consult",
+        recurrenceRule: "FREQ=WEEKLY;COUNT=2",
+        category: "Clinic",
+        color: "#2f855a",
+        reminderMinutes: 15
+      },
+      owner.session.token,
+      201
+    );
+    expect(local).toMatchObject({
+      source: "local",
+      provider: null,
+      title: "Local consult",
+      recurrenceRule: "RRULE:FREQ=WEEKLY;COUNT=2",
+      category: "Clinic",
+      reminderMinutes: 15
+    });
+
+    const updated = await requestJson<CalendarEvent>(
+      store,
+      "PATCH",
+      `/v1/calendar/local-events/${local.id}`,
+      { expectedVersion: local.version, patch: { title: "Local consult updated" } },
+      owner.session.token
+    );
+    expect(updated.title).toBe("Local consult updated");
+    await requestJson<ApiErrorBody>(
+      store,
+      "PATCH",
+      `/v1/calendar/local-events/${local.id}`,
+      { expectedVersion: local.version, patch: { title: "Stale" } },
+      owner.session.token,
+      409
+    );
+
+    await requestJson<ApiErrorBody>(
+      store,
+      "GET",
+      `/v1/calendar/events/${local.id}`,
+      undefined,
+      other.session.token,
+      404
+    );
+
+    const start = await requestJson<{ authorizationUrl: string; expiresAt: string }>(
+      store,
+      "POST",
+      "/v1/connectors/google-calendar/start?returnTo=https%3A%2F%2Fweb.example.test%2Fagenda",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const state = new URL(start.authorizationUrl).searchParams.get("state");
+    await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/google-calendar/callback?code=valid-code&state=${state}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    const googleOnly = await requestJson<{ events: CalendarEvent[] }>(
+      store,
+      "GET",
+      "/v1/calendar/events?source=google-calendar&timeMin=2026-07-01T00%3A00%3A00.000Z&timeMax=2026-08-01T00%3A00%3A00.000Z",
+      undefined,
+      owner.session.token
+    );
+    expect(googleOnly.events.every((event) => event.source === "google-calendar")).toBe(true);
+    await requestJson<ApiErrorBody>(
+      store,
+      "PATCH",
+      `/v1/calendar/local-events/${googleOnly.events[0]?.id}`,
+      { expectedVersion: googleOnly.events[0]?.version, patch: { title: "No writeback" } },
+      owner.session.token,
+      409
+    );
+
+    const tag = await requestJson<Tag>(
+      store,
+      "POST",
+      "/v1/tags",
+      { name: "Follow up" },
+      owner.session.token,
+      201
+    );
+    const annotation = await requestJson<{ notes: string; hidden: boolean; tagIds: string[] }>(
+      store,
+      "PATCH",
+      `/v1/calendar/events/${googleOnly.events[0]?.id}/annotation`,
+      { patch: { notes: "DentLink-only note", pinned: true, completed: true, tagIds: [tag.id] } },
+      owner.session.token
+    );
+    expect(annotation).toMatchObject({
+      notes: "DentLink-only note",
+      hidden: false,
+      tagIds: [tag.id]
+    });
+
+    const accounts = await requestJson<{ accounts: ConnectorAccount[] }>(
+      store,
+      "GET",
+      "/v1/connectors/accounts",
+      undefined,
+      owner.session.token
+    );
+    await requestJson(
+      store,
+      "POST",
+      `/v1/connectors/google-calendar/${accounts.accounts[0]?.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    const afterSync = await requestJson<{ events: CalendarEvent[] }>(
+      store,
+      "GET",
+      "/v1/calendar/events?source=google-calendar&timeMin=2026-07-01T00%3A00%3A00.000Z&timeMax=2026-08-01T00%3A00%3A00.000Z",
+      undefined,
+      owner.session.token
+    );
+    expect(
+      afterSync.events.find((event) => event.id === googleOnly.events[0]?.id)?.annotation
+    )?.toMatchObject({ notes: "DentLink-only note", pinned: true, completed: true });
+
+    const ics = [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "BEGIN:VEVENT",
+      "UID:ics-1@example.test",
+      "SUMMARY:ICS timed event",
+      "DTSTART;TZID=America/New_York:20260721T090000",
+      "DTEND;TZID=America/New_York:20260721T093000",
+      "RRULE:FREQ=DAILY;COUNT=2",
+      "LOCATION:Room 2",
+      "URL:https://example.test/ics",
+      "END:VEVENT",
+      "BEGIN:VEVENT",
+      "UID:ics-all-day@example.test",
+      "SUMMARY:ICS all-day event",
+      "DTSTART;VALUE=DATE:20260722",
+      "DTEND;VALUE=DATE:20260723",
+      "END:VEVENT",
+      "END:VCALENDAR"
+    ].join("\r\n");
+    const imported = await requestJson<{
+      imported: number;
+      skippedDuplicates: number;
+      events: CalendarEvent[];
+    }>(store, "POST", "/v1/calendar/ics/import", { ics }, owner.session.token, 201);
+    expect(imported.imported).toBe(2);
+    expect(imported.events.every((event) => event.source === "local")).toBe(true);
+    expect(imported.events[0]).toMatchObject({
+      source: "local",
+      importedUid: "ics-1@example.test",
+      recurrenceRule: "RRULE:FREQ=DAILY;COUNT=2",
+      timezone: "America/New_York"
+    });
+    const duplicate = await requestJson<{ imported: number; skippedDuplicates: number }>(
+      store,
+      "POST",
+      "/v1/calendar/ics/import",
+      { ics },
+      owner.session.token,
+      201
+    );
+    expect(duplicate).toMatchObject({ imported: 0, skippedDuplicates: 2 });
+
+    const exportResponse = await handleApiRequest(
+      new Request(
+        "https://api.dentlink.test/v1/calendar/ics/export?timeMin=2026-07-01T00%3A00%3A00.000Z&timeMax=2026-08-01T00%3A00%3A00.000Z",
+        { headers: { Authorization: `Bearer ${owner.session.token}` } }
+      ),
+      { store }
+    );
+    expect(exportResponse.status).toBe(200);
+    expect(exportResponse.headers.get("Content-Type")).toContain("text/calendar");
+    const exported = await exportResponse.text();
+    expect(exported).toContain("BEGIN:VCALENDAR");
+    expect(exported).toContain("SUMMARY:Local consult updated");
+    expect(exported).toContain("SUMMARY:ICS timed event");
+    expect(exported).not.toContain("Patient consult");
+
+    const deleted = await requestJson<CalendarEvent>(
+      store,
+      "DELETE",
+      `/v1/calendar/local-events/${updated.id}`,
+      { expectedVersion: updated.version },
+      owner.session.token
+    );
+    expect(deleted.status).toBe("deleted");
+    const syncChanges = await requestJson<SyncResponse>(
+      store,
+      "GET",
+      "/v1/sync?cursor=0",
+      undefined,
+      owner.session.token
+    );
+    expect(syncChanges.changes.some((change) => change.type === "calendar_event")).toBe(true);
   });
 
   it("persists and resolves conflicts with version checks and history", async () => {

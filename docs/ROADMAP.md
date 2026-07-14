@@ -197,8 +197,65 @@ notifications, widgets, Tauri, and Android.
 
 ## Milestone 5: Calendar foundation and ICS
 
-Implement DentLink-local calendar events, ICS import/export, calendar annotations, source filters,
-and richer calendar views without provider writeback.
+Status: implemented.
+
+Implemented scope:
+
+- DentLink-owned local calendar events with CRUD, version checks, user isolation, all-day support,
+  timezone metadata, simple RRULE recurrence storage, category/color fields, reminder metadata, and
+  soft deletion.
+- ICS import/export for authenticated DentLink Local events, including timed events, all-day
+  events, descriptions, locations, safe URLs, imported UID deduplication, and recurrence
+  preservation where supported.
+- DentLink-only annotations for provider events: notes, pinned, completed, hidden, and tags without
+  mutating Google Calendar.
+- Calendar source filters for all sources, Google Calendar, and DentLink Local.
+- Agenda, Day, Week, and Month browser views with date navigation, source distinction, local event
+  editing controls, provider read-only behavior, annotation controls, and ICS import/export
+  controls.
+- D1 migration and memory/D1 storage parity for local events, annotations, source-filtered range
+  listing, sync changes, and duplicate-safe ICS import.
+
+Out of scope and still not implemented: Google Calendar writeback, provider event creation or
+editing, attendee management, CalDAV, remote ICS subscriptions, Microsoft Graph, Outlook, IMAP,
+AI summaries, reminder delivery, push/email/SMS notifications, drag-and-drop scheduling, mobile,
+desktop, widgets, and production deployment.
+    Future providers
+
+Calendar Annotations
+Allow users to add DentLink-only metadata to imported events:
+    notes
+    pinned
+    completed
+    hidden
+    tags
+without modifying Google.
+
+ICS
+Import
+    upload .ics
+    parse
+    import into local calendar
+Export
+    export local events
+    optionally export annotations
+No CalDAV.
+No provider sync.
+
+API
+CRUD local events
+import endpoint
+export endpoint
+filter endpoint
+
+Tests
+
+Browser
+API
+ICS parser
+Timezone handling
+
+Recurring events
 
 ## Milestone 6: Microsoft and IMAP
 

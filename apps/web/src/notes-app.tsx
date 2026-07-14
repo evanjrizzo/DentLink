@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement } from "react";
 
 import { DentLinkApiClient, DentLinkApiError } from "@dentlink/api-client";
 import type {
   AuthSession,
   CalendarEvent,
+  CalendarEventInput,
+  CalendarIcsImportResult,
+  CalendarSourceFilter,
   ConnectorAccount,
   EntityId,
   Notification,
@@ -21,6 +24,7 @@ import { NotesWorkspace } from "@dentlink/ui";
 const initialList: NotesList = { notes: [], folders: [], tags: [] };
 const SESSION_STORAGE_KEY = "dentlink.auth.session.v1";
 type View = "notifications" | "agenda" | "notes" | "webhooks" | "connectors";
+type CalendarMode = "agenda" | "day" | "week" | "month";
 
 export function DentLinkNotesApp(): ReactElement {
   const [client] = useState(
@@ -35,6 +39,13 @@ export function DentLinkNotesApp(): ReactElement {
   const [notesList, setNotesList] = useState<NotesList>(initialList);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
+  const [calendarMode, setCalendarMode] = useState<CalendarMode>("agenda");
+  const [calendarDate, setCalendarDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [calendarSource, setCalendarSource] = useState<CalendarSourceFilter>("all");
+  const [calendarDraft, setCalendarDraft] = useState<CalendarEventInput>(() =>
+    emptyCalendarDraft()
+  );
+  const [calendarActionPending, setCalendarActionPending] = useState(false);
   const [webhooks, setWebhooks] = useState<Array<WebhookEndpoint & { ingestUrl: string }>>([]);
   const [connectorAccounts, setConnectorAccounts] = useState<ConnectorAccount[]>([]);
   const [webhookDraft, setWebhookDraft] = useState({
@@ -105,9 +116,18 @@ export function DentLinkNotesApp(): ReactElement {
     if (requestId === notificationsRequest.current) setNotifications(response.notifications);
   }
 
-  async function loadCalendarEvents(): Promise<void> {
+  async function loadCalendarEvents(
+    nextDate = calendarDate,
+    nextSource = calendarSource,
+    nextMode = calendarMode
+  ): Promise<void> {
     const requestId = (calendarRequest.current += 1);
-    const response = await client.listCalendarEvents();
+    const range = calendarRange(nextMode, nextDate);
+    const response = await client.listCalendarEvents({
+      timeMin: range.timeMin,
+      timeMax: range.timeMax,
+      source: nextSource
+    });
     if (requestId === calendarRequest.current) setCalendarEvents(response.events);
   }
 
@@ -413,6 +433,97 @@ export function DentLinkNotesApp(): ReactElement {
     }
   }
 
+  async function createLocalCalendarEvent(): Promise<void> {
+    try {
+      setError(null);
+      setCalendarActionPending(true);
+      await client.createLocalCalendarEvent(calendarDraft);
+      setCalendarDraft(emptyCalendarDraft());
+      await loadCalendarEvents();
+      setView("agenda");
+    } catch (caught) {
+      handleFailure(caught);
+    } finally {
+      setCalendarActionPending(false);
+    }
+  }
+
+  async function updateLocalCalendarEvent(event: CalendarEvent): Promise<void> {
+    try {
+      setError(null);
+      await client.updateLocalCalendarEvent(event.id, event.version, {
+        title: `${event.title} updated`
+      });
+      await loadCalendarEvents();
+    } catch (caught) {
+      handleFailure(caught);
+    }
+  }
+
+  async function deleteLocalCalendarEvent(event: CalendarEvent): Promise<void> {
+    try {
+      setError(null);
+      await client.deleteLocalCalendarEvent(event.id, event.version);
+      await loadCalendarEvents();
+    } catch (caught) {
+      handleFailure(caught);
+    }
+  }
+
+  async function annotateCalendarEvent(
+    event: CalendarEvent,
+    patch: { notes?: string; pinned?: boolean; completed?: boolean; hidden?: boolean }
+  ): Promise<void> {
+    try {
+      setError(null);
+      await client.updateCalendarAnnotation(event.id, patch, event.annotation?.version);
+      await loadCalendarEvents();
+    } catch (caught) {
+      handleFailure(caught);
+    }
+  }
+
+  async function importIcs(ics: string): Promise<CalendarIcsImportResult> {
+    try {
+      setError(null);
+      setCalendarActionPending(true);
+      const result = await client.importIcs(ics);
+      await loadCalendarEvents();
+      return result;
+    } catch (caught) {
+      handleFailure(caught);
+      throw caught;
+    } finally {
+      setCalendarActionPending(false);
+    }
+  }
+
+  async function exportIcs(): Promise<string> {
+    try {
+      setError(null);
+      const range = calendarRange(calendarMode, calendarDate);
+      return await client.exportIcs(range);
+    } catch (caught) {
+      handleFailure(caught);
+      throw caught;
+    }
+  }
+
+  function changeCalendarDate(nextDate: string): void {
+    setCalendarDate(nextDate);
+    void loadCalendarEvents(nextDate, calendarSource);
+  }
+
+  function changeCalendarMode(nextMode: CalendarMode): void {
+    setCalendarMode(nextMode);
+    void loadCalendarEvents(calendarDate, calendarSource, nextMode);
+  }
+
+  function changeCalendarSource(nextSource: CalendarSourceFilter): void {
+    setCalendarSource(nextSource);
+    void loadCalendarEvents(calendarDate, nextSource);
+  }
+
   async function logout(): Promise<void> {
     try {
       await client.logout();
@@ -554,9 +665,24 @@ export function DentLinkNotesApp(): ReactElement {
         />
       ) : null}
       {view === "agenda" ? (
-        <AgendaView
+        <CalendarWorkspace
           events={calendarEvents}
           accounts={connectorAccounts}
+          mode={calendarMode}
+          selectedDate={calendarDate}
+          source={calendarSource}
+          draft={calendarDraft}
+          actionPending={calendarActionPending}
+          onModeChange={changeCalendarMode}
+          onDateChange={changeCalendarDate}
+          onSourceChange={changeCalendarSource}
+          onDraftChange={setCalendarDraft}
+          onCreateLocalEvent={createLocalCalendarEvent}
+          onUpdateLocalEvent={updateLocalCalendarEvent}
+          onDeleteLocalEvent={deleteLocalCalendarEvent}
+          onAnnotateEvent={annotateCalendarEvent}
+          onImportIcs={importIcs}
+          onExportIcs={exportIcs}
           onRefresh={loadCalendarEvents}
           onConnectGoogleCalendar={connectGoogleCalendar}
           onSyncGoogleCalendar={syncGoogleCalendar}
@@ -871,67 +997,1004 @@ function WebhooksView(props: {
   );
 }
 
-function AgendaView(props: {
+function CalendarWorkspace(props: {
   events: CalendarEvent[];
   accounts: ConnectorAccount[];
+  mode: CalendarMode;
+  selectedDate: string;
+  source: CalendarSourceFilter;
+  draft: CalendarEventInput;
+  actionPending: boolean;
+  onModeChange: (mode: CalendarMode) => void;
+  onDateChange: (date: string) => void;
+  onSourceChange: (source: CalendarSourceFilter) => void;
+  onDraftChange: (draft: CalendarEventInput) => void;
+  onCreateLocalEvent: () => Promise<void>;
+  onUpdateLocalEvent: (event: CalendarEvent) => Promise<void>;
+  onDeleteLocalEvent: (event: CalendarEvent) => Promise<void>;
+  onAnnotateEvent: (
+    event: CalendarEvent,
+    patch: { notes?: string; pinned?: boolean; completed?: boolean; hidden?: boolean }
+  ) => Promise<void>;
+  onImportIcs: (ics: string) => Promise<CalendarIcsImportResult>;
+  onExportIcs: () => Promise<string>;
   onRefresh: () => Promise<void>;
   onConnectGoogleCalendar: () => Promise<void>;
   onSyncGoogleCalendar: (account: ConnectorAccount) => Promise<void>;
   onDismissEvent: (event: CalendarEvent) => Promise<void>;
 }): ReactElement {
+  const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
   const calendarAccounts = props.accounts.filter(
     (account) => account.connectorKey === "google-calendar"
   );
   const connectedAccounts = calendarAccounts.filter((account) => account.status === "connected");
+  const visibleEvents = eventsForMode(props.events, props.mode, props.selectedDate);
+  const eventActions = {
+    onSelectEvent: setSelectedEvent,
+    onUpdateLocalEvent: props.onUpdateLocalEvent,
+    onDeleteLocalEvent: props.onDeleteLocalEvent,
+    onAnnotateEvent: props.onAnnotateEvent,
+    onDismissEvent: props.onDismissEvent
+  };
   return (
-    <main className="agenda-shell">
-      <div className="note-toolbar">
-        <button onClick={() => void props.onRefresh()}>Refresh</button>
-        <button onClick={() => void props.onConnectGoogleCalendar()}>
-          Connect Google Calendar
-        </button>
-        {connectedAccounts.map((account) => (
-          <button key={account.id} onClick={() => void props.onSyncGoogleCalendar(account)}>
-            Sync Now
-          </button>
-        ))}
-      </div>
+    <main className="calendar-shell">
+      <CalendarToolbar
+        mode={props.mode}
+        selectedDate={props.selectedDate}
+        source={props.source}
+        connectedAccounts={connectedAccounts}
+        hasCalendarAccount={calendarAccounts.length > 0}
+        onModeChange={props.onModeChange}
+        onDateChange={props.onDateChange}
+        onSourceChange={props.onSourceChange}
+        onRefresh={props.onRefresh}
+        onConnectGoogleCalendar={props.onConnectGoogleCalendar}
+        onSyncGoogleCalendar={props.onSyncGoogleCalendar}
+      />
       {calendarAccounts.length === 0 ? <p>No Google Calendar account connected.</p> : null}
       {calendarAccounts.some((account) => account.errorMessage) ? (
         <p role="alert">{calendarAccounts.find((account) => account.errorMessage)?.errorMessage}</p>
       ) : null}
-      {calendarAccounts.length > 0 && props.events.length === 0 ? <p>No upcoming events.</p> : null}
-      <div className="note-list">
-        {props.events.map((event) => (
-          <article key={event.id} className={`notification-card calendar-event ${event.status}`}>
-            <div className="note-card-top">
-              <strong>{event.title}</strong>
-              <span>
-                {event.provider === "google-calendar" ? "Google Calendar" : event.provider}
-              </span>
-              {event.allDay ? <span>All day</span> : null}
-            </div>
-            <div className="calendar-time">
-              <time dateTime={event.startAt}>{formatEventStart(event)}</time>
-              <span>{event.allDay ? formatAllDayRange(event) : formatEventEnd(event)}</span>
-            </div>
-            {event.location ? <p>{event.location}</p> : null}
-            <span>{event.calendarSummary}</span>
-            <div className="note-order">
-              {event.sourceUrl ? (
-                <a href={event.sourceUrl} target="_blank" rel="noreferrer">
-                  Open in Google Calendar
-                </a>
-              ) : null}
-              <button type="button" onClick={() => void props.onDismissEvent(event)}>
-                Dismiss
-              </button>
-            </div>
-          </article>
-        ))}
+      <div className="calendar-management">
+        <LocalEventForm
+          draft={props.draft}
+          pending={props.actionPending}
+          onDraftChange={props.onDraftChange}
+          onCreateLocalEvent={props.onCreateLocalEvent}
+        />
+        <IcsControls onImportIcs={props.onImportIcs} onExportIcs={props.onExportIcs} />
       </div>
+      {props.mode === "agenda" ? (
+        <AgendaCalendarView events={visibleEvents} actions={eventActions} />
+      ) : null}
+      {props.mode === "day" ? (
+        <DayCalendarView
+          events={visibleEvents}
+          selectedDate={props.selectedDate}
+          actions={eventActions}
+        />
+      ) : null}
+      {props.mode === "week" ? (
+        <WeekCalendarView
+          events={visibleEvents}
+          selectedDate={props.selectedDate}
+          actions={eventActions}
+        />
+      ) : null}
+      {props.mode === "month" ? (
+        <MonthCalendarView
+          events={visibleEvents}
+          selectedDate={props.selectedDate}
+          onDateChange={props.onDateChange}
+          onModeChange={props.onModeChange}
+          actions={eventActions}
+        />
+      ) : null}
+      {selectedEvent ? (
+        <EventDetailsPanel
+          event={selectedEvent}
+          onClose={() => setSelectedEvent(null)}
+          actions={eventActions}
+        />
+      ) : null}
     </main>
   );
+}
+
+type CalendarEventActions = {
+  onSelectEvent: (event: CalendarEvent) => void;
+  onUpdateLocalEvent: (event: CalendarEvent) => Promise<void>;
+  onDeleteLocalEvent: (event: CalendarEvent) => Promise<void>;
+  onAnnotateEvent: (
+    event: CalendarEvent,
+    patch: { notes?: string; pinned?: boolean; completed?: boolean; hidden?: boolean }
+  ) => Promise<void>;
+  onDismissEvent: (event: CalendarEvent) => Promise<void>;
+};
+
+function CalendarToolbar(props: {
+  mode: CalendarMode;
+  selectedDate: string;
+  source: CalendarSourceFilter;
+  connectedAccounts: ConnectorAccount[];
+  hasCalendarAccount: boolean;
+  onModeChange: (mode: CalendarMode) => void;
+  onDateChange: (date: string) => void;
+  onSourceChange: (source: CalendarSourceFilter) => void;
+  onRefresh: () => Promise<void>;
+  onConnectGoogleCalendar: () => Promise<void>;
+  onSyncGoogleCalendar: (account: ConnectorAccount) => Promise<void>;
+}): ReactElement {
+  return (
+    <section className="calendar-toolbar" aria-label="Calendar controls">
+      <div className="calendar-toolbar-group" aria-label="Calendar view">
+        {(["agenda", "day", "week", "month"] as CalendarMode[]).map((mode) => (
+          <button
+            key={mode}
+            type="button"
+            className={props.mode === mode ? "selected" : ""}
+            aria-pressed={props.mode === mode}
+            onClick={() => props.onModeChange(mode)}
+          >
+            {mode[0]?.toUpperCase()}
+            {mode.slice(1)}
+          </button>
+        ))}
+      </div>
+      <div className="calendar-toolbar-group calendar-navigation" aria-label="Date navigation">
+        <button
+          type="button"
+          onClick={() => props.onDateChange(shiftDate(props.selectedDate, props.mode, -1))}
+        >
+          Previous
+        </button>
+        <label className="calendar-date-field" htmlFor="calendar-selected-date">
+          <span>{calendarRangeLabel(props.mode, props.selectedDate)}</span>
+          <input
+            id="calendar-selected-date"
+            aria-label="Calendar date"
+            type="date"
+            value={props.selectedDate}
+            onChange={(event) => props.onDateChange(event.target.value)}
+          />
+        </label>
+        <button type="button" onClick={() => props.onDateChange(todayKey())}>
+          Today
+        </button>
+        <button
+          type="button"
+          onClick={() => props.onDateChange(shiftDate(props.selectedDate, props.mode, 1))}
+        >
+          Next
+        </button>
+      </div>
+      <div className="calendar-toolbar-group" aria-label="Calendar source">
+        <label htmlFor="calendar-source">Source</label>
+        <select
+          id="calendar-source"
+          value={props.source}
+          onChange={(event) => props.onSourceChange(event.target.value as CalendarSourceFilter)}
+        >
+          <option value="all">All sources</option>
+          <option value="google-calendar">Google Calendar</option>
+          <option value="local">DentLink Local</option>
+        </select>
+      </div>
+      <div className="calendar-toolbar-group calendar-provider-actions" aria-label="Calendar data">
+        <button type="button" onClick={() => void props.onRefresh()}>
+          Refresh
+        </button>
+        {props.connectedAccounts.map((account) => (
+          <button
+            key={account.id}
+            type="button"
+            onClick={() => void props.onSyncGoogleCalendar(account)}
+          >
+            Sync Now
+          </button>
+        ))}
+        {!props.hasCalendarAccount ? (
+          <button type="button" onClick={() => void props.onConnectGoogleCalendar()}>
+            Connect Google Calendar
+          </button>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function LocalEventForm(props: {
+  draft: CalendarEventInput;
+  pending: boolean;
+  onDraftChange: (draft: CalendarEventInput) => void;
+  onCreateLocalEvent: () => Promise<void>;
+}): ReactElement {
+  const [submitted, setSubmitted] = useState(false);
+  const titleError = submitted && !props.draft.title.trim() ? "Title is required." : null;
+  const dateError =
+    submitted && new Date(props.draft.endAt).getTime() <= new Date(props.draft.startAt).getTime()
+      ? "End must be after start."
+      : null;
+  return (
+    <section className="calendar-panel local-event-panel" aria-labelledby="local-event-heading">
+      <div>
+        <h2 id="local-event-heading">Create DentLink Local Event</h2>
+        <p>DentLink Local events are editable here and never write back to Google Calendar.</p>
+      </div>
+      <form
+        className="local-event-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          setSubmitted(true);
+          if (!props.draft.title.trim() || dateError) return;
+          void props.onCreateLocalEvent().then(() => setSubmitted(false));
+        }}
+      >
+        <Field label="Title" id="local-event-title" required error={titleError}>
+          <input
+            id="local-event-title"
+            value={props.draft.title}
+            placeholder="Patient consult"
+            onChange={(event) => props.onDraftChange({ ...props.draft, title: event.target.value })}
+          />
+        </Field>
+        <Field label="Start" id="local-event-start" required error={dateError}>
+          <input
+            id="local-event-start"
+            type="datetime-local"
+            value={toDateTimeLocal(props.draft.startAt)}
+            onChange={(event) =>
+              props.onDraftChange({
+                ...props.draft,
+                startAt: fromDateTimeLocal(event.target.value)
+              })
+            }
+          />
+        </Field>
+        <Field label="End" id="local-event-end" required>
+          <input
+            id="local-event-end"
+            type="datetime-local"
+            value={toDateTimeLocal(props.draft.endAt)}
+            onChange={(event) =>
+              props.onDraftChange({ ...props.draft, endAt: fromDateTimeLocal(event.target.value) })
+            }
+          />
+        </Field>
+        <label className="checkbox-field" htmlFor="local-event-all-day">
+          <input
+            id="local-event-all-day"
+            type="checkbox"
+            checked={props.draft.allDay ?? false}
+            onChange={(event) =>
+              props.onDraftChange({ ...props.draft, allDay: event.target.checked })
+            }
+          />
+          <span>All day</span>
+        </label>
+        <Field label="Location" id="local-event-location">
+          <input
+            id="local-event-location"
+            value={props.draft.location ?? ""}
+            placeholder="Room 3"
+            onChange={(event) =>
+              props.onDraftChange({ ...props.draft, location: event.target.value || null })
+            }
+          />
+        </Field>
+        <Field label="Description" id="local-event-description" className="span-2">
+          <textarea
+            id="local-event-description"
+            value={props.draft.description ?? ""}
+            placeholder="Details visible only in DentLink"
+            onChange={(event) =>
+              props.onDraftChange({ ...props.draft, description: event.target.value })
+            }
+          />
+        </Field>
+        <Field label="Recurrence" id="local-event-recurrence">
+          <select
+            id="local-event-recurrence"
+            value={props.draft.recurrenceRule ?? ""}
+            onChange={(event) =>
+              props.onDraftChange({ ...props.draft, recurrenceRule: event.target.value || null })
+            }
+          >
+            <option value="">No recurrence</option>
+            <option value="FREQ=DAILY">Daily</option>
+            <option value="FREQ=WEEKLY">Weekly</option>
+            <option value="FREQ=MONTHLY">Monthly</option>
+          </select>
+        </Field>
+        <Field label="Category" id="local-event-category">
+          <input
+            id="local-event-category"
+            value={props.draft.category ?? ""}
+            placeholder="Clinic"
+            onChange={(event) =>
+              props.onDraftChange({ ...props.draft, category: event.target.value || null })
+            }
+          />
+        </Field>
+        <Field label="Color" id="local-event-color">
+          <input
+            id="local-event-color"
+            type="color"
+            value={props.draft.color ?? "#2f855a"}
+            onChange={(event) => props.onDraftChange({ ...props.draft, color: event.target.value })}
+          />
+        </Field>
+        <Field label="Reminder" id="local-event-reminder">
+          <select
+            id="local-event-reminder"
+            value={String(props.draft.reminderMinutes ?? 15)}
+            onChange={(event) =>
+              props.onDraftChange({
+                ...props.draft,
+                reminderMinutes: Number(event.target.value)
+              })
+            }
+          >
+            <option value="0">At start</option>
+            <option value="5">5 minutes before</option>
+            <option value="15">15 minutes before</option>
+            <option value="30">30 minutes before</option>
+            <option value="60">1 hour before</option>
+          </select>
+        </Field>
+        <div className="form-actions">
+          <button type="submit" disabled={props.pending}>
+            {props.pending ? "Creating..." : "Create Local Event"}
+          </button>
+        </div>
+      </form>
+    </section>
+  );
+}
+
+function Field(props: {
+  label: string;
+  id: string;
+  children: ReactElement;
+  required?: boolean;
+  error?: string | null;
+  className?: string;
+}): ReactElement {
+  return (
+    <div className={`form-field ${props.className ?? ""}`}>
+      <label htmlFor={props.id}>
+        {props.label}
+        {props.required ? <span aria-hidden="true"> *</span> : null}
+      </label>
+      {props.children}
+      {props.error ? (
+        <span className="field-error" role="alert">
+          {props.error}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function IcsControls(props: {
+  onImportIcs: (ics: string) => Promise<CalendarIcsImportResult>;
+  onExportIcs: () => Promise<string>;
+}): ReactElement {
+  const [fileName, setFileName] = useState("");
+  const [fileText, setFileText] = useState("");
+  const [status, setStatus] = useState("");
+  const [pending, setPending] = useState(false);
+  return (
+    <section className="calendar-panel ics-panel" aria-labelledby="ics-heading">
+      <div>
+        <h2 id="ics-heading">Import ICS</h2>
+        <p>Imported .ics events become DentLink Local events.</p>
+      </div>
+      <label className="file-picker" htmlFor="ics-file-input">
+        <span>ICS file</span>
+        <input
+          id="ics-file-input"
+          type="file"
+          accept=".ics,text/calendar"
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            if (!file) {
+              setFileName("");
+              setFileText("");
+              return;
+            }
+            setFileName(file.name);
+            void file.text().then(setFileText);
+          }}
+        />
+      </label>
+      <span className="file-name">{fileName || "No file selected"}</span>
+      <div className="note-order">
+        <button
+          type="button"
+          disabled={!fileText || pending}
+          onClick={() => {
+            setPending(true);
+            props
+              .onImportIcs(fileText)
+              .then((result) =>
+                setStatus(
+                  `Imported ${result.imported} event${result.imported === 1 ? "" : "s"}. ${
+                    result.skippedDuplicates
+                  } duplicate${result.skippedDuplicates === 1 ? "" : "s"} skipped.`
+                )
+              )
+              .finally(() => setPending(false));
+          }}
+        >
+          {pending ? "Importing..." : "Import ICS"}
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            void props.onExportIcs().then((ics) => {
+              downloadTextFile("dentlink-calendar.ics", ics, "text/calendar;charset=utf-8");
+              setStatus("Export Local ICS download started.");
+            })
+          }
+        >
+          Export Local ICS
+        </button>
+      </div>
+      {status ? (
+        <p className="calendar-status" role="status" aria-live="polite">
+          {status}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function AgendaCalendarView(props: {
+  events: CalendarEvent[];
+  actions: CalendarEventActions;
+}): ReactElement {
+  const sorted = [...props.events].sort(compareEventsByStart);
+  if (sorted.length === 0) return <p>No events in this range.</p>;
+  return (
+    <section className="agenda-view" aria-label="Agenda events">
+      {sorted.map((event) => (
+        <CalendarEventCard key={event.id} event={event} actions={props.actions} detailed />
+      ))}
+    </section>
+  );
+}
+
+function DayCalendarView(props: {
+  events: CalendarEvent[];
+  selectedDate: string;
+  actions: CalendarEventActions;
+}): ReactElement {
+  const allDayEvents = props.events.filter((event) => isAllDayOnDate(event, props.selectedDate));
+  const timedEvents = layoutTimedEvents(
+    props.events.filter((event) => isTimedOnDate(event, props.selectedDate))
+  );
+  return (
+    <section className="calendar-grid-panel" aria-label={`Day calendar for ${props.selectedDate}`}>
+      <div className="calendar-all-day-row">
+        <strong>All day</strong>
+        <div className="calendar-chip-row">
+          {allDayEvents.length === 0 ? <span>No all-day events</span> : null}
+          {allDayEvents.map((event) => (
+            <EventChip key={event.id} event={event} actions={props.actions} />
+          ))}
+        </div>
+      </div>
+      <div className="day-time-grid" role="grid" aria-label="Day schedule">
+        <TimeLabels />
+        <div className="time-grid-column" role="gridcell">
+          {HOURS.map((hour) => (
+            <div key={hour} className="time-grid-line" aria-hidden="true" />
+          ))}
+          {timedEvents.map((layout) => (
+            <TimedEventBlock key={layout.event.id} layout={layout} actions={props.actions} />
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function WeekCalendarView(props: {
+  events: CalendarEvent[];
+  selectedDate: string;
+  actions: CalendarEventActions;
+}): ReactElement {
+  const days = weekDays(props.selectedDate);
+  return (
+    <section className="calendar-grid-panel week-scroll" aria-label="Week calendar">
+      <div className="week-grid">
+        <div className="week-corner" />
+        {days.map((day) => (
+          <button
+            key={day.key}
+            type="button"
+            className={`week-day-header ${day.key === todayKey() ? "today" : ""}`}
+            aria-label={day.label}
+          >
+            {day.shortLabel}
+          </button>
+        ))}
+        <div className="week-all-day-label">All day</div>
+        {days.map((day) => (
+          <div key={`${day.key}-all-day`} className="week-all-day-cell">
+            {props.events
+              .filter((event) => isAllDayOnDate(event, day.key))
+              .map((event) => (
+                <EventChip key={event.id} event={event} actions={props.actions} />
+              ))}
+          </div>
+        ))}
+        <TimeLabels />
+        {days.map((day) => (
+          <div key={`${day.key}-timed`} className="time-grid-column" role="gridcell">
+            {HOURS.map((hour) => (
+              <div key={hour} className="time-grid-line" aria-hidden="true" />
+            ))}
+            {layoutTimedEvents(props.events.filter((event) => isTimedOnDate(event, day.key))).map(
+              (layout) => (
+                <TimedEventBlock key={layout.event.id} layout={layout} actions={props.actions} />
+              )
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function MonthCalendarView(props: {
+  events: CalendarEvent[];
+  selectedDate: string;
+  onDateChange: (date: string) => void;
+  onModeChange: (mode: CalendarMode) => void;
+  actions: CalendarEventActions;
+}): ReactElement {
+  const cells = monthCells(props.selectedDate);
+  const currentMonth = props.selectedDate.slice(0, 7);
+  return (
+    <section className="month-view" aria-label="Month calendar">
+      {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
+        <div key={day} className="month-weekday">
+          {day}
+        </div>
+      ))}
+      {cells.map((cell) => {
+        const events = props.events.filter((event) => eventOccursOnDate(event, cell.key));
+        const visible = events.slice(0, 3);
+        return (
+          <div
+            key={cell.key}
+            className={`month-cell ${cell.key.startsWith(currentMonth) ? "" : "muted"} ${
+              cell.key === todayKey() ? "today" : ""
+            } ${cell.key === props.selectedDate ? "selected" : ""}`}
+          >
+            <button
+              type="button"
+              className="month-date-button"
+              onClick={() => {
+                props.onDateChange(cell.key);
+                props.onModeChange("day");
+              }}
+            >
+              {Number(cell.key.slice(8, 10))}
+            </button>
+            <div className="month-events">
+              {visible.map((event) => (
+                <EventChip key={event.id} event={event} actions={props.actions} compact />
+              ))}
+              {events.length > visible.length ? (
+                <button
+                  type="button"
+                  className="more-events"
+                  onClick={() => {
+                    props.onDateChange(cell.key);
+                    props.onModeChange("day");
+                  }}
+                >
+                  +{events.length - visible.length} more
+                </button>
+              ) : null}
+            </div>
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+function CalendarEventCard(props: {
+  event: CalendarEvent;
+  actions: CalendarEventActions;
+  detailed?: boolean;
+}): ReactElement {
+  const event = props.event;
+  return (
+    <article
+      className={`calendar-card ${event.source} ${event.status}`}
+      aria-label={`Calendar event ${event.title}`}
+      style={eventAccentStyle(event)}
+    >
+      <div className="calendar-card-header">
+        <strong>{event.title}</strong>
+        <SourceBadge event={event} />
+      </div>
+      <div className="calendar-time">
+        <time dateTime={event.startAt}>{formatEventStart(event)}</time>
+        <span>{event.allDay ? formatAllDayRange(event) : formatEventEnd(event)}</span>
+        {event.allDay ? <span>All day</span> : null}
+      </div>
+      {event.location ? <p>{event.location}</p> : null}
+      <span className="muted-text">{event.calendarSummary}</span>
+      <AnnotationSummary event={event} />
+      <EventActions event={event} actions={props.actions} />
+    </article>
+  );
+}
+
+function EventChip(props: {
+  event: CalendarEvent;
+  actions: CalendarEventActions;
+  compact?: boolean;
+}): ReactElement {
+  return (
+    <button
+      type="button"
+      className={`event-chip ${props.event.source}`}
+      style={eventAccentStyle(props.event)}
+      onClick={() => props.actions.onSelectEvent(props.event)}
+    >
+      {!props.event.allDay && !props.compact ? <span>{formatEventTime(props.event)}</span> : null}
+      <strong>{props.event.title}</strong>
+      <span>{sourceLabel(props.event)}</span>
+    </button>
+  );
+}
+
+function TimedEventBlock(props: {
+  layout: TimedLayoutEvent;
+  actions: CalendarEventActions;
+}): ReactElement {
+  const left = (props.layout.column / props.layout.columns) * 100;
+  const width = 100 / props.layout.columns;
+  return (
+    <button
+      type="button"
+      className={`timed-event ${props.layout.event.source}`}
+      style={{
+        ...eventAccentStyle(props.layout.event),
+        top: `${props.layout.top}px`,
+        height: `${props.layout.height}px`,
+        left: `calc(${left}% + 4px)`,
+        width: `calc(${width}% - 8px)`
+      }}
+      onClick={() => props.actions.onSelectEvent(props.layout.event)}
+    >
+      <strong>{props.layout.event.title}</strong>
+      <span>{formatEventTime(props.layout.event)}</span>
+    </button>
+  );
+}
+
+function EventDetailsPanel(props: {
+  event: CalendarEvent;
+  actions: CalendarEventActions;
+  onClose: () => void;
+}): ReactElement {
+  const event = props.event;
+  return (
+    <aside className="event-details" aria-label={`Details for ${event.title}`}>
+      <div className="calendar-card-header">
+        <h2>{event.title}</h2>
+        <button type="button" onClick={props.onClose}>
+          Close
+        </button>
+      </div>
+      <SourceBadge event={event} />
+      <dl>
+        <dt>Date and time</dt>
+        <dd>
+          {formatEventStart(event)}{" "}
+          {event.allDay ? formatAllDayRange(event) : formatEventEnd(event)}
+        </dd>
+        <dt>All day</dt>
+        <dd>{event.allDay ? "Yes" : "No"}</dd>
+        {event.timezone ? (
+          <>
+            <dt>Timezone</dt>
+            <dd>{event.timezone}</dd>
+          </>
+        ) : null}
+        {event.location ? (
+          <>
+            <dt>Location</dt>
+            <dd>{event.location}</dd>
+          </>
+        ) : null}
+        {event.description ? (
+          <>
+            <dt>Description</dt>
+            <dd>{event.description}</dd>
+          </>
+        ) : null}
+        {event.recurrenceRule ? (
+          <>
+            <dt>Recurrence</dt>
+            <dd>{event.recurrenceRule}</dd>
+          </>
+        ) : null}
+        {event.annotation?.notes ? (
+          <>
+            <dt>Annotation</dt>
+            <dd>{event.annotation.notes}</dd>
+          </>
+        ) : null}
+      </dl>
+      <EventActions event={event} actions={props.actions} />
+    </aside>
+  );
+}
+
+function EventActions(props: {
+  event: CalendarEvent;
+  actions: CalendarEventActions;
+}): ReactElement {
+  const event = props.event;
+  return (
+    <div className="event-actions">
+      {event.sourceUrl ? (
+        <a href={event.sourceUrl} target="_blank" rel="noreferrer">
+          {event.source === "local" ? "Open source" : "Open in Google Calendar"}
+        </a>
+      ) : null}
+      {event.source === "local" ? (
+        <>
+          <button type="button" onClick={() => void props.actions.onUpdateLocalEvent(event)}>
+            Edit
+          </button>
+          <button type="button" onClick={() => void props.actions.onDeleteLocalEvent(event)}>
+            Delete
+          </button>
+        </>
+      ) : (
+        <>
+          <button
+            type="button"
+            onClick={() =>
+              void props.actions.onAnnotateEvent(event, {
+                notes: event.annotation?.notes ? "" : "DentLink note",
+                pinned: !(event.annotation?.pinned ?? false)
+              })
+            }
+          >
+            Annotate
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              void props.actions.onAnnotateEvent(event, {
+                completed: !(event.annotation?.completed ?? false)
+              })
+            }
+          >
+            {event.annotation?.completed ? "Uncomplete" : "Complete"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void props.actions.onAnnotateEvent(event, { hidden: true })}
+          >
+            Hide
+          </button>
+          <button type="button" onClick={() => void props.actions.onDismissEvent(event)}>
+            Dismiss
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+function SourceBadge(props: { event: CalendarEvent }): ReactElement {
+  return <span className={`source-badge ${props.event.source}`}>{sourceLabel(props.event)}</span>;
+}
+
+function AnnotationSummary(props: { event: CalendarEvent }): ReactElement | null {
+  const annotation = props.event.annotation;
+  if (!annotation) return null;
+  const labels = [
+    annotation.pinned ? "Pinned" : null,
+    annotation.completed ? "Completed" : null,
+    annotation.hidden ? "Hidden" : null
+  ].filter(Boolean);
+  return (
+    <>
+      {labels.length > 0 ? <span className="annotation-flags">{labels.join(" · ")}</span> : null}
+      {annotation.notes ? <p>{annotation.notes}</p> : null}
+    </>
+  );
+}
+
+const FIRST_VISIBLE_HOUR = 6;
+const LAST_VISIBLE_HOUR = 23;
+const HOURS = Array.from(
+  { length: LAST_VISIBLE_HOUR - FIRST_VISIBLE_HOUR + 1 },
+  (_, index) => index + FIRST_VISIBLE_HOUR
+);
+const HOUR_HEIGHT = 64;
+
+type TimedLayoutEvent = {
+  event: CalendarEvent;
+  top: number;
+  height: number;
+  column: number;
+  columns: number;
+};
+
+function TimeLabels(): ReactElement {
+  return (
+    <div className="time-labels" aria-hidden="true">
+      {HOURS.map((hour) => (
+        <span key={hour}>{formatHour(hour)}</span>
+      ))}
+    </div>
+  );
+}
+
+function layoutTimedEvents(events: CalendarEvent[]): TimedLayoutEvent[] {
+  const sorted = [...events].sort(compareEventsByStart);
+  const activeColumns: Array<{ end: number }> = [];
+  const layouts = sorted.map((event) => {
+    const start = eventMinutes(event.startAt);
+    const end = Math.max(start + 15, eventMinutes(event.endAt));
+    const visibleStart = Math.max(start, FIRST_VISIBLE_HOUR * 60);
+    const visibleEnd = Math.min(end, (LAST_VISIBLE_HOUR + 1) * 60);
+    let column = activeColumns.findIndex((active) => active.end <= start);
+    if (column === -1) {
+      column = activeColumns.length;
+      activeColumns.push({ end });
+    } else {
+      activeColumns[column] = { end };
+    }
+    return {
+      event,
+      top: ((visibleStart - FIRST_VISIBLE_HOUR * 60) / 60) * HOUR_HEIGHT,
+      height: Math.max(28, ((visibleEnd - visibleStart) / 60) * HOUR_HEIGHT),
+      column,
+      columns: 1
+    };
+  });
+  const columns = Math.max(1, activeColumns.length);
+  return layouts.map((layout) => ({ ...layout, columns }));
+}
+
+function weekDays(selectedDate: string): Array<{ key: string; label: string; shortLabel: string }> {
+  const start = new Date(`${selectedDate}T00:00:00.000Z`);
+  start.setUTCDate(start.getUTCDate() - start.getUTCDay());
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(start);
+    date.setUTCDate(start.getUTCDate() + index);
+    return {
+      key: date.toISOString().slice(0, 10),
+      label: date.toLocaleDateString(undefined, {
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+        timeZone: "UTC"
+      }),
+      shortLabel: date.toLocaleDateString(undefined, {
+        weekday: "short",
+        month: "numeric",
+        day: "numeric",
+        timeZone: "UTC"
+      })
+    };
+  });
+}
+
+function monthCells(selectedDate: string): Array<{ key: string }> {
+  const monthStart = new Date(`${selectedDate.slice(0, 7)}-01T00:00:00.000Z`);
+  const gridStart = new Date(monthStart);
+  gridStart.setUTCDate(1 - monthStart.getUTCDay());
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(gridStart);
+    date.setUTCDate(gridStart.getUTCDate() + index);
+    return { key: date.toISOString().slice(0, 10) };
+  });
+}
+
+function calendarRangeLabel(mode: CalendarMode, selectedDate: string): string {
+  const date = new Date(`${selectedDate}T00:00:00.000Z`);
+  if (mode === "day") {
+    return date.toLocaleDateString(undefined, {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+      timeZone: "UTC"
+    });
+  }
+  if (mode === "week" || mode === "agenda") {
+    const days = weekDays(selectedDate);
+    return `${formatMonthDay(days[0]?.key ?? selectedDate)}-${formatMonthDay(
+      days[6]?.key ?? selectedDate
+    )}, ${selectedDate.slice(0, 4)}`;
+  }
+  return date.toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
+}
+
+function eventOccursOnDate(event: CalendarEvent, dateKey: string): boolean {
+  if (event.allDay) return isAllDayOnDate(event, dateKey);
+  return isTimedOnDate(event, dateKey);
+}
+
+function isAllDayOnDate(event: CalendarEvent, dateKey: string): boolean {
+  if (!event.allDay) return false;
+  const start = event.startDate ?? event.startAt.slice(0, 10);
+  const exclusiveEnd = event.endDate ?? event.endAt.slice(0, 10);
+  return dateKey >= start && dateKey < exclusiveEnd;
+}
+
+function isTimedOnDate(event: CalendarEvent, dateKey: string): boolean {
+  return !event.allDay && event.startAt.slice(0, 10) === dateKey;
+}
+
+function eventMinutes(value: string): number {
+  const date = new Date(value);
+  return date.getUTCHours() * 60 + date.getUTCMinutes();
+}
+
+function compareEventsByStart(left: CalendarEvent, right: CalendarEvent): number {
+  return left.startAt.localeCompare(right.startAt) || left.title.localeCompare(right.title);
+}
+
+function eventAccentStyle(event: CalendarEvent): CSSProperties {
+  const color = event.source === "local" ? event.color || "#2f855a" : "#2563eb";
+  return { "--event-accent": color } as CSSProperties;
+}
+
+function sourceLabel(event: CalendarEvent): string {
+  return event.source === "local" ? "DentLink Local" : "Google Calendar";
+}
+
+function formatHour(hour: number): string {
+  const suffix = hour >= 12 ? "PM" : "AM";
+  const value = hour % 12 || 12;
+  return `${value} ${suffix}`;
+}
+
+function formatMonthDay(dateKey: string): string {
+  return new Date(`${dateKey}T00:00:00.000Z`).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC"
+  });
+}
+
+function formatEventTime(event: CalendarEvent): string {
+  return `${new Date(event.startAt).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit"
+  })}-${new Date(event.endAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+}
+
+function todayKey(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function downloadTextFile(filename: string, contents: string, type: string): void {
+  const url = URL.createObjectURL(new Blob([contents], { type }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function ConnectorsView(props: {
@@ -1018,6 +2081,73 @@ function ConnectorsView(props: {
 function formatEventStart(event: CalendarEvent): string {
   if (event.allDay && event.startDate) return event.startDate;
   return new Date(event.startAt).toLocaleString();
+}
+
+function emptyCalendarDraft(): CalendarEventInput {
+  const start = new Date();
+  start.setMinutes(0, 0, 0);
+  start.setHours(start.getHours() + 1);
+  const end = new Date(start);
+  end.setMinutes(end.getMinutes() + 30);
+  return {
+    title: "",
+    description: "",
+    startAt: start.toISOString(),
+    endAt: end.toISOString(),
+    allDay: false,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    location: null,
+    recurrenceRule: null,
+    category: "DentLink Local",
+    color: "#2f855a",
+    reminderMinutes: 15
+  };
+}
+
+function calendarRange(
+  mode: CalendarMode,
+  selectedDate: string
+): { timeMin: string; timeMax: string } {
+  const start = new Date(`${selectedDate}T00:00:00.000Z`);
+  if (mode === "week") start.setUTCDate(start.getUTCDate() - start.getUTCDay());
+  if (mode === "month") start.setUTCDate(1);
+  if (mode === "agenda") {
+    const end = new Date(start);
+    end.setUTCDate(end.getUTCDate() + 30);
+    return { timeMin: start.toISOString(), timeMax: end.toISOString() };
+  }
+  const end = new Date(start);
+  if (mode === "day") end.setUTCDate(end.getUTCDate() + 1);
+  if (mode === "week") end.setUTCDate(end.getUTCDate() + 7);
+  if (mode === "month") end.setUTCMonth(end.getUTCMonth() + 1);
+  return { timeMin: start.toISOString(), timeMax: end.toISOString() };
+}
+
+function eventsForMode(
+  events: CalendarEvent[],
+  mode: CalendarMode,
+  selectedDate: string
+): CalendarEvent[] {
+  const range = calendarRange(mode, selectedDate);
+  return events.filter((event) => event.endAt >= range.timeMin && event.startAt <= range.timeMax);
+}
+
+function shiftDate(selectedDate: string, mode: CalendarMode, direction: number): string {
+  const date = new Date(`${selectedDate}T00:00:00.000Z`);
+  if (mode === "day") date.setUTCDate(date.getUTCDate() + direction);
+  if (mode === "week" || mode === "agenda") date.setUTCDate(date.getUTCDate() + direction * 7);
+  if (mode === "month") date.setUTCMonth(date.getUTCMonth() + direction);
+  return date.toISOString().slice(0, 10);
+}
+
+function toDateTimeLocal(value: string): string {
+  const date = new Date(value);
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+
+function fromDateTimeLocal(value: string): string {
+  return new Date(value).toISOString();
 }
 
 function formatEventEnd(event: CalendarEvent): string {

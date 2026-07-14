@@ -194,3 +194,27 @@ credential reference only. Refresh tokens remain encrypted in `connector_credent
 Calendar events are unique by `(connector_account_id, provider_event_id)`, which makes repeated
 sync retry-safe. DentLink-local agenda dismissal updates only the `calendar_events.status` and
 `dismissed_at` fields; it does not mutate Google Calendar.
+
+## Milestone 5 D1 schema
+
+`migrations/0006_calendar_foundation_ics.sql` extends the calendar foundation without modifying
+prior migrations:
+
+- `calendar_events`: rebuilt in place to support both `source = 'google-calendar'` provider rows
+  and `source = 'local'` DentLink-owned rows. Local rows have no connector account, provider, or
+  provider event ID. Provider rows retain the Google connector linkage and read-only source fields.
+- Local calendar event columns include recurrence rule, category, display color, reminder metadata,
+  imported ICS UID, created/updated timestamps, version, and `status = 'deleted'` tombstones.
+- `calendar_event_annotations`: user-scoped DentLink-only annotations tied to normalized calendar
+  event IDs. Annotation rows store notes, pinned, completed, hidden, tag ID JSON, timestamps, and
+  version.
+- Sync support continues through `sync_changes` using `calendar_event` changes for local event and
+  annotation mutations.
+
+Indexes cover user/source/status/date range scans, provider event identity, local imported UID
+deduplication, and annotation lookup by `(user_id, event_id)`.
+
+Local and provider events share the same normalized envelope so the UI and API can render a single
+calendar stream. Provider-owned fields remain authoritative to the provider; DentLink-owned local
+events are editable inside DentLink. ICS import creates only `source = 'local'` rows and preserves
+the imported UID as external import metadata for duplicate-safe retries.

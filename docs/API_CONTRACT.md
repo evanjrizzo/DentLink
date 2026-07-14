@@ -245,3 +245,35 @@ The Google Calendar connector uses the read-only Calendar scope:
 ```text
 https://www.googleapis.com/auth/calendar.readonly
 ```
+
+## Milestone 5 calendar foundation and ICS endpoints
+
+Milestone 5 keeps Google Calendar read-only and adds DentLink-owned local calendar events, ICS file
+import/export, source filters, and DentLink-only annotations on provider events.
+
+- `GET /v1/calendar/events`: list normalized calendar events for the authenticated user. Supports
+  bounded `timeMin`, `timeMax`, `source=all|google-calendar|local`, and `includeHidden=true`.
+- `POST /v1/calendar/events`: create a DentLink Local calendar event. The server resolves
+  ownership and rejects client-supplied provider ownership fields.
+- `GET /v1/calendar/events/:eventId`: read one authenticated user's calendar event.
+- `PATCH /v1/calendar/events/:eventId`: update DentLink-local agenda state with
+  `expectedVersion`; provider-owned content fields remain read-only.
+- `PATCH /v1/calendar/local-events/:eventId`: update editable DentLink Local event fields with
+  `expectedVersion`.
+- `DELETE /v1/calendar/local-events/:eventId`: soft-delete a DentLink Local event with
+  `expectedVersion`.
+- `PATCH /v1/calendar/events/:eventId/annotation`: upsert DentLink-only annotations for any owned
+  normalized event. Supported fields are `notes`, `pinned`, `completed`, `hidden`, and `tagIds`.
+- `POST /v1/calendar/ics/import`: import posted ICS text into the authenticated user's DentLink
+  Local calendar. The request body is `{ "ics": "BEGIN:VCALENDAR..." }` and is size-limited.
+- `GET /v1/calendar/ics/export`: export DentLink Local events in the requested bounded date range
+  as `text/calendar` with an attachment disposition.
+
+Local event recurrence is stored as RFC 5545 RRULE text when supported. ICS import preserves UID,
+description, location, safe URL, all-day dates, timezone metadata, and recurrence where recognized.
+Unsupported recurrence metadata is reported as an import warning rather than silently promoted into
+provider-owned state.
+
+Provider-owned Google Calendar events can be hidden, completed, pinned, tagged, or annotated inside
+DentLink, but their title, time, recurrence, location, URL, and source calendar fields cannot be
+edited through Milestone 5 APIs.

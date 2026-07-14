@@ -1,8 +1,13 @@
 import type {
   AuthSession,
+  CalendarEventAnnotation,
+  CalendarEventAnnotationPatch,
+  CalendarEventInput,
   CalendarEvent,
   CalendarEventPatch,
   CalendarEventsList,
+  CalendarIcsImportResult,
+  CalendarSourceFilter,
   ConflictResponse,
   ConnectorAccount,
   ConnectorAccountInput,
@@ -266,8 +271,23 @@ export class DentLinkApiClient {
     );
   }
 
-  async listCalendarEvents(): Promise<CalendarEventsList> {
-    return this.request<CalendarEventsList>("/v1/calendar/events");
+  async listCalendarEvents(query?: {
+    timeMin?: string;
+    timeMax?: string;
+    source?: CalendarSourceFilter;
+    includeHidden?: boolean;
+  }): Promise<CalendarEventsList> {
+    const params = new URLSearchParams();
+    if (query?.timeMin) params.set("timeMin", query.timeMin);
+    if (query?.timeMax) params.set("timeMax", query.timeMax);
+    if (query?.source) params.set("source", query.source);
+    if (query?.includeHidden) params.set("includeHidden", "true");
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    return this.request<CalendarEventsList>(`/v1/calendar/events${suffix}`);
+  }
+
+  async createLocalCalendarEvent(input: CalendarEventInput): Promise<CalendarEvent> {
+    return this.request<CalendarEvent>("/v1/calendar/events", { method: "POST", body: input });
   }
 
   async updateCalendarEvent(
@@ -279,6 +299,53 @@ export class DentLinkApiClient {
       method: "PATCH",
       body: { expectedVersion, patch }
     });
+  }
+
+  async updateLocalCalendarEvent(
+    eventId: EntityId,
+    expectedVersion: number,
+    patch: CalendarEventPatch
+  ): Promise<CalendarEvent> {
+    return this.request<CalendarEvent>(`/v1/calendar/local-events/${eventId}`, {
+      method: "PATCH",
+      body: { expectedVersion, patch }
+    });
+  }
+
+  async deleteLocalCalendarEvent(
+    eventId: EntityId,
+    expectedVersion: number
+  ): Promise<CalendarEvent> {
+    return this.request<CalendarEvent>(`/v1/calendar/local-events/${eventId}`, {
+      method: "DELETE",
+      body: { expectedVersion }
+    });
+  }
+
+  async updateCalendarAnnotation(
+    eventId: EntityId,
+    patch: CalendarEventAnnotationPatch,
+    expectedVersion?: number
+  ): Promise<CalendarEventAnnotation> {
+    return this.request<CalendarEventAnnotation>(`/v1/calendar/events/${eventId}/annotation`, {
+      method: "PATCH",
+      body: { expectedVersion, patch }
+    });
+  }
+
+  async importIcs(ics: string): Promise<CalendarIcsImportResult> {
+    return this.request<CalendarIcsImportResult>("/v1/calendar/ics/import", {
+      method: "POST",
+      body: { ics }
+    });
+  }
+
+  async exportIcs(query?: { timeMin?: string; timeMax?: string }): Promise<string> {
+    const params = new URLSearchParams();
+    if (query?.timeMin) params.set("timeMin", query.timeMin);
+    if (query?.timeMax) params.set("timeMax", query.timeMax);
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    return this.requestText(`/v1/calendar/ics/export${suffix}`);
   }
 
   async listNotifications(): Promise<NotificationsList> {
@@ -415,6 +482,18 @@ export class DentLinkApiClient {
       );
     }
     return json as T;
+  }
+
+  private async requestText(path: string): Promise<string> {
+    const headers = new Headers();
+    headers.set("Accept", "text/calendar");
+    if (this.token) headers.set("Authorization", `Bearer ${this.token}`);
+    const response = await this.fetchImpl(`${this.baseUrl}${path}`, { headers });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new DentLinkApiError(text || "Request failed", "request_failed", response.status);
+    }
+    return text;
   }
 }
 

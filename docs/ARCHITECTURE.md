@@ -76,6 +76,19 @@ connector source records. Google Calendar remains authoritative: DentLink suppor
 and local agenda dismissal only, not provider event creation, editing, deletion, RSVP, or attendee
 management.
 
+Milestone 5 adds a provider-neutral local calendar foundation on top of the Google Calendar agenda.
+DentLink Local events use the shared normalized calendar event envelope with `source = 'local'`,
+versioned mutations, soft deletion, sync changes, and ICS import/export. Google Calendar events stay
+read-only provider rows with `source = 'google-calendar'`; DentLink-only annotations are stored
+separately so sync refreshes cannot overwrite user notes, hidden/completed state, pins, or tags.
+Calendar views are source-filtered by the normalized source value so future calendar providers can
+join the same listing contract without hardcoded Google-only UI logic.
+
+ICS import is file-content based in Milestone 5. The backend parses bounded user-submitted ICS text
+into DentLink Local events and does not fetch remote ICS URLs, subscribe to CalDAV, or write back to
+providers. Export emits DentLink Local events by default and does not reclassify provider events as
+DentLink-owned content.
+
 ## Sync architecture
 
 Clients use cursor-based incremental synchronization, optimistic local updates, offline mutation

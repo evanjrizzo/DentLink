@@ -7,8 +7,13 @@ import {
 
 import type {
   ConflictResolution,
+  CalendarEventAnnotation,
+  CalendarEventAnnotationPatch,
+  CalendarEventInput,
   CalendarEvent,
   CalendarEventPatch,
+  LocalCalendarEventPatch,
+  CalendarSourceFilter,
   ConnectorAccount,
   ConnectorAccountInput,
   ConnectorAccountPatch,
@@ -248,10 +253,11 @@ type ConnectorCredentialRow = {
 type CalendarEventRow = {
   id: string;
   user_id: string;
-  connector_account_id: string;
-  provider: "google-calendar";
-  provider_event_id: string;
-  calendar_id: string;
+  source: CalendarEvent["source"];
+  connector_account_id: string | null;
+  provider: "google-calendar" | null;
+  provider_event_id: string | null;
+  calendar_id: string | null;
   calendar_summary: string;
   title: string;
   description: string;
@@ -263,11 +269,30 @@ type CalendarEventRow = {
   end_date: string | null;
   timezone: string | null;
   all_day: number;
+  recurrence_rule: string | null;
+  category: string | null;
+  color: string | null;
+  reminder_minutes: number | null;
+  imported_uid: string | null;
   status: CalendarEvent["status"];
   version: number;
   created_at: string;
   updated_at: string;
   dismissed_at: string | null;
+};
+
+type CalendarAnnotationRow = {
+  id: string;
+  user_id: string;
+  event_id: string;
+  notes: string;
+  pinned: number;
+  completed: number;
+  hidden: number;
+  tag_ids_json: string;
+  version: number;
+  created_at: string;
+  updated_at: string;
 };
 
 export class D1DentLinkStore implements DentLinkStore {
@@ -1110,26 +1135,230 @@ export class D1DentLinkStore implements DentLinkStore {
       .run();
   }
 
-  async listCalendarEvents(userId: EntityId, now: string): Promise<{ events: CalendarEvent[] }> {
-    const rows = await this.all<CalendarEventRow>(
-      `SELECT * FROM calendar_events
-       WHERE user_id = ?
-         AND status NOT IN ('deleted', 'dismissed')
-         AND end_at >= ?
-       ORDER BY start_at ASC, title ASC`,
-      [userId, now]
+  async listCalendarEvents(
+    userId: EntityId,
+    query: {
+      timeMin: string;
+      timeMax: string;
+      source?: CalendarSourceFilter;
+      includeHidden?: boolean;
+    }
+  ): Promise<{ events: CalendarEvent[] }> {
+    const where = [
+      "e.user_id = ?",
+      "e.status NOT IN ('deleted', 'dismissed')",
+      "e.end_at >= ?",
+      "e.start_at <= ?"
+    ];
+    const values: Primitive[] = [userId, query.timeMin, query.timeMax];
+    if (query.source && query.source !== "all") {
+      where.push("e.source = ?");
+      values.push(query.source);
+    }
+    if (!query.includeHidden) where.push("COALESCE(a.hidden, 0) = 0");
+    const rows = await this.all<CalendarEventRow & CalendarAnnotationSelectRow>(
+      `SELECT e.*, ${calendarAnnotationSelectColumns()}
+       FROM calendar_events e
+       LEFT JOIN calendar_event_annotations a ON a.event_id = e.id AND a.user_id = e.user_id
+       WHERE ${where.join(" AND ")}
+       ORDER BY e.start_at ASC, e.title ASC`,
+      values
     );
-    return { events: rows.map(calendarEventFromRow) };
+    return { events: rows.map(calendarEventWithAnnotationFromRow) };
+  }
+
+  async createLocalCalendarEvent(
+    userId: EntityId,
+    input: CalendarEventInput,
+    now: string
+  ): Promise<CalendarEvent> {
+    const event = localCalendarEventFromInput(userId, input, now);
+    try {
+      await this.batch([
+        this.insertCalendarEventStatement(event),
+        this.changeStatement(userId, "calendar_event", event.id, "upsert", {
+          type: "calendar_event",
+          op: "upsert",
+          event
+        })
+      ]);
+    } catch (error) {
+      throw mapConstraintError(error, "calendar_event_exists", "Calendar event already exists");
+    }
+    return event;
+  }
+
+  async getCalendarEvent(userId: EntityId, eventId: EntityId): Promise<CalendarEvent | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT e.*, ${calendarAnnotationSelectColumns()}
+         FROM calendar_events e
+         LEFT JOIN calendar_event_annotations a ON a.event_id = e.id AND a.user_id = e.user_id
+         WHERE e.id = ? AND e.user_id = ? AND e.status != 'deleted'`
+      )
+      .bind(eventId, userId)
+      .first<CalendarEventRow & CalendarAnnotationSelectRow>();
+    return row ? calendarEventWithAnnotationFromRow(row) : null;
+  }
+
+  async updateLocalCalendarEvent(
+    userId: EntityId,
+    eventId: EntityId,
+    expectedVersion: number,
+    patch: LocalCalendarEventPatch,
+    now: string
+  ): Promise<CalendarEvent> {
+    const existing = await this.getCalendarEvent(userId, eventId);
+    if (!existing) throw new StoreError("not_found", "Calendar event not found");
+    if (existing.source !== "local") {
+      throw new StoreError("provider_event_readonly", "Provider calendar events are read-only");
+    }
+    const next = applyLocalCalendarPatch(existing, patch, now);
+    const result = await this.db
+      .prepare(
+        `UPDATE calendar_events
+         SET calendar_summary = ?, title = ?, description = ?, location = ?, source_url = ?,
+             start_at = ?, end_at = ?, start_date = ?, end_date = ?, timezone = ?, all_day = ?,
+             recurrence_rule = ?, category = ?, color = ?, reminder_minutes = ?, imported_uid = ?,
+             status = ?, version = ?, updated_at = ?, dismissed_at = ?
+         WHERE id = ? AND user_id = ? AND source = 'local' AND version = ? AND status != 'deleted'`
+      )
+      .bind(
+        next.calendarSummary,
+        next.title,
+        next.description,
+        next.location,
+        next.sourceUrl,
+        next.startAt,
+        next.endAt,
+        next.startDate,
+        next.endDate,
+        next.timezone,
+        bool(next.allDay),
+        next.recurrenceRule,
+        next.category,
+        next.color,
+        next.reminderMinutes,
+        next.importedUid,
+        next.status,
+        next.version,
+        next.updatedAt,
+        next.dismissedAt,
+        eventId,
+        userId,
+        expectedVersion
+      )
+      .run();
+    if ((result.meta?.changes ?? 0) !== 1) {
+      throw new StoreError("version_mismatch", "Calendar event changed on the server");
+    }
+    await this.batch([
+      this.changeStatement(
+        userId,
+        "calendar_event",
+        next.id,
+        next.status === "deleted" ? "delete" : "upsert",
+        next.status === "deleted"
+          ? { type: "calendar_event", op: "delete", id: next.id, userId }
+          : { type: "calendar_event", op: "upsert", event: next }
+      )
+    ]);
+    return next;
+  }
+
+  async deleteLocalCalendarEvent(
+    userId: EntityId,
+    eventId: EntityId,
+    expectedVersion: number,
+    now: string
+  ): Promise<CalendarEvent> {
+    return this.updateLocalCalendarEvent(
+      userId,
+      eventId,
+      expectedVersion,
+      { status: "deleted" },
+      now
+    );
+  }
+
+  async upsertCalendarEventAnnotation(
+    userId: EntityId,
+    eventId: EntityId,
+    expectedVersion: number | undefined,
+    patch: CalendarEventAnnotationPatch,
+    now: string
+  ): Promise<CalendarEventAnnotation> {
+    const event = await this.getCalendarEvent(userId, eventId);
+    if (!event) throw new StoreError("not_found", "Calendar event not found");
+    const existing = await this.getCalendarAnnotation(userId, eventId);
+    if (existing && expectedVersion !== undefined && existing.version !== expectedVersion) {
+      throw new StoreError("version_mismatch", "Calendar annotation changed on the server");
+    }
+    const tagIds = patch.tagIds ?? existing?.tagIds ?? [];
+    const annotation: CalendarEventAnnotation = {
+      ...(existing ?? {
+        id: nextId("calendar-annotation"),
+        userId,
+        eventId,
+        version: 0,
+        createdAt: now
+      }),
+      notes: patch.notes ?? existing?.notes ?? "",
+      pinned: patch.pinned ?? existing?.pinned ?? false,
+      completed: patch.completed ?? existing?.completed ?? false,
+      hidden: patch.hidden ?? existing?.hidden ?? false,
+      tagIds,
+      tags: await this.tagsForIds(userId, tagIds),
+      version: (existing?.version ?? 0) + 1,
+      updatedAt: now
+    };
+    await this.batch([
+      this.db
+        .prepare(
+          `INSERT INTO calendar_event_annotations
+           (id, user_id, event_id, notes, pinned, completed, hidden, tag_ids_json, version,
+            created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(user_id, event_id) DO UPDATE SET
+             notes = excluded.notes,
+             pinned = excluded.pinned,
+             completed = excluded.completed,
+             hidden = excluded.hidden,
+             tag_ids_json = excluded.tag_ids_json,
+             version = excluded.version,
+             updated_at = excluded.updated_at`
+        )
+        .bind(
+          annotation.id,
+          userId,
+          eventId,
+          annotation.notes,
+          bool(annotation.pinned),
+          bool(annotation.completed),
+          bool(annotation.hidden),
+          JSON.stringify(annotation.tagIds),
+          annotation.version,
+          annotation.createdAt,
+          annotation.updatedAt
+        ),
+      this.changeStatement(userId, "calendar_event", event.id, "upsert", {
+        type: "calendar_event",
+        op: "upsert",
+        event: { ...event, annotation, version: event.version + 1, updatedAt: now }
+      })
+    ]);
+    return annotation;
   }
 
   async upsertCalendarEvent(
     userId: EntityId,
     input: Omit<
       CalendarEvent,
-      "id" | "userId" | "version" | "createdAt" | "updatedAt" | "dismissedAt"
+      "id" | "userId" | "version" | "createdAt" | "updatedAt" | "dismissedAt" | "annotation"
     >,
     now: string
   ): Promise<{ event: CalendarEvent; created: boolean }> {
+    if (!input.connectorAccountId) throw new StoreError("not_found", "Connector account not found");
     const account = await this.getConnectorAccount(userId, input.connectorAccountId);
     if (!account) throw new StoreError("not_found", "Connector account not found");
     const existing = await this.db
@@ -1147,9 +1376,17 @@ export class D1DentLinkStore implements DentLinkStore {
             userId,
             createdAt: now,
             version: 0,
-            dismissedAt: null
+            dismissedAt: null,
+            annotation: null
           }),
       ...input,
+      source: "google-calendar",
+      recurrenceRule: input.recurrenceRule ?? null,
+      category: input.category ?? null,
+      color: input.color ?? null,
+      reminderMinutes: input.reminderMinutes ?? null,
+      importedUid: input.importedUid ?? null,
+      annotation: existing ? calendarEventFromRow(existing).annotation : null,
       status:
         input.status === "cancelled" || !existing || existing.status !== "dismissed"
           ? input.status
@@ -1161,11 +1398,11 @@ export class D1DentLinkStore implements DentLinkStore {
       this.db
         .prepare(
           `INSERT INTO calendar_events
-           (id, user_id, connector_account_id, provider, provider_event_id, calendar_id,
+           (id, user_id, source, connector_account_id, provider, provider_event_id, calendar_id,
             calendar_summary, title, description, location, source_url, start_at, end_at,
-            start_date, end_date, timezone, all_day, status, version, created_at, updated_at,
-            dismissed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            start_date, end_date, timezone, all_day, recurrence_rule, category, color,
+            reminder_minutes, imported_uid, status, version, created_at, updated_at, dismissed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(connector_account_id, provider_event_id) DO UPDATE SET
              calendar_id = excluded.calendar_id,
              calendar_summary = excluded.calendar_summary,
@@ -1179,6 +1416,11 @@ export class D1DentLinkStore implements DentLinkStore {
              end_date = excluded.end_date,
              timezone = excluded.timezone,
              all_day = excluded.all_day,
+             recurrence_rule = excluded.recurrence_rule,
+             category = excluded.category,
+             color = excluded.color,
+             reminder_minutes = excluded.reminder_minutes,
+             imported_uid = excluded.imported_uid,
              status = excluded.status,
              version = excluded.version,
              updated_at = excluded.updated_at,
@@ -1187,6 +1429,7 @@ export class D1DentLinkStore implements DentLinkStore {
         .bind(
           event.id,
           userId,
+          event.source,
           event.connectorAccountId,
           event.provider,
           event.providerEventId,
@@ -1202,6 +1445,11 @@ export class D1DentLinkStore implements DentLinkStore {
           event.endDate,
           event.timezone,
           bool(event.allDay),
+          event.recurrenceRule,
+          event.category,
+          event.color,
+          event.reminderMinutes,
+          event.importedUid,
           event.status,
           event.version,
           event.createdAt,
@@ -1719,6 +1967,73 @@ export class D1DentLinkStore implements DentLinkStore {
     return rows.map(historyFromRow);
   }
 
+  private insertCalendarEventStatement(event: CalendarEvent): D1PreparedStatement {
+    return this.db
+      .prepare(
+        `INSERT INTO calendar_events
+         (id, user_id, source, connector_account_id, provider, provider_event_id, calendar_id,
+          calendar_summary, title, description, location, source_url, start_at, end_at, start_date,
+          end_date, timezone, all_day, recurrence_rule, category, color, reminder_minutes,
+          imported_uid, status, version, created_at, updated_at, dismissed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(
+        event.id,
+        event.userId,
+        event.source,
+        event.connectorAccountId,
+        event.provider,
+        event.providerEventId,
+        event.calendarId,
+        event.calendarSummary,
+        event.title,
+        event.description,
+        event.location,
+        event.sourceUrl,
+        event.startAt,
+        event.endAt,
+        event.startDate,
+        event.endDate,
+        event.timezone,
+        bool(event.allDay),
+        event.recurrenceRule,
+        event.category,
+        event.color,
+        event.reminderMinutes,
+        event.importedUid,
+        event.status,
+        event.version,
+        event.createdAt,
+        event.updatedAt,
+        event.dismissedAt
+      );
+  }
+
+  private async getCalendarAnnotation(
+    userId: EntityId,
+    eventId: EntityId
+  ): Promise<CalendarEventAnnotation | null> {
+    const row = await this.db
+      .prepare(`SELECT * FROM calendar_event_annotations WHERE user_id = ? AND event_id = ?`)
+      .bind(userId, eventId)
+      .first<CalendarAnnotationRow>();
+    return row
+      ? calendarAnnotationFromRow(row, await this.tagsForIds(userId, parseTagIds(row.tag_ids_json)))
+      : null;
+  }
+
+  private async tagsForIds(userId: EntityId, tagIds: EntityId[]): Promise<Tag[]> {
+    const tags: Tag[] = [];
+    for (const tagId of tagIds) {
+      const row = await this.db
+        .prepare(`SELECT * FROM tags WHERE id = ? AND user_id = ?`)
+        .bind(tagId, userId)
+        .first<TagRow>();
+      if (row) tags.push(tagFromRow(row));
+    }
+    return tags;
+  }
+
   private async requireNote(userId: EntityId, noteId: EntityId): Promise<Note> {
     const notes = await this.noteRows(
       `SELECT * FROM notes WHERE id = ? AND user_id = ? AND status != 'deleted'`,
@@ -2043,6 +2358,7 @@ function calendarEventFromRow(row: CalendarEventRow): CalendarEvent {
   return {
     id: row.id,
     userId: row.user_id,
+    source: row.source ?? "google-calendar",
     connectorAccountId: row.connector_account_id,
     provider: row.provider,
     providerEventId: row.provider_event_id,
@@ -2058,11 +2374,84 @@ function calendarEventFromRow(row: CalendarEventRow): CalendarEvent {
     endDate: row.end_date,
     timezone: row.timezone,
     allDay: Boolean(row.all_day),
+    recurrenceRule: row.recurrence_rule ?? null,
+    category: row.category ?? null,
+    color: row.color ?? null,
+    reminderMinutes: row.reminder_minutes ?? null,
+    importedUid: row.imported_uid ?? null,
+    annotation: null,
     status: row.status,
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     dismissedAt: row.dismissed_at
+  };
+}
+
+type CalendarAnnotationSelectRow = {
+  annotation_id: string | null;
+  annotation_notes: string | null;
+  annotation_pinned: number | null;
+  annotation_completed: number | null;
+  annotation_hidden: number | null;
+  annotation_tag_ids_json: string | null;
+  annotation_version: number | null;
+  annotation_created_at: string | null;
+  annotation_updated_at: string | null;
+};
+
+function calendarAnnotationSelectColumns(): string {
+  return `a.id AS annotation_id,
+          a.notes AS annotation_notes,
+          a.pinned AS annotation_pinned,
+          a.completed AS annotation_completed,
+          a.hidden AS annotation_hidden,
+          a.tag_ids_json AS annotation_tag_ids_json,
+          a.version AS annotation_version,
+          a.created_at AS annotation_created_at,
+          a.updated_at AS annotation_updated_at`;
+}
+
+function calendarEventWithAnnotationFromRow(
+  row: CalendarEventRow & CalendarAnnotationSelectRow
+): CalendarEvent {
+  const event = calendarEventFromRow(row);
+  event.annotation = row.annotation_id
+    ? {
+        id: row.annotation_id,
+        userId: row.user_id,
+        eventId: row.id,
+        notes: row.annotation_notes ?? "",
+        pinned: Boolean(row.annotation_pinned),
+        completed: Boolean(row.annotation_completed),
+        hidden: Boolean(row.annotation_hidden),
+        tagIds: parseTagIds(row.annotation_tag_ids_json),
+        tags: [],
+        version: row.annotation_version ?? 1,
+        createdAt: row.annotation_created_at ?? row.created_at,
+        updatedAt: row.annotation_updated_at ?? row.updated_at
+      }
+    : null;
+  return event;
+}
+
+function calendarAnnotationFromRow(
+  row: CalendarAnnotationRow,
+  tags: Tag[]
+): CalendarEventAnnotation {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    eventId: row.event_id,
+    notes: row.notes,
+    pinned: Boolean(row.pinned),
+    completed: Boolean(row.completed),
+    hidden: Boolean(row.hidden),
+    tagIds: parseTagIds(row.tag_ids_json),
+    tags,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
   };
 }
 
@@ -2217,6 +2606,98 @@ function normalizeEmail(email: string): string {
 
 function bool(value: boolean): number {
   return value ? 1 : 0;
+}
+
+function localCalendarEventFromInput(
+  userId: EntityId,
+  input: CalendarEventInput,
+  now: string
+): CalendarEvent {
+  return {
+    id: nextId("calendar"),
+    userId,
+    source: "local",
+    connectorAccountId: null,
+    provider: null,
+    providerEventId: null,
+    calendarId: null,
+    calendarSummary: input.category ?? "DentLink Local",
+    title: input.title.trim(),
+    description: input.description?.trim() ?? "",
+    location: input.location?.trim() || null,
+    sourceUrl: input.sourceUrl ?? null,
+    startAt: input.startAt,
+    endAt: input.endAt,
+    startDate: input.startDate ?? null,
+    endDate: input.endDate ?? null,
+    timezone: input.timezone ?? null,
+    allDay: input.allDay ?? false,
+    recurrenceRule: normalizeRecurrence(input.recurrenceRule),
+    category: input.category?.trim() || null,
+    color: input.color ?? null,
+    reminderMinutes: input.reminderMinutes ?? null,
+    importedUid: input.importedUid ?? null,
+    annotation: null,
+    status: "active",
+    version: 1,
+    createdAt: now,
+    updatedAt: now,
+    dismissedAt: null
+  };
+}
+
+function applyLocalCalendarPatch(
+  existing: CalendarEvent,
+  patch: LocalCalendarEventPatch,
+  now: string
+): CalendarEvent {
+  const category =
+    patch.category === undefined ? existing.category : patch.category?.trim() || null;
+  return {
+    ...existing,
+    title: patch.title === undefined ? existing.title : patch.title.trim(),
+    description: patch.description === undefined ? existing.description : patch.description.trim(),
+    location: patch.location === undefined ? existing.location : patch.location?.trim() || null,
+    sourceUrl: patch.sourceUrl === undefined ? existing.sourceUrl : patch.sourceUrl,
+    startAt: patch.startAt ?? existing.startAt,
+    endAt: patch.endAt ?? existing.endAt,
+    startDate: patch.startDate === undefined ? existing.startDate : patch.startDate,
+    endDate: patch.endDate === undefined ? existing.endDate : patch.endDate,
+    timezone: patch.timezone === undefined ? existing.timezone : patch.timezone,
+    allDay: patch.allDay ?? existing.allDay,
+    recurrenceRule:
+      patch.recurrenceRule === undefined
+        ? existing.recurrenceRule
+        : normalizeRecurrence(patch.recurrenceRule),
+    category,
+    calendarSummary:
+      patch.category === undefined ? existing.calendarSummary : (category ?? "DentLink Local"),
+    color: patch.color === undefined ? existing.color : patch.color,
+    reminderMinutes:
+      patch.reminderMinutes === undefined ? existing.reminderMinutes : patch.reminderMinutes,
+    importedUid: patch.importedUid === undefined ? existing.importedUid : patch.importedUid,
+    status: patch.status ?? existing.status,
+    version: existing.version + 1,
+    updatedAt: now,
+    dismissedAt: patch.status === "deleted" ? null : existing.dismissedAt
+  };
+}
+
+function normalizeRecurrence(value: string | null | undefined): string | null {
+  if (!value) return null;
+  return value.toUpperCase().startsWith("RRULE:") ? value : `RRULE:${value}`;
+}
+
+function parseTagIds(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string")
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 function mapConstraintError(error: unknown, code: string, message: string): StoreError {

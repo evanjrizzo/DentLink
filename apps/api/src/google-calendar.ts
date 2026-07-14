@@ -490,11 +490,15 @@ function normalizedCalendarPayload(
   calendarSummary: string,
   event: GoogleCalendarProviderEvent,
   now: string
-): Omit<CalendarEvent, "id" | "userId" | "version" | "createdAt" | "updatedAt" | "dismissedAt"> {
+): Omit<
+  CalendarEvent,
+  "id" | "userId" | "version" | "createdAt" | "updatedAt" | "dismissedAt" | "annotation"
+> {
   const start = normalizeEventTime(event.start, now);
   const end = normalizeEventTime(event.end, start.iso);
   const allDay = Boolean(event.start?.date);
   return {
+    source: "google-calendar",
     connectorAccountId: account.id,
     provider: "google-calendar",
     providerEventId: event.id,
@@ -510,6 +514,11 @@ function normalizedCalendarPayload(
     endDate: event.end?.date ?? null,
     timezone: event.start?.timeZone ?? event.end?.timeZone ?? null,
     allDay,
+    recurrenceRule: null,
+    category: null,
+    color: null,
+    reminderMinutes: null,
+    importedUid: event.iCalUID ?? null,
     status: event.status === "cancelled" ? "cancelled" : "active"
   };
 }

@@ -1,8 +1,7 @@
 import { expect, test, type APIRequestContext, type Page, type Route } from "@playwright/test";
 
-const apiBaseUrl =
-  process.env.DENTLINK_PREVIEW_API_URL ?? "https://dentlink-api-preview.evanjrizzo.workers.dev";
-const webOrigin = process.env.DENTLINK_PREVIEW_WEB_URL ?? "https://dentlink-web-preview.pages.dev";
+const apiBaseUrl = process.env.DENTLINK_PREVIEW_API_URL ?? "http://127.0.0.1:5173";
+const webOrigin = process.env.DENTLINK_PREVIEW_WEB_URL ?? "http://127.0.0.1:5173";
 
 test.describe("Milestone 2.1 preview browser verification", () => {
   test("verifies auth, notes, notifications, and webhook lifecycle", async ({
@@ -392,7 +391,13 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         return;
       }
       if (method === "GET" && path === "/v1/calendar/events") {
-        await fulfillJson(route, { events });
+        const source = url.searchParams.get("source");
+        await fulfillJson(route, {
+          events:
+            source === "local" || source === "google-calendar"
+              ? events.filter((event) => (event as { source?: string }).source === source)
+              : events
+        });
         return;
       }
       if (method === "GET" && path === "/v1/webhooks") {
@@ -413,7 +418,10 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         calendarAccount.syncCursor = "calendar-sync-101";
         calendarAccount.updatedAt = syncedAt;
         calendarAccount.version += 1;
-        events = [
+        const existingById = new Map(
+          events.map((event) => [(event as { id?: string }).id, event as { annotation?: unknown }])
+        );
+        const syncedEvents = [
           calendarEventFixture({
             id: "calendar_event_all_day",
             title: "Calendar all-day planning",
@@ -433,6 +441,13 @@ test.describe("Milestone 2.1 preview browser verification", () => {
             endAt: "2026-07-15T18:30:00.000Z",
             version: 1
           })
+        ];
+        events = [
+          ...events.filter((event) => (event as { source?: string }).source === "local"),
+          ...syncedEvents.map((event) => ({
+            ...event,
+            annotation: existingById.get(event.id)?.annotation ?? event.annotation
+          }))
         ];
         await fulfillJson(route, {
           account: calendarAccount,
@@ -466,6 +481,121 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         });
         return;
       }
+      if (method === "POST" && path === "/v1/calendar/events") {
+        const input = request.postDataJSON() as Record<string, unknown>;
+        const event = calendarEventFixture({
+          id: "calendar_event_local",
+          title: String(input.title),
+          allDay: Boolean(input.allDay),
+          location: typeof input.location === "string" ? input.location : null,
+          startAt: String(input.startAt),
+          endAt: String(input.endAt),
+          version: 1
+        });
+        const localEvent = {
+          ...event,
+          source: "local",
+          provider: null,
+          providerEventId: null,
+          connectorAccountId: null,
+          calendarSummary: "DentLink Local",
+          recurrenceRule: input.recurrenceRule ?? null,
+          category: input.category ?? null,
+          color: input.color ?? null,
+          reminderMinutes: input.reminderMinutes ?? null,
+          importedUid: null,
+          annotation: null
+        };
+        events = [...events, localEvent];
+        await fulfillJson(route, localEvent, 201);
+        return;
+      }
+      if (method === "PATCH" && path === "/v1/calendar/local-events/calendar_event_local") {
+        events = events.map((event) =>
+          typeof event === "object" &&
+          event !== null &&
+          "id" in event &&
+          event.id === "calendar_event_local"
+            ? { ...event, title: "Browser local event updated", version: 2 }
+            : event
+        );
+        await fulfillJson(
+          route,
+          events.find((event) => (event as { id?: string }).id === "calendar_event_local")
+        );
+        return;
+      }
+      if (method === "DELETE" && path === "/v1/calendar/local-events/calendar_event_local") {
+        const deleted = events.find(
+          (event) => (event as { id?: string }).id === "calendar_event_local"
+        );
+        events = events.filter((event) => (event as { id?: string }).id !== "calendar_event_local");
+        await fulfillJson(route, { ...(deleted as object), status: "deleted", version: 3 });
+        return;
+      }
+      if (method === "PATCH" && path === "/v1/calendar/events/calendar_event_all_day/annotation") {
+        events = events.map((event) =>
+          (event as { id?: string }).id === "calendar_event_all_day"
+            ? {
+                ...(event as object),
+                annotation: {
+                  id: "annotation_calendar_all_day",
+                  userId: user.id,
+                  eventId: "calendar_event_all_day",
+                  notes: "DentLink note",
+                  pinned: true,
+                  completed: false,
+                  hidden: false,
+                  tagIds: [],
+                  tags: [],
+                  version: 1,
+                  createdAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString()
+                }
+              }
+            : event
+        );
+        await fulfillJson(route, (events[0] as { annotation?: unknown }).annotation);
+        return;
+      }
+      if (method === "POST" && path === "/v1/calendar/ics/import") {
+        const imported = {
+          ...calendarEventFixture({
+            id: "calendar_event_ics",
+            title: "ICS browser import",
+            allDay: false,
+            startAt: "2026-07-17T15:00:00.000Z",
+            endAt: "2026-07-17T15:30:00.000Z",
+            version: 1
+          }),
+          source: "local",
+          provider: null,
+          providerEventId: null,
+          connectorAccountId: null,
+          calendarSummary: "DentLink Local",
+          recurrenceRule: "RRULE:FREQ=DAILY;COUNT=2",
+          category: null,
+          color: null,
+          reminderMinutes: null,
+          importedUid: "browser-ics",
+          annotation: null
+        };
+        events = [...events, imported];
+        await fulfillJson(
+          route,
+          { imported: 1, skippedDuplicates: 0, events: [imported], warnings: [] },
+          201
+        );
+        return;
+      }
+      if (method === "GET" && path === "/v1/calendar/ics/export") {
+        await route.fulfill({
+          status: 200,
+          headers: { ...corsHeaders(), "Content-Type": "text/calendar" },
+          body: "BEGIN:VCALENDAR\r\nSUMMARY:Browser local event updated\r\nEND:VCALENDAR\r\n"
+        });
+        return;
+      }
       await route.fulfill({
         status: 404,
         headers: corsHeaders(),
@@ -481,18 +611,33 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await page.goto("/");
     await expect(page.getByText(user.email)).toBeVisible();
     await page.getByRole("button", { name: "Agenda" }).click();
-    await expect(page.getByText("No upcoming events.")).toBeVisible();
+    await expect(page.getByText("No events in this range.")).toBeVisible();
+    await expect(page.getByRole("textbox", { name: /^Title/ })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: /^Start/ })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: /^End/ })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Location" })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Description" })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Recurrence" })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Category" })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Color" })).toBeVisible();
+    await expect(page.getByLabel("ICS file")).toHaveAttribute("accept", /text\/calendar/);
+    await expect(page.getByRole("button", { name: "Export Local ICS" })).toBeVisible();
     await page.getByRole("button", { name: "Sync Now" }).click();
-    await expect(notificationCard(page, "Calendar all-day planning")).toBeVisible();
+    await expect(calendarEventCard(page, "Calendar all-day planning")).toBeVisible();
     await expect(
-      notificationCard(page, "Calendar all-day planning").getByText("All day")
+      calendarEventCard(page, "Calendar all-day planning").getByText("All day")
     ).toBeVisible();
-    await expect(notificationCard(page, "Calendar timed consult")).toBeVisible();
+    await expect(calendarEventCard(page, "Calendar timed consult")).toBeVisible();
     await expect(
-      notificationCard(page, "Calendar timed consult").getByText("Operatory 2")
+      calendarEventCard(page, "Calendar timed consult").getByText("Operatory 2")
     ).toBeVisible();
     await expect(
-      notificationCard(page, "Calendar all-day planning").getByRole("link", {
+      calendarEventCard(page, "Calendar timed consult").getByText("Google Calendar", {
+        exact: true
+      })
+    ).toBeVisible();
+    await expect(
+      calendarEventCard(page, "Calendar all-day planning").getByRole("link", {
         name: "Open in Google Calendar"
       })
     ).toHaveAttribute("href", /calendar\.google\.com/);
@@ -509,11 +654,99 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       })
     ];
     await page.getByRole("button", { name: "Refresh" }).click();
-    await expect(notificationCard(page, "Calendar refresh event")).toBeVisible();
-    await notificationCard(page, "Calendar timed consult")
+    await expect(calendarEventCard(page, "Calendar refresh event")).toBeVisible();
+
+    await page.getByLabel("Calendar date").fill("2026-07-15");
+    await page
+      .getByLabel("Calendar view")
+      .getByRole("button", { name: "Day", exact: true })
+      .click();
+    await expect(page.getByRole("grid", { name: "Day schedule" })).toBeVisible();
+    await expect(page.getByText("6 AM")).toBeVisible();
+    await expect(calendarGridEvent(page, "Calendar all-day planning")).toBeVisible();
+    await expect(calendarGridEvent(page, "Calendar timed consult")).toBeVisible();
+    await page
+      .getByLabel("Calendar view")
+      .getByRole("button", { name: "Week", exact: true })
+      .click();
+    await expect(page.getByRole("button", { name: /Sunday, July 12/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Saturday, July 18/ })).toBeVisible();
+    await expect(calendarGridEvent(page, "Calendar refresh event")).toBeVisible();
+    await page.getByRole("button", { name: "Next" }).click();
+    await expect(page.getByText(/Jul 19-Jul 25/)).toBeVisible();
+    await page.getByRole("button", { name: "Previous" }).click();
+    await page
+      .getByLabel("Calendar view")
+      .getByRole("button", { name: "Month", exact: true })
+      .click();
+    await expect(page.getByText("July 2026")).toBeVisible();
+    await expect(
+      page.locator(".month-cell").filter({ hasText: "Calendar all-day planning" })
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Next" }).click();
+    await expect(page.getByText("August 2026")).toBeVisible();
+    await page.getByRole("button", { name: "Today" }).click();
+    await expect(page.getByText("July 2026")).toBeVisible();
+    await page
+      .getByLabel("Calendar view")
+      .getByRole("button", { name: "Agenda", exact: true })
+      .click();
+    await calendarEventCard(page, "Calendar timed consult")
       .getByRole("button", { name: "Dismiss" })
       .click();
-    await expect(notificationCard(page, "Calendar timed consult")).toHaveCount(0);
+    await expect(calendarEventCard(page, "Calendar timed consult")).toHaveCount(0);
+    await page.getByRole("combobox", { name: "Source" }).selectOption("local");
+    await page.getByRole("textbox", { name: /^Title/ }).fill("Browser local event");
+    await page.getByRole("textbox", { name: "Location" }).fill("Room 3");
+    await page.getByRole("button", { name: "Create Local Event" }).click();
+    await expect(calendarEventCard(page, "Browser local event")).toBeVisible();
+    await expect(
+      calendarEventCard(page, "Browser local event").locator(".source-badge.local")
+    ).toBeVisible();
+    await calendarEventCard(page, "Browser local event")
+      .getByRole("button", { name: "Edit" })
+      .click();
+    await expect(calendarEventCard(page, "Browser local event updated")).toBeVisible();
+
+    await page.getByRole("combobox", { name: "Source" }).selectOption("google-calendar");
+    await calendarEventCard(page, "Calendar all-day planning")
+      .getByRole("button", { name: "Annotate" })
+      .click();
+    await expect(
+      calendarEventCard(page, "Calendar all-day planning").getByText("Pinned")
+    ).toBeVisible();
+    await expect(
+      calendarEventCard(page, "Calendar all-day planning").getByText("DentLink note")
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Sync Now" }).click();
+    await expect(
+      calendarEventCard(page, "Calendar all-day planning").getByText("DentLink note")
+    ).toBeVisible();
+
+    await page.getByRole("combobox", { name: "Source" }).selectOption("local");
+    await page.getByLabel("ICS file").setInputFiles({
+      name: "browser-import.ics",
+      mimeType: "text/calendar",
+      buffer: Buffer.from("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n")
+    });
+    await expect(page.getByText("browser-import.ics")).toBeVisible();
+    await page.getByRole("button", { name: "Import ICS" }).click();
+    await expect(calendarEventCard(page, "ICS browser import")).toBeVisible();
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export Local ICS" }).click();
+    expect((await downloadPromise).suggestedFilename()).toBe("dentlink-calendar.ics");
+    await calendarEventCard(page, "Browser local event updated")
+      .getByRole("button", { name: "Delete" })
+      .click();
+    await expect(
+      page.getByRole("article").filter({ hasText: "Browser local event updated" })
+    ).toHaveCount(0);
+
+    await page.setViewportSize({ width: 760, height: 900 });
+    await expect(
+      page.getByLabel("Calendar view").getByRole("button", { name: "Agenda", exact: true })
+    ).toBeVisible();
+    await expect(page.getByRole("textbox", { name: /^Title/ })).toBeVisible();
   });
 });
 
@@ -523,6 +756,14 @@ function noteCard(page: Page, title: string) {
 
 function notificationCard(page: Page, title: string) {
   return page.locator(".notification-card").filter({ hasText: title });
+}
+
+function calendarEventCard(page: Page, title: string) {
+  return page.getByRole("article", { name: `Calendar event ${title}` });
+}
+
+function calendarGridEvent(page: Page, title: string) {
+  return page.locator(".event-chip, .timed-event").filter({ hasText: title });
 }
 
 function webhookCard(page: Page, slug: string) {
@@ -657,6 +898,7 @@ function calendarEventFixture(input: {
   return {
     id: input.id,
     userId: "user_browser_calendar_refresh",
+    source: "google-calendar",
     connectorAccountId: "connector_calendar_browser_refresh",
     provider: "google-calendar",
     providerEventId: input.id.replace("calendar_event_", "provider_event_"),
@@ -672,6 +914,12 @@ function calendarEventFixture(input: {
     endDate: input.endDate ?? null,
     timezone: "America/New_York",
     allDay: input.allDay,
+    recurrenceRule: null,
+    category: null,
+    color: null,
+    reminderMinutes: null,
+    importedUid: null,
+    annotation: null,
     status: "active",
     version: input.version,
     createdAt: timestamp,
@@ -680,9 +928,9 @@ function calendarEventFixture(input: {
   };
 }
 
-async function fulfillJson(route: Route, body: unknown): Promise<void> {
+async function fulfillJson(route: Route, body: unknown, status = 200): Promise<void> {
   await route.fulfill({
-    status: 200,
+    status,
     headers: corsHeaders(),
     contentType: "application/json",
     body: JSON.stringify(body)
