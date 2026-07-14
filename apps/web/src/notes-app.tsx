@@ -2082,6 +2082,11 @@ function ConnectorsView(props: {
               {account.lastSyncAt ? new Date(account.lastSyncAt).toLocaleString() : "Never"}
             </span>
             {account.errorMessage ? <p>{account.errorMessage}</p> : null}
+            {account.settings.gmailReconnectRequired === true ? (
+              <p className="connector-warning">
+                Reconnect Gmail to grant read-only mailbox access required for backfill.
+              </p>
+            ) : null}
             <p className="connector-help">
               Sync Now checks Gmail history since the last checkpoint. Backfill 30 Days scans recent
               Gmail history without resetting existing notifications.

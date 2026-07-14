@@ -23,10 +23,13 @@ import type {
 import type { ConnectorDefinition } from "@dentlink/connector-sdk";
 
 const GMAIL_CONNECTOR_KEY = "gmail";
-const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.metadata";
+const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+const GMAIL_SCOPE = GMAIL_READONLY_SCOPE;
 const GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1";
 const INITIAL_SYNC_PAGE_SIZE = 25;
 const HISTORY_PAGE_SIZE = 100;
+const GMAIL_READONLY_RECONNECT_MESSAGE =
+  "Reconnect Gmail to grant read-only mailbox access required for backfill.";
 
 type GmailOperation =
   | "gmail_token_refresh"
@@ -199,7 +202,13 @@ export async function completeGmailOAuth(
       syncStatus: "idle",
       credentialRef: credential.id,
       credentialStatus: "configured",
-      settings: { ...account.settings, googleEmail: profile.emailAddress },
+      settings: withGmailGrantedScopes(
+        {
+          ...account.settings,
+          googleEmail: profile.emailAddress
+        },
+        token.scope ?? GMAIL_SCOPE
+      ),
       syncCursor: profile.historyId ?? account.syncCursor,
       lastHealthAt: now,
       errorCode: null,
@@ -326,9 +335,9 @@ export async function syncGmailAccount(
         latest.id,
         latest.version,
         {
-          status: isGmailAuthError(error) ? "error" : "connected",
-          healthStatus: isGmailAuthError(error) ? "error" : "degraded",
-          syncStatus: "error",
+          status: isGmailAuthFailure(error) ? "error" : "connected",
+          healthStatus: isGmailAuthFailure(error) ? "error" : "degraded",
+          syncStatus: "idle",
           lastHealthAt: now,
           settings: withGmailOperationFailure(latest.settings, "incremental", now, error),
           errorCode: gmailErrorCode(error),
@@ -361,6 +370,9 @@ export async function backfillGmailAccount(
   if (!syncing) throw new StoreError("not_found", "Gmail account not found");
 
   try {
+    if (knownGmailScopesMissReadonly(syncing.settings)) {
+      throw new StoreError("gmail_permission_denied", GMAIL_READONLY_RECONNECT_MESSAGE);
+    }
     const credential = await store.getConnectorCredential(
       userId,
       account.id,
@@ -425,9 +437,9 @@ export async function backfillGmailAccount(
         latest.id,
         latest.version,
         {
-          status: isGmailAuthError(error) ? "error" : "connected",
-          healthStatus: isGmailAuthError(error) ? "error" : "degraded",
-          syncStatus: "error",
+          status: isGmailAuthFailure(error) ? "error" : "connected",
+          healthStatus: isGmailAuthFailure(error) ? "error" : "degraded",
+          syncStatus: "idle",
           lastHealthAt: now,
           settings: withGmailOperationFailure(latest.settings, "backfill", now, error),
           errorCode: gmailErrorCode(error),
@@ -1015,11 +1027,8 @@ function safeErrorMessage(error: unknown): string {
   return "Gmail sync failed";
 }
 
-function isGmailAuthError(error: unknown): boolean {
-  return (
-    error instanceof StoreError &&
-    (error.code === "gmail_auth_failed" || error.code === "gmail_permission_denied")
-  );
+function isGmailAuthFailure(error: unknown): boolean {
+  return error instanceof StoreError && error.code === "gmail_auth_failed";
 }
 
 function gmailDentLinkErrorCode(status: number, reason: string | null): string {
@@ -1053,8 +1062,8 @@ function gmailSafeUpstreamMessage(
   if (status === 401) return "Gmail authentication failed. Reconnect the account.";
   if (status === 403) {
     return reason?.toLowerCase().includes("insufficient")
-      ? "Backfill requires Gmail read permission. Reconnect the account to grant access."
-      : "Gmail denied access to this mailbox operation.";
+      ? GMAIL_READONLY_RECONNECT_MESSAGE
+      : upstreamMessage || "Gmail returned a permission error.";
   }
   if (status === 429) return "Gmail rate limited this request. Try again later.";
   if (status >= 500) return "Gmail is temporarily unavailable. Try again later.";
@@ -1129,8 +1138,10 @@ function withGmailOperationSummary(
   summary: GmailSyncResult["summary"]
 ): ConnectorAccount["settings"] {
   const prefix = operation === "incremental" ? "gmailLastIncremental" : "gmailLastBackfill";
+  const reconnectRequired = knownGmailScopesMissReadonly(settings) ? true : false;
   return {
     ...settings,
+    gmailReconnectRequired: reconnectRequired,
     [`${prefix}At`]: now,
     [`${prefix}Status`]: status,
     [`${prefix}ErrorCode`]: null,
@@ -1153,13 +1164,47 @@ function withGmailOperationFailure(
   error: unknown
 ): ConnectorAccount["settings"] {
   const prefix = operation === "incremental" ? "gmailLastIncremental" : "gmailLastBackfill";
+  const reconnectRequired =
+    error instanceof StoreError && error.code === "gmail_permission_denied" ? true : undefined;
   return {
     ...settings,
+    ...(reconnectRequired === undefined
+      ? {}
+      : {
+          gmailReconnectRequired: reconnectRequired
+        }),
     [`${prefix}At`]: now,
     [`${prefix}Status`]: "failed",
     [`${prefix}ErrorCode`]: gmailErrorCode(error),
     [`${prefix}ErrorMessage`]: safeErrorMessage(error)
   };
+}
+
+function withGmailGrantedScopes(
+  settings: ConnectorAccount["settings"],
+  scope: string
+): ConnectorAccount["settings"] {
+  const scopes = normalizeScopes(scope);
+  return {
+    ...settings,
+    gmailGrantedScopes: scopes.join(" "),
+    gmailReadOnlyGranted: scopes.includes(GMAIL_READONLY_SCOPE),
+    gmailReconnectRequired: !scopes.includes(GMAIL_READONLY_SCOPE),
+    gmailRequestedScope: GMAIL_SCOPE
+  };
+}
+
+function knownGmailScopesMissReadonly(settings: ConnectorAccount["settings"]): boolean {
+  const scopeValue = settings.gmailGrantedScopes;
+  if (typeof scopeValue !== "string" || scopeValue.length === 0) return false;
+  return !normalizeScopes(scopeValue).includes(GMAIL_READONLY_SCOPE);
+}
+
+function normalizeScopes(scope: string): string[] {
+  return scope
+    .split(/\s+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

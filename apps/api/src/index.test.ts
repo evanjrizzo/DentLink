@@ -622,9 +622,14 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     const authorizationUrl = new URL(start.authorizationUrl);
     expect(authorizationUrl.origin).toBe("https://accounts.google.com");
     expect(authorizationUrl.searchParams.get("scope")).toBe(
+      "https://www.googleapis.com/auth/gmail.readonly"
+    );
+    expect(authorizationUrl.searchParams.get("scope")).not.toBe(
       "https://www.googleapis.com/auth/gmail.metadata"
     );
     expect(authorizationUrl.searchParams.get("access_type")).toBe("offline");
+    expect(authorizationUrl.searchParams.get("prompt")).toBe("consent");
+    expect(authorizationUrl.searchParams.get("include_granted_scopes")).toBe("true");
     expect(authorizationUrl.searchParams.get("state")).toMatch(/^gmail_oauth_/);
 
     const bypass = await requestJson<ApiErrorBody>(
@@ -816,6 +821,59 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       title: "Insurance update",
       summary: "Front Desk <front@example.test> · unread"
     });
+
+    const reconnectStart = await requestJson<{ authorizationUrl: string; expiresAt: string }>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/start?accountId=${linked.account.id}&returnTo=https%3A%2F%2Fweb.example.test%2Fconnectors`,
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const reconnectUrl = new URL(reconnectStart.authorizationUrl);
+    expect(reconnectUrl.searchParams.get("scope")).toBe(
+      "https://www.googleapis.com/auth/gmail.readonly"
+    );
+    expect(reconnectUrl.searchParams.get("access_type")).toBe("offline");
+    expect(reconnectUrl.searchParams.get("prompt")).toBe("consent");
+    expect(reconnectUrl.searchParams.get("include_granted_scopes")).toBe("true");
+    const reconnectCallback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${reconnectUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    expect(reconnectCallback.status).toBe(200);
+    const reconnected = (await reconnectCallback.json()) as { account: ConnectorAccount };
+    expect(reconnected.account.id).toBe(linked.account.id);
+    expect(reconnected.account.credentialStatus).toBe("configured");
+    expect(reconnected.account.errorCode).toBeNull();
+    expect(reconnected.account.errorMessage).toBeNull();
+    expect(reconnected.account.settings).toMatchObject({
+      gmailGrantedScopes: "https://www.googleapis.com/auth/gmail.readonly",
+      gmailReadOnlyGranted: true,
+      gmailReconnectRequired: false
+    });
+    const afterReconnectRecords = await requestJson<{ records: ConnectorSourceRecord[] }>(
+      store,
+      "GET",
+      `/v1/connectors/accounts/${linked.account.id}/source-records`,
+      undefined,
+      owner.session.token
+    );
+    expect(afterReconnectRecords.records).toHaveLength(1);
+    const afterReconnectNotifications = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(afterReconnectNotifications.notifications).toHaveLength(1);
 
     await requestJson<ApiErrorBody>(
       store,
@@ -1198,6 +1256,135 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     );
   });
 
+  it("marks old Gmail metadata-scope credentials as reconnect-required for backfill", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-old-scope@example.com");
+    const gmailClient = fakeGmailClientWithMetadataScope();
+    const env = gmailTestEnv(gmailClient);
+    const start = await requestJson<{ authorizationUrl: string; expiresAt: string }>(
+      store,
+      "POST",
+      "/v1/connectors/gmail/start",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const authorizationUrl = new URL(start.authorizationUrl);
+    const callback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${authorizationUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    const linked = (await callback.json()) as { account: ConnectorAccount };
+    expect(linked.account.settings).toMatchObject({
+      gmailGrantedScopes: "https://www.googleapis.com/auth/gmail.metadata",
+      gmailReadOnlyGranted: false,
+      gmailReconnectRequired: true
+    });
+
+    const sync = await requestJson<{ account: ConnectorAccount }>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(sync.account.status).toBe("connected");
+    expect(sync.account.healthStatus).toBe("healthy");
+
+    const failedBackfill = await requestJson<ApiErrorBody>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/backfill`,
+      undefined,
+      owner.session.token,
+      403,
+      env
+    );
+    expect(failedBackfill.error.code).toBe("gmail_permission_denied");
+    expect(failedBackfill.error.message).toBe(
+      "Reconnect Gmail to grant read-only mailbox access required for backfill."
+    );
+
+    const accounts = await requestJson<{ accounts: ConnectorAccount[] }>(
+      store,
+      "GET",
+      "/v1/connectors/accounts",
+      undefined,
+      owner.session.token
+    );
+    const account = accounts.accounts.find((item) => item.id === linked.account.id);
+    expect(account).toMatchObject({
+      status: "connected",
+      healthStatus: "degraded",
+      syncStatus: "idle",
+      errorCode: "gmail_permission_denied",
+      errorMessage: "Reconnect Gmail to grant read-only mailbox access required for backfill."
+    });
+    expect(account?.settings).toMatchObject({
+      gmailReconnectRequired: true,
+      gmailLastBackfillStatus: "failed",
+      gmailLastBackfillErrorCode: "gmail_permission_denied",
+      gmailLastBackfillErrorMessage:
+        "Reconnect Gmail to grant read-only mailbox access required for backfill."
+    });
+
+    const reconnectClient = fakeGmailClient();
+    const reconnectEnv = gmailTestEnv(reconnectClient);
+    const reconnectStart = await requestJson<{ authorizationUrl: string; expiresAt: string }>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/start?accountId=${linked.account.id}`,
+      undefined,
+      owner.session.token,
+      201,
+      reconnectEnv
+    );
+    const reconnectUrl = new URL(reconnectStart.authorizationUrl);
+    const reconnectCallback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${reconnectUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...reconnectEnv }
+    );
+    expect(reconnectCallback.status).toBe(200);
+    const reconnected = (await reconnectCallback.json()) as { account: ConnectorAccount };
+    expect(reconnected.account.id).toBe(linked.account.id);
+    expect(reconnected.account.settings).toMatchObject({
+      gmailGrantedScopes: "https://www.googleapis.com/auth/gmail.readonly",
+      gmailReadOnlyGranted: true,
+      gmailReconnectRequired: false,
+      gmailLastBackfillStatus: "failed"
+    });
+    expect(reconnected.account.errorCode).toBeNull();
+    expect(reconnected.account.errorMessage).toBeNull();
+
+    const backfill = await requestJson<{
+      account: ConnectorAccount;
+      summary: { examined: number; created: number; duplicate: number; failed: number };
+    }>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/backfill`,
+      undefined,
+      owner.session.token,
+      200,
+      reconnectEnv
+    );
+    expect(backfill.account.status).toBe("connected");
+    expect(backfill.summary).toMatchObject({ examined: 1, failed: 0 });
+  });
+
   it("maps Gmail upstream failures to safe DentLink errors", async () => {
     const cases: Array<{
       status: number;
@@ -1225,8 +1412,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
         reason: "insufficientPermissions",
         message: "Insufficient Permission",
         expectedCode: "gmail_permission_denied",
-        expectedMessage:
-          "Backfill requires Gmail read permission. Reconnect the account to grant access."
+        expectedMessage: "Reconnect Gmail to grant read-only mailbox access required for backfill."
       },
       {
         status: 429,
@@ -2253,7 +2439,11 @@ function fakeGmailClient(): GmailApiClient {
   return {
     async exchangeCode(code) {
       expect(code).toBe("valid-code");
-      return { accessToken: "access-token", refreshToken: "refresh-token-secret" };
+      return {
+        accessToken: "access-token",
+        refreshToken: "refresh-token-secret",
+        scope: "https://www.googleapis.com/auth/gmail.readonly"
+      };
     },
     async refreshAccessToken(refreshToken) {
       expect(refreshToken).toBe("refresh-token-secret");
@@ -2262,7 +2452,12 @@ function fakeGmailClient(): GmailApiClient {
     async getProfile() {
       return { emailAddress: "owner.gmail@example.test", historyId: "100" };
     },
-    async listMessages() {
+    async listMessages(_accessToken, options) {
+      if (options) {
+        expect(typeof options).toBe("object");
+        const parsed = typeof options === "object" ? options : {};
+        expect(parsed.query).toMatch(/^after:\d+$/);
+      }
       return { messages: [{ id: "gmail-message-1", threadId: "gmail-thread-1" }] };
     },
     async listHistory(_accessToken, startHistoryId) {
@@ -2293,6 +2488,58 @@ function fakeGmailClient(): GmailApiClient {
             { name: "Subject", value: "Insurance update" },
             { name: "Date", value: "Tue, 14 Jul 2026 10:00:00 -0400" },
             { name: "Message-ID", value: "<message-1@example.test>" }
+          ]
+        }
+      };
+    }
+  };
+}
+
+function fakeGmailClientWithMetadataScope(): GmailApiClient {
+  return {
+    async exchangeCode(code) {
+      expect(code).toBe("valid-code");
+      return {
+        accessToken: "access-token",
+        refreshToken: "refresh-token-secret",
+        scope: "https://www.googleapis.com/auth/gmail.metadata"
+      };
+    },
+    async refreshAccessToken(refreshToken) {
+      expect(refreshToken).toBe("refresh-token-secret");
+      return { accessToken: "access-token-refreshed" };
+    },
+    async getProfile() {
+      return { emailAddress: "owner.gmail@example.test", historyId: "100" };
+    },
+    async listMessages() {
+      throw new Error("Backfill should stop before messages.list with old metadata scope");
+    },
+    async listHistory(_accessToken, startHistoryId) {
+      expect(startHistoryId).toBe("100");
+      return {
+        historyId: "101",
+        history: [
+          {
+            id: "101",
+            messagesAdded: [{ message: { id: "gmail-message-1", threadId: "gmail-thread-1" } }]
+          }
+        ]
+      };
+    },
+    async getMessage() {
+      return {
+        id: "gmail-message-1",
+        threadId: "gmail-thread-1",
+        historyId: "101",
+        internalDate: "1783980000000",
+        labelIds: ["INBOX"],
+        payload: {
+          headers: [
+            { name: "From", value: "Front Desk <front@example.test>" },
+            { name: "Subject", value: "Old scope incremental message" },
+            { name: "Date", value: "Tue, 14 Jul 2026 10:00:00 -0400" },
+            { name: "Message-ID", value: "<old-scope@example.test>" }
           ]
         }
       };

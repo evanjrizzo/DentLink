@@ -208,11 +208,16 @@ and `connector_account`. Gmail-created notifications use source `connector`, sou
 the sender and subject, unread state in summary text, received timestamp metadata in the source
 record, and a Gmail deep link. Message bodies and attachments are not downloaded.
 
-The Gmail connector uses the metadata-only Gmail scope:
+The Gmail connector explicitly requests the read-only Gmail scope:
 
 ```text
-https://www.googleapis.com/auth/gmail.metadata
+https://www.googleapis.com/auth/gmail.readonly
 ```
+
+Google Cloud OAuth consent configuration must include this scope, but the application must still
+request it in the authorization URL. DentLink does not request `gmail.modify`. The prior
+`gmail.metadata` scope is insufficient for backfill because Gmail API `users.messages.list` rejects
+the `q` search parameter when accessed with `gmail.metadata`.
 
 Milestone 7 Phase 1 extends Gmail sync responses with per-message processing outcomes while keeping
 the same endpoint:

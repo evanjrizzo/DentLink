@@ -382,28 +382,29 @@ test.describe("Milestone 2.1 preview browser verification", () => {
           failNextBackfill = false;
           gmailAccount.status = "connected";
           gmailAccount.healthStatus = "degraded";
-          gmailAccount.syncStatus = "error";
-          gmailAccount.errorCode = "gmail_query_invalid";
+          gmailAccount.syncStatus = "idle";
+          gmailAccount.errorCode = "gmail_permission_denied";
           gmailAccount.errorMessage =
-            "Backfill failed because Gmail rejected the mailbox search query.";
+            "Reconnect Gmail to grant read-only mailbox access required for backfill.";
           gmailAccount.settings = {
             ...gmailAccount.settings,
+            gmailReconnectRequired: true,
             gmailLastBackfillAt: syncedAt,
             gmailLastBackfillStatus: "failed",
-            gmailLastBackfillErrorCode: "gmail_query_invalid",
+            gmailLastBackfillErrorCode: "gmail_permission_denied",
             gmailLastBackfillErrorMessage:
-              "Backfill failed because Gmail rejected the mailbox search query."
+              "Reconnect Gmail to grant read-only mailbox access required for backfill."
           };
           gmailAccount.updatedAt = syncedAt;
           gmailAccount.version += 1;
           await route.fulfill({
-            status: 502,
+            status: 403,
             headers: corsHeaders(),
             contentType: "application/json",
             body: JSON.stringify({
               error: {
-                code: "gmail_query_invalid",
-                message: "Backfill failed because Gmail rejected the mailbox search query.",
+                code: "gmail_permission_denied",
+                message: "Reconnect Gmail to grant read-only mailbox access required for backfill.",
                 requestId: "request_backfill_failure"
               }
             })
@@ -468,6 +469,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         gmailAccount.errorMessage = null;
         gmailAccount.settings = {
           ...gmailAccount.settings,
+          gmailReconnectRequired: false,
           gmailLastBackfillAt: syncedAt,
           gmailLastBackfillStatus: "success",
           gmailLastBackfillExamined: 2,
@@ -544,9 +546,14 @@ test.describe("Milestone 2.1 preview browser verification", () => {
 
     await page.getByRole("button", { name: "Backfill 30 Days" }).click();
     await expect(
-      page.getByText("Backfill failed because Gmail rejected the mailbox search query.").first()
+      page
+        .getByText("Reconnect Gmail to grant read-only mailbox access required for backfill.")
+        .first()
     ).toBeVisible();
     await page.getByRole("button", { name: "Connectors" }).click();
+    await expect(page.getByText("Status: connected")).toBeVisible();
+    await expect(page.getByText("Health: degraded")).toBeVisible();
+    await expect(page.getByText("Sync: idle")).toBeVisible();
     await expect(page.getByText("Last Incremental Sync")).toBeVisible();
     await expect(page.getByText("Last Backfill")).toBeVisible();
     await expect(page.getByText("118 notifications created")).toBeVisible();

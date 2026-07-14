@@ -20,6 +20,7 @@ export type GoogleTokenResponse = {
   accessToken: string;
   refreshToken?: string;
   expiresIn?: number;
+  scope?: string;
 };
 
 export class GoogleConfigError extends Error {
@@ -97,7 +98,8 @@ export async function tokenRequest(
   return {
     accessToken,
     refreshToken: typeof json.refresh_token === "string" ? json.refresh_token : undefined,
-    expiresIn: typeof json.expires_in === "number" ? json.expires_in : undefined
+    expiresIn: typeof json.expires_in === "number" ? json.expires_in : undefined,
+    scope: typeof json.scope === "string" ? json.scope : undefined
   };
 }
 
