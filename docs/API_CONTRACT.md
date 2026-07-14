@@ -189,7 +189,8 @@ Google Calendar or any other Google service.
   links or reconnects the Gmail account, stores the encrypted refresh token, and redirects to a safe
   `returnTo` URL when present. JSON clients may send `Accept: application/json`.
 - `POST /v1/connectors/gmail/:accountId/sync`: authenticated manual Gmail sync for an owned Gmail
-  connector account. This is incremental and uses Gmail history IDs when a checkpoint exists.
+  connector account. The default `gmail_api` engine is incremental and uses Gmail history IDs when a
+  checkpoint exists. The preview-only `gmail_imap` engine uses a rolling recent-window IMAP scan.
 - `POST /v1/connectors/gmail/:accountId/backfill`: authenticated backfill for an owned Gmail
   connector account. It scans at least the last 30 days through Gmail message-list pagination and
   does not reset existing notifications or the incremental history checkpoint.
@@ -210,7 +211,9 @@ Gmail sync stores normalized source records with provider metadata, including `p
 `provider_item_id`, `history_id`, `thread_id`, `message_id`, `internal_date`, `labels`, `permalink`,
 and `connector_account`. Gmail-created notifications use source `connector`, source label `Gmail`,
 the sender and subject, unread state in summary text, received timestamp metadata in the source
-record, and a Gmail deep link. Message bodies and attachments are not downloaded.
+record, and a Gmail deep link. The Gmail API engine does not download message bodies or
+attachments. The IMAP engine may fetch bounded MIME content for parsing, but diagnostics and
+Notifications still store only normalized metadata and attachment metadata.
 
 The Gmail connector explicitly requests the read-only Gmail scope:
 
@@ -222,6 +225,16 @@ Google Cloud OAuth consent configuration must include this scope, but the applic
 request it in the authorization URL. DentLink does not request `gmail.modify`. The prior
 `gmail.metadata` scope is insufficient for backfill because Gmail API `users.messages.list` rejects
 the `q` search parameter when accessed with `gmail.metadata`.
+
+Milestone 7 Slice 3.2 adds a preview-only Gmail IMAP ingestion engine behind connector account
+settings. IMAP accounts require a reconnect that explicitly requests:
+
+```text
+https://mail.google.com/
+```
+
+Existing Gmail API accounts are not migrated automatically. A successful IMAP reconnect means the
+new credential was granted the IMAP scope and passed a server-side IMAP login/capability check.
 
 Milestone 7 Phase 1 extends Gmail sync responses with per-message processing outcomes while keeping
 the same endpoint:
@@ -247,14 +260,14 @@ always-notify, and never-notify predicates. Actions are `notify`, `suppress`, `l
 `notification_suppressed` and no DentLink Notification; created Notifications copy matched rule
 metadata into the source record.
 
-The Worker also runs scheduled incremental Gmail synchronization every five minutes for connected,
-idle Gmail accounts. Scheduled sync uses the same history-checkpoint path as `Sync Now`; it does not
-run historical backfill.
+The Worker also runs scheduled Gmail synchronization every five minutes for connected, idle Gmail
+accounts. Scheduled sync uses the account's selected ingestion engine. `gmail_api` accounts use the
+history-checkpoint path; `gmail_imap` accounts use a duplicate-safe rolling recent-window scan.
 
-Incremental sync advances `syncCursor` only when all discovered message IDs finish without a
-per-message failure. Backfill is duplicate-safe through source-record identity and uses Gmail
-`messages.list` independently of history sync so it can recover missing recent messages without
-erasing or resetting existing notifications.
+Incremental Gmail API sync advances `syncCursor` only when all discovered message IDs finish without
+a per-message failure. Backfill remains duplicate-safe through source-record identity but is no
+longer exposed as the normal user recovery path. IMAP recovery relies on rolling scans and source
+record uniqueness.
 
 The diagnostics endpoint returns:
 

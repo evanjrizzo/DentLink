@@ -239,7 +239,6 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       version: 1
     };
     let notifications: unknown[] = [];
-    let failNextBackfill = true;
     let gmailDiagnostics = {
       account: gmailAccount,
       summary: {
@@ -376,134 +375,6 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         });
         return;
       }
-      if (method === "POST" && path === `/v1/connectors/gmail/${gmailAccount.id}/backfill`) {
-        const syncedAt = new Date().toISOString();
-        if (failNextBackfill) {
-          failNextBackfill = false;
-          gmailAccount.status = "connected";
-          gmailAccount.healthStatus = "degraded";
-          gmailAccount.syncStatus = "idle";
-          gmailAccount.errorCode = "gmail_permission_denied";
-          gmailAccount.errorMessage =
-            "Reconnect Gmail to grant read-only mailbox access required for backfill.";
-          gmailAccount.settings = {
-            ...gmailAccount.settings,
-            gmailReconnectRequired: true,
-            gmailLastBackfillAt: syncedAt,
-            gmailLastBackfillStatus: "failed",
-            gmailLastBackfillErrorCode: "gmail_permission_denied",
-            gmailLastBackfillErrorMessage:
-              "Reconnect Gmail to grant read-only mailbox access required for backfill."
-          };
-          gmailAccount.updatedAt = syncedAt;
-          gmailAccount.version += 1;
-          await route.fulfill({
-            status: 403,
-            headers: corsHeaders(),
-            contentType: "application/json",
-            body: JSON.stringify({
-              error: {
-                code: "gmail_permission_denied",
-                message: "Reconnect Gmail to grant read-only mailbox access required for backfill.",
-                requestId: "request_backfill_failure"
-              }
-            })
-          });
-          return;
-        }
-        gmailAccount.lastSyncAt = syncedAt;
-        gmailAccount.lastHealthAt = syncedAt;
-        gmailAccount.syncStatus = "idle";
-        gmailAccount.updatedAt = syncedAt;
-        gmailAccount.version += 1;
-        notifications = [
-          ...notifications,
-          notificationFixture({
-            id: "notification_gmail_historical_1",
-            title: "Historical Gmail one",
-            summary: "Backfilled from Gmail",
-            createdAt: syncedAt,
-            updatedAt: syncedAt
-          }),
-          notificationFixture({
-            id: "notification_gmail_historical_2",
-            title: "Historical Gmail two",
-            summary: "Backfilled from Gmail",
-            createdAt: syncedAt,
-            updatedAt: syncedAt
-          })
-        ];
-        gmailDiagnostics = {
-          account: gmailAccount,
-          summary: {
-            discovered: 2,
-            examined: 2,
-            created: 2,
-            updated: 0,
-            duplicate: 0,
-            skipped: 0,
-            filtered: 0,
-            failed: 0
-          },
-          messages: [
-            {
-              messageId: "gmail-historical-1",
-              outcome: "notification_created",
-              reason: "Created a Gmail notification",
-              processedAt: syncedAt,
-              notificationId: "notification_gmail_historical_1",
-              sourceRecordId: "source_gmail_historical_1"
-            },
-            {
-              messageId: "gmail-historical-2",
-              outcome: "notification_created",
-              reason: "Created a Gmail notification",
-              processedAt: syncedAt,
-              notificationId: "notification_gmail_historical_2",
-              sourceRecordId: "source_gmail_historical_2"
-            }
-          ]
-        };
-        gmailAccount.healthStatus = "healthy";
-        gmailAccount.errorCode = null;
-        gmailAccount.errorMessage = null;
-        gmailAccount.settings = {
-          ...gmailAccount.settings,
-          gmailReconnectRequired: false,
-          gmailLastBackfillAt: syncedAt,
-          gmailLastBackfillStatus: "success",
-          gmailLastBackfillExamined: 2,
-          gmailLastBackfillCreated: 2,
-          gmailLastBackfillUpdated: 0,
-          gmailLastBackfillDuplicate: 0,
-          gmailLastBackfillSkipped: 0,
-          gmailLastBackfillFiltered: 0,
-          gmailLastBackfillFailed: 0,
-          gmailLastBackfillErrorCode: null,
-          gmailLastBackfillErrorMessage: null
-        };
-        await fulfillJson(route, {
-          account: gmailAccount,
-          processed: 2,
-          createdNotifications: 2,
-          summary: gmailDiagnostics.summary,
-          outcomes: [
-            {
-              messageId: "gmail-historical-1",
-              status: "notification_created",
-              reason: "Created a Gmail notification",
-              recordId: "source_gmail_historical_1"
-            },
-            {
-              messageId: "gmail-historical-2",
-              status: "notification_created",
-              reason: "Created a Gmail notification",
-              recordId: "source_gmail_historical_2"
-            }
-          ]
-        });
-        return;
-      }
       await route.fulfill({
         status: 404,
         headers: corsHeaders(),
@@ -540,31 +411,10 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await page.getByText("Recent Gmail processing outcomes").click();
     await expect(page.getByText("gmail-message-failed")).toBeVisible();
     await expect(page.getByText("Gmail API request failed")).toBeVisible();
-    await expect(
-      page.getByText("Sync Now checks Gmail history since the last checkpoint.")
-    ).toBeVisible();
-
-    await page.getByRole("button", { name: "Backfill 30 Days" }).click();
-    await expect(
-      page
-        .getByText("Reconnect Gmail to grant read-only mailbox access required for backfill.")
-        .first()
-    ).toBeVisible();
-    await page.getByRole("button", { name: "Connectors" }).click();
-    await expect(page.getByText("Status: connected")).toBeVisible();
-    await expect(page.getByText("Health: degraded")).toBeVisible();
-    await expect(page.getByText("Sync: idle")).toBeVisible();
+    await expect(page.getByText("IMAP-enabled accounts use a rolling recent scan")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Backfill 30 Days" })).toHaveCount(0);
     await expect(page.getByText("Last Incremental Sync")).toBeVisible();
-    await expect(page.getByText("Last Backfill")).toBeVisible();
     await expect(page.getByText("118 notifications created")).toBeVisible();
-    await expect(page.getByText("failed").first()).toBeVisible();
-
-    await page.getByRole("button", { name: "Backfill 30 Days" }).click();
-    await expect(notificationCard(page, "Historical Gmail one")).toBeVisible();
-    await expect(notificationCard(page, "Historical Gmail two")).toBeVisible();
-    await page.getByRole("button", { name: "Connectors" }).click();
-    await expect(page.getByText("2 messages examined", { exact: true })).toBeVisible();
-    await expect(page.getByText("2 notifications created", { exact: true })).toBeVisible();
 
     notifications = [
       ...notifications,

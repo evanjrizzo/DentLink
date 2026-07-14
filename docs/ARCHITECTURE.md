@@ -77,11 +77,9 @@ diagnostics and retry analysis. The Gmail connector card reads provider-specific
 the API client and displays aggregate sync counts plus recent source-record outcomes; clients still
 do not poll Gmail directly or infer authoritative ingestion health locally.
 
-Milestone 7 Slice 2.1 adds Gmail backfill as a separate connector action from incremental sync.
-Backfill uses Gmail message-list pagination over a recent time window to recover historical
-messages, while incremental sync continues to use the history checkpoint. Source-record uniqueness
-keeps imported messages duplicate-safe across both modes, and the history checkpoint advances only
-after incremental processing completes without per-message failures.
+Milestone 7 Slice 2.1 added Gmail backfill as a separate diagnostic action from incremental sync,
+but it is no longer the primary product recovery path. Backfill remains duplicate-safe through
+source records and does not reset notifications or the incremental history checkpoint.
 
 Milestone 7 Slice 3 starts deterministic Gmail handling before any AI or ranking work. A Worker cron
 trigger runs incremental Gmail sync every five minutes for connected, idle Gmail accounts. Gmail
@@ -90,6 +88,15 @@ priority, or assign a category using normalized sender, subject, label, recipien
 attachment, automated-sender, and mailing-list metadata. Every fetched message still resolves to a
 source-record outcome, including `notification_suppressed` when a rule intentionally prevents a
 Notification.
+
+Milestone 7 Slice 3.2 begins a controlled Gmail IMAP migration. Gmail connector accounts now support
+an `ingestionEngine` setting with `gmail_api` as the default and `gmail_imap` as an explicit
+per-account opt-in. IMAP ingestion uses Worker TLS sockets, Gmail XOAUTH2, `SELECT INBOX`, a rolling
+recent-window `UID SEARCH`, bounded MIME fetches, and the existing deterministic-rule and
+Notification pipeline. Existing Gmail API accounts are not switched automatically; IMAP accounts
+must reconnect with the `https://mail.google.com/` scope and pass an IMAP capability check before
+the credential is accepted. IMAP duplicate prevention prefers `X-GM-MSGID`, then `Message-ID`, then
+a mailbox UID fallback.
 
 Milestone 4 adds Google Calendar using the same provider-neutral connector framework. Google
 Calendar OAuth links a calendar connector account, encrypted refresh tokens remain in connector

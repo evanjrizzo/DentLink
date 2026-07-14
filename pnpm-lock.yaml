@@ -59,6 +59,9 @@ importers:
       '@dentlink/connector-sdk':
         specifier: workspace:*
         version: link:../../packages/connector-sdk
+      '@dentlink/imap-client':
+        specifier: workspace:*
+        version: link:../../packages/imap-client
       '@dentlink/item-model':
         specifier: workspace:*
         version: link:../../packages/item-model
@@ -118,6 +121,8 @@ importers:
         version: link:../item-model
 
   packages/design-tokens: {}
+
+  packages/imap-client: {}
 
   packages/item-model: {}
 

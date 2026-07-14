@@ -417,20 +417,6 @@ export function DentLinkNotesApp(): ReactElement {
     }
   }
 
-  async function backfillGmail(account: ConnectorAccount): Promise<void> {
-    try {
-      setError(null);
-      const result = await client.backfillGmailAccount(account.id);
-      const diagnostics = await client.getGmailDiagnostics(account.id);
-      setGmailDiagnostics((current) => ({ ...current, [account.id]: diagnostics }));
-      await refreshConnectorNotificationState();
-      if (result.createdNotifications > 0) setView("notifications");
-    } catch (caught) {
-      handleFailure(caught);
-      await loadConnectors().catch(() => undefined);
-    }
-  }
-
   async function disconnectGmail(account: ConnectorAccount): Promise<void> {
     try {
       setError(null);
@@ -781,7 +767,6 @@ export function DentLinkNotesApp(): ReactElement {
           onConnectGmail={connectGmail}
           onReconnectGmail={(account) => connectGmail(account.id)}
           onSyncGmail={syncGmail}
-          onBackfillGmail={backfillGmail}
           onDisconnectGmail={disconnectGmail}
           gmailDiagnostics={gmailDiagnostics}
           onConnectGoogleCalendar={connectGoogleCalendar}
@@ -2047,7 +2032,6 @@ function ConnectorsView(props: {
   onConnectGmail: () => Promise<void>;
   onReconnectGmail: (account: ConnectorAccount) => Promise<void>;
   onSyncGmail: (account: ConnectorAccount) => Promise<void>;
-  onBackfillGmail: (account: ConnectorAccount) => Promise<void>;
   onDisconnectGmail: (account: ConnectorAccount) => Promise<void>;
   onConnectGoogleCalendar: () => Promise<void>;
   onReconnectGoogleCalendar: (account: ConnectorAccount) => Promise<void>;
@@ -2084,12 +2068,12 @@ function ConnectorsView(props: {
             {account.errorMessage ? <p>{account.errorMessage}</p> : null}
             {account.settings.gmailReconnectRequired === true ? (
               <p className="connector-warning">
-                Reconnect Gmail to grant read-only mailbox access required for backfill.
+                Reconnect Gmail to grant the mailbox access required by this connector.
               </p>
             ) : null}
             <p className="connector-help">
-              Sync Now checks Gmail history since the last checkpoint. Backfill 30 Days scans recent
-              Gmail history without resetting existing notifications.
+              Sync Now checks Gmail for new messages. IMAP-enabled accounts use a rolling recent
+              scan for recovery.
             </p>
             <GmailDiagnosticsSummary
               diagnostics={props.gmailDiagnostics[account.id]}
@@ -2099,9 +2083,6 @@ function ConnectorsView(props: {
             <div className="note-order">
               <button type="button" onClick={() => void props.onSyncGmail(account)}>
                 Sync Now
-              </button>
-              <button type="button" onClick={() => void props.onBackfillGmail(account)}>
-                Backfill 30 Days
               </button>
               <button type="button" onClick={() => void props.onReconnectGmail(account)}>
                 Reconnect
@@ -2147,17 +2128,17 @@ function GmailDiagnosticsSummary(props: {
   settings: ConnectorAccount["settings"];
 }): ReactElement | null {
   const incremental = gmailOperationSummary(props.settings, "Incremental");
-  const backfill = gmailOperationSummary(props.settings, "Backfill");
-  if (!props.diagnostics && !incremental && !backfill) return null;
+  const imap = gmailOperationSummary(props.settings, "Imap");
+  if (!props.diagnostics && !incremental && !imap) return null;
   const summary = props.diagnostics?.summary;
   const recentMessages = props.diagnostics?.messages.slice(0, 8) ?? [];
   return (
     <section className="gmail-diagnostics" aria-label="Gmail sync diagnostics">
+      {imap ? <GmailOperationPanel title="Last IMAP Sync" item={imap} /> : null}
       {incremental ? (
         <GmailOperationPanel title="Last Incremental Sync" item={incremental} />
       ) : null}
-      {backfill ? <GmailOperationPanel title="Last Backfill" item={backfill} /> : null}
-      {!incremental && !backfill && summary ? (
+      {!incremental && !imap && summary ? (
         <GmailSummaryGrid title="Last Sync" summary={summary} />
       ) : null}
       {props.degraded && summary && summary.failed > 0 ? (
@@ -2209,6 +2190,7 @@ function GmailOperationPanel(props: {
     status: string;
     at: string | null;
     errorMessage: string | null;
+    averageMs: number | null;
     summary: GmailDiagnostics["summary"] | null;
   };
 }): ReactElement {
@@ -2218,6 +2200,7 @@ function GmailOperationPanel(props: {
       <span>
         {props.item.at ? new Date(props.item.at).toLocaleString() : "Not run"} · {props.item.status}
       </span>
+      {props.item.averageMs ? <span>Average sync time: {props.item.averageMs} ms</span> : null}
       {props.item.summary ? <GmailSummaryGrid summary={props.item.summary} /> : null}
       {props.item.errorMessage ? (
         <p className="connector-warning">{props.item.errorMessage}</p>
@@ -2248,11 +2231,12 @@ function GmailSummaryGrid(props: {
 
 function gmailOperationSummary(
   settings: ConnectorAccount["settings"],
-  operation: "Incremental" | "Backfill"
+  operation: "Incremental" | "Backfill" | "Imap"
 ): {
   status: string;
   at: string | null;
   errorMessage: string | null;
+  averageMs: number | null;
   summary: GmailDiagnostics["summary"] | null;
 } | null {
   const prefix = `gmailLast${operation}`;
@@ -2274,6 +2258,7 @@ function gmailOperationSummary(
     status: status ?? "unknown",
     at,
     errorMessage: stringSetting(settings[`${prefix}ErrorMessage`]),
+    averageMs: nullableNumberSetting(settings[`${prefix}AverageSyncMs`]),
     summary: hasSummary ? summary : null
   };
 }
@@ -2284,6 +2269,10 @@ function stringSetting(value: unknown): string | null {
 
 function numberSetting(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function nullableNumberSetting(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function formatOutcome(outcome: string): string {

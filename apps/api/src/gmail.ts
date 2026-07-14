@@ -13,7 +13,14 @@ import {
   type GoogleTokenResponse
 } from "./google";
 import { StoreError, type DentLinkStore } from "./storage";
-
+import {
+  openImapClient,
+  pollGmailImap,
+  type GmailImapMessage,
+  type GmailImapPollOptions,
+  type GmailImapPollResult,
+  type ImapSocket
+} from "../../../packages/imap-client/src";
 import type {
   ConnectorAccount,
   ConnectorSourceRecord,
@@ -27,13 +34,19 @@ import type { ConnectorDefinition } from "@dentlink/connector-sdk";
 
 const GMAIL_CONNECTOR_KEY = "gmail";
 const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
-const GMAIL_SCOPE = GMAIL_READONLY_SCOPE;
+const GMAIL_IMAP_SCOPE = "https://mail.google.com/";
+const GMAIL_DEFAULT_SCOPE = GMAIL_READONLY_SCOPE;
 const GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1";
 const INITIAL_SYNC_PAGE_SIZE = 25;
 const HISTORY_PAGE_SIZE = 100;
+const GMAIL_IMAP_RECENT_WINDOW_DAYS = 2;
+const GMAIL_IMAP_MAX_MESSAGES = 25;
 const GMAIL_READONLY_RECONNECT_MESSAGE =
   "Reconnect Gmail to grant read-only mailbox access required for backfill.";
+const GMAIL_IMAP_RECONNECT_MESSAGE =
+  "Reconnect Gmail to grant full Gmail mailbox access required for IMAP sync.";
 const GMAIL_RULES_SETTING_KEY = "gmailRulesJson";
+const GMAIL_INGESTION_ENGINE_SETTING_KEY = "gmailIngestionEngine";
 
 type GmailOperation =
   | "gmail_token_refresh"
@@ -44,6 +57,14 @@ type GmailOperation =
 
 export type GmailRuntimeEnv = GoogleRuntimeEnv & {
   gmailClient?: GmailApiClient;
+  gmailImapClient?: GmailImapClient;
+};
+
+export type GmailIngestionEngine = "gmail_api" | "gmail_imap";
+
+export type GmailImapClient = {
+  poll(options: GmailImapPollOptions): Promise<GmailImapPollResult>;
+  verify(options: Pick<GmailImapPollOptions, "user" | "accessToken" | "now">): Promise<void>;
 };
 
 export type GmailApiClient = {
@@ -102,6 +123,26 @@ export type GmailMessage = {
   };
 };
 
+type NormalizedGmailEmail = {
+  sourceExternalId: string;
+  providerItemId: string;
+  threadId: string | null;
+  historyId: string | null;
+  messageId: string | null;
+  internalDate: string | null;
+  receivedAt: string;
+  labels: string[];
+  unread: boolean;
+  sender: string;
+  senderAddress: string;
+  subject: string;
+  recipients: string[];
+  hasAttachment: boolean;
+  automatedSender: boolean;
+  mailingList: boolean;
+  permalink: string | null;
+};
+
 export class GmailUpstreamError extends StoreError {
   constructor(
     readonly operation: GmailOperation,
@@ -143,11 +184,12 @@ export async function startGmailOAuth(
     now,
     "gmail_oauth_"
   );
+  const scope = await requestedGmailOAuthScope(store, userId, url);
   const authorizationUrl = new URL(GOOGLE_OAUTH_AUTHORIZE_URL);
   authorizationUrl.searchParams.set("client_id", config.clientId);
   authorizationUrl.searchParams.set("redirect_uri", config.redirectUri);
   authorizationUrl.searchParams.set("response_type", "code");
-  authorizationUrl.searchParams.set("scope", GMAIL_SCOPE);
+  authorizationUrl.searchParams.set("scope", scope);
   authorizationUrl.searchParams.set("state", state);
   authorizationUrl.searchParams.set("access_type", "offline");
   authorizationUrl.searchParams.set("prompt", "consent");
@@ -181,8 +223,21 @@ export async function completeGmailOAuth(
     const token = await gmail.exchangeCode(code, config.redirectUri);
     refreshTokenReturned = Boolean(token.refreshToken);
     grantedScopes = await verifiedGmailScopes(gmail, token);
-    if (!grantedScopes.includes(GMAIL_READONLY_SCOPE)) {
-      throw new StoreError("gmail_permission_denied", GMAIL_READONLY_RECONNECT_MESSAGE);
+    const targetAccount = stateRecord.reconnectAccountId
+      ? await store.getConnectorAccount(stateRecord.userId, stateRecord.reconnectAccountId)
+      : null;
+    const targetEngine =
+      targetAccount && targetAccount.connectorKey === GMAIL_CONNECTOR_KEY
+        ? gmailIngestionEngine(targetAccount.settings)
+        : "gmail_api";
+    const requiredScope = targetEngine === "gmail_imap" ? GMAIL_IMAP_SCOPE : GMAIL_READONLY_SCOPE;
+    if (!grantedScopes.includes(requiredScope)) {
+      throw new StoreError(
+        "gmail_permission_denied",
+        targetEngine === "gmail_imap"
+          ? GMAIL_IMAP_RECONNECT_MESSAGE
+          : GMAIL_READONLY_RECONNECT_MESSAGE
+      );
     }
     if (!token.refreshToken) {
       throw new StoreError(
@@ -190,8 +245,13 @@ export async function completeGmailOAuth(
         "Google did not issue an upgraded offline Gmail credential. Reconnect Gmail and approve read-only mailbox access."
       );
     }
-    await verifyGmailReadonlyCapability(gmail, token.accessToken, now);
+    if (targetEngine === "gmail_api") {
+      await verifyGmailReadonlyCapability(gmail, token.accessToken, now);
+    }
     const profile = await gmail.getProfile(token.accessToken);
+    if (targetEngine === "gmail_imap") {
+      await verifyGmailImapCapability(env, profile.emailAddress, token.accessToken, now);
+    }
     const account = await linkGmailAccount(
       store,
       stateRecord.userId,
@@ -223,9 +283,11 @@ export async function completeGmailOAuth(
         settings: withGmailGrantedScopes(
           {
             ...account.settings,
-            googleEmail: profile.emailAddress
+            googleEmail: profile.emailAddress,
+            [GMAIL_INGESTION_ENGINE_SETTING_KEY]: targetEngine
           },
-          grantedScopes.join(" ")
+          grantedScopes.join(" "),
+          requiredScope
         ),
         syncCursor: profile.historyId ?? account.syncCursor,
         lastHealthAt: now,
@@ -321,6 +383,9 @@ export async function syncGmailAccount(
     const refreshToken = await decryptSecret(credential.encryptedValue, env);
     const gmail = gmailClient(env);
     const token = await refreshGmailAccessToken(gmail, refreshToken);
+    if (gmailIngestionEngine(syncing.settings) === "gmail_imap") {
+      return syncGmailImapAccount(store, userId, syncing, env, token.accessToken, now);
+    }
     const messages = await messagesForSync(gmail, token.accessToken, syncing.syncCursor);
     const result = await processGmailMessageIds(
       store,
@@ -713,6 +778,80 @@ async function requireGmailAccount(
   return account;
 }
 
+async function syncGmailImapAccount(
+  store: DentLinkStore,
+  userId: EntityId,
+  account: ConnectorAccount,
+  env: GmailRuntimeEnv,
+  accessToken: string,
+  now: string
+): Promise<GmailSyncResult> {
+  if (knownGmailScopesMissImap(account.settings)) {
+    throw new StoreError("gmail_permission_denied", GMAIL_IMAP_RECONNECT_MESSAGE);
+  }
+  const emailAddress =
+    typeof account.settings.googleEmail === "string" ? account.settings.googleEmail : "";
+  if (!emailAddress)
+    throw new StoreError("gmail_profile_missing", "Gmail account email is missing");
+  const startedAt = Date.now();
+  const imap = gmailImapClient(env);
+  const poll = await imap.poll({
+    user: emailAddress,
+    accessToken,
+    now,
+    recentWindowDays: GMAIL_IMAP_RECENT_WINDOW_DAYS,
+    maxMessages: GMAIL_IMAP_MAX_MESSAGES
+  });
+  const result = await processGmailImapMessages(store, userId, account, poll.messages, now);
+  const latest = await store.getConnectorAccount(userId, account.id);
+  if (!latest) throw new StoreError("not_found", "Gmail account not found");
+  const summary = summarizeGmailOutcomes(poll.discoveredUids.length, result.outcomes);
+  const failed = result.outcomes.filter((outcome) => outcome.status === "failed");
+  const elapsedMs = Date.now() - startedAt;
+  const updated = await store.updateConnectorAccount(
+    userId,
+    latest.id,
+    latest.version,
+    {
+      status: "connected",
+      healthStatus: failed.length > 0 ? "degraded" : "healthy",
+      syncStatus: "idle",
+      lastSyncAt: now,
+      lastHealthAt: now,
+      settings: withGmailImapSummary(
+        withGmailOperationSummary(
+          latest.settings,
+          "incremental",
+          now,
+          failed.length > 0 ? "partial" : "success",
+          summary
+        ),
+        now,
+        failed.length > 0 ? "partial" : "success",
+        summary,
+        elapsedMs
+      ),
+      errorCode: failed.length > 0 ? "gmail_partial_sync_failed" : null,
+      errorMessage:
+        failed.length > 0
+          ? `${failed.length} Gmail message${failed.length === 1 ? "" : "s"} failed processing`
+          : null
+    },
+    now
+  );
+  if (!updated) throw new StoreError("not_found", "Gmail account not found");
+  if (latest.settings.gmailImapParallelCompare === true) {
+    await logGmailImapApiComparison(env, accessToken, account, poll, summary);
+  }
+  return {
+    account: updated,
+    processed: summary.examined,
+    createdNotifications: result.createdNotifications,
+    summary,
+    outcomes: result.outcomes
+  };
+}
+
 async function messagesForSync(
   gmail: GmailApiClient,
   accessToken: string,
@@ -797,6 +936,56 @@ async function processGmailMessageIds(
   return { createdNotifications, nextCursor, outcomes };
 }
 
+async function processGmailImapMessages(
+  store: DentLinkStore,
+  userId: EntityId,
+  account: ConnectorAccount,
+  messages: GmailImapMessage[],
+  now: string
+): Promise<{
+  createdNotifications: number;
+  outcomes: GmailSyncResult["outcomes"];
+}> {
+  let createdNotifications = 0;
+  const outcomes: GmailSyncResult["outcomes"] = [];
+  for (const message of messages) {
+    try {
+      const existingRecord = await store.findConnectorSourceRecord(
+        userId,
+        account.id,
+        message.sourceExternalId
+      );
+      if (existingRecord && !shouldRetryGmailSourceRecord(existingRecord.status)) {
+        outcomes.push(
+          await recordGmailMessageDuplicate(store, userId, account, existingRecord, now)
+        );
+        continue;
+      }
+      const outcome = await ingestNormalizedGmailEmail(
+        store,
+        userId,
+        account,
+        normalizedGmailEmailFromImap(message, now),
+        now
+      );
+      outcomes.push(outcome);
+      if (outcome.status === "notification_created") createdNotifications += 1;
+    } catch (error) {
+      outcomes.push(
+        await recordGmailMessageFailure(
+          store,
+          userId,
+          account,
+          message.sourceExternalId,
+          error,
+          now
+        )
+      );
+    }
+  }
+  return { createdNotifications, outcomes };
+}
+
 async function ingestGmailMessage(
   store: DentLinkStore,
   userId: EntityId,
@@ -804,54 +993,59 @@ async function ingestGmailMessage(
   message: GmailMessage,
   now: string
 ): Promise<GmailSyncResult["outcomes"][number]> {
-  const headers = headersByName(message);
-  const subject = headers.get("subject") ?? "(no subject)";
-  const sender = headers.get("from") ?? "Unknown sender";
-  const senderAddress = emailAddressFromHeader(sender);
-  const messageId = headers.get("message-id") ?? null;
-  const recipients = [
-    ...(headers.get("to") ? [headers.get("to") ?? ""] : []),
-    ...(headers.get("cc") ? [headers.get("cc") ?? ""] : [])
-  ];
-  const receivedAt = message.internalDate
-    ? new Date(Number(message.internalDate)).toISOString()
-    : now;
-  const unread = message.labelIds?.includes("UNREAD") ?? false;
+  return ingestNormalizedGmailEmail(
+    store,
+    userId,
+    account,
+    normalizedGmailEmailFromApi(message, now),
+    now
+  );
+}
+
+async function ingestNormalizedGmailEmail(
+  store: DentLinkStore,
+  userId: EntityId,
+  account: ConnectorAccount,
+  email: NormalizedGmailEmail,
+  now: string
+): Promise<GmailSyncResult["outcomes"][number]> {
   const context: GmailRuleContext = {
-    sender,
-    senderAddress,
-    senderDomain: senderAddress.includes("@") ? (senderAddress.split("@").pop() ?? "") : "",
-    subject,
-    labels: message.labelIds ?? [],
-    recipients,
-    hasAttachment: gmailMessageHasAttachment(message),
-    unread,
-    automatedSender: isAutomatedSender(headers),
-    mailingList: isMailingList(headers)
+    sender: email.sender,
+    senderAddress: email.senderAddress,
+    senderDomain: email.senderAddress.includes("@")
+      ? (email.senderAddress.split("@").pop() ?? "")
+      : "",
+    subject: email.subject,
+    labels: email.labels,
+    recipients: email.recipients,
+    hasAttachment: email.hasAttachment,
+    unread: email.unread,
+    automatedSender: email.automatedSender,
+    mailingList: email.mailingList
   };
   const ruleDecision = evaluateGmailRules(gmailRulesFromSettings(account.settings), context);
   const normalizedPayload = {
     provider: "gmail",
-    provider_item_id: message.id,
-    history_id: message.historyId ?? null,
-    thread_id: message.threadId,
-    message_id: messageId,
-    internal_date: message.internalDate ?? null,
-    received_at: receivedAt,
-    labels: message.labelIds ?? [],
-    unread,
-    sender,
-    sender_address: senderAddress,
-    subject,
-    recipients,
-    has_attachment: context.hasAttachment,
-    automated_sender: context.automatedSender,
-    mailing_list: context.mailingList,
+    provider_item_id: email.providerItemId,
+    history_id: email.historyId,
+    thread_id: email.threadId,
+    message_id: email.messageId,
+    internal_date: email.internalDate,
+    received_at: email.receivedAt,
+    labels: email.labels,
+    unread: email.unread,
+    sender: email.sender,
+    sender_address: email.senderAddress,
+    subject: email.subject,
+    recipients: email.recipients,
+    has_attachment: email.hasAttachment,
+    automated_sender: email.automatedSender,
+    mailing_list: email.mailingList,
     matched_rule_id: ruleDecision.rule?.id ?? null,
     matched_rule_name: ruleDecision.rule?.name ?? null,
     matched_rule_action: ruleDecision.action,
     assigned_category: ruleDecision.category ?? null,
-    permalink: gmailPermalink(message.threadId),
+    permalink: email.permalink,
     connector_account: account.id
   };
   const payloadHash = await hashSessionToken(JSON.stringify(normalizedPayload));
@@ -859,7 +1053,7 @@ async function ingestGmailMessage(
     userId,
     {
       accountId: account.id,
-      sourceExternalId: message.id,
+      sourceExternalId: email.sourceExternalId,
       sourceType: "email",
       payloadHash,
       normalizedPayload
@@ -873,7 +1067,7 @@ async function ingestGmailMessage(
     const updatedRecord = await store.updateConnectorSourceRecordProcessing(
       userId,
       account.id,
-      message.id,
+      email.sourceExternalId,
       {
         status: "notification_suppressed",
         processingReason: ruleDecision.rule
@@ -885,22 +1079,22 @@ async function ingestGmailMessage(
       now
     );
     return {
-      messageId: message.id,
+      messageId: email.sourceExternalId,
       status: "notification_suppressed",
       reason: updatedRecord.processingReason ?? "Suppressed by Gmail rule",
       recordId: updatedRecord.id
     };
   }
-  const severity = gmailNotificationSeverity(ruleDecision.action, unread);
+  const severity = gmailNotificationSeverity(ruleDecision.action, email.unread);
   const notification = await store.createNotification(
     userId,
     {
-      title: subject,
-      summary: `${sender}${unread ? " · unread" : ""}${ruleDecision.category ? ` · ${ruleDecision.category}` : ""}`,
+      title: email.subject,
+      summary: `${email.sender}${email.unread ? " · unread" : ""}${ruleDecision.category ? ` · ${ruleDecision.category}` : ""}`,
       body: ruleDecision.rule ? `Matched Gmail rule: ${ruleDecision.rule.name}` : "",
       source: "connector",
       sourceLabel: "Gmail",
-      sourceUrl: gmailPermalink(message.threadId),
+      sourceUrl: email.permalink,
       severity
     },
     now
@@ -912,7 +1106,7 @@ async function ingestGmailMessage(
   const updatedRecord = await store.updateConnectorSourceRecordProcessing(
     userId,
     account.id,
-    message.id,
+    email.sourceExternalId,
     {
       status: "notification_created",
       processingReason: "Created a Gmail notification",
@@ -922,10 +1116,79 @@ async function ingestGmailMessage(
     now
   );
   return {
-    messageId: message.id,
+    messageId: email.sourceExternalId,
     status: "notification_created",
     reason: updatedRecord.processingReason ?? "Created a Gmail notification",
     recordId: updatedRecord.id
+  };
+}
+
+function normalizedGmailEmailFromApi(message: GmailMessage, now: string): NormalizedGmailEmail {
+  const headers = headersByName(message);
+  const subject = headers.get("subject") ?? "(no subject)";
+  const sender = headers.get("from") ?? "Unknown sender";
+  const senderAddress = emailAddressFromHeader(sender);
+  const messageId = headers.get("message-id") ?? null;
+  const recipients = [
+    ...(headers.get("to") ? [headers.get("to") ?? ""] : []),
+    ...(headers.get("cc") ? [headers.get("cc") ?? ""] : [])
+  ];
+  const receivedAt = message.internalDate
+    ? new Date(Number(message.internalDate)).toISOString()
+    : now;
+  const unread = message.labelIds?.includes("UNREAD") ?? false;
+  return {
+    sourceExternalId: message.id,
+    providerItemId: message.id,
+    threadId: message.threadId,
+    historyId: message.historyId ?? null,
+    messageId,
+    internalDate: message.internalDate ?? null,
+    receivedAt,
+    labels: message.labelIds ?? [],
+    unread,
+    sender,
+    senderAddress,
+    subject,
+    recipients,
+    hasAttachment: gmailMessageHasAttachment(message),
+    automatedSender: isAutomatedSender(headers),
+    mailingList: isMailingList(headers),
+    permalink: gmailPermalink(message.threadId)
+  };
+}
+
+function normalizedGmailEmailFromImap(
+  message: GmailImapMessage,
+  now: string
+): NormalizedGmailEmail {
+  const headers = message.parsed.headers;
+  const subject = message.parsed.subject ?? "(no subject)";
+  const sender = message.parsed.from ?? "Unknown sender";
+  const senderAddress = emailAddressFromHeader(sender);
+  const recipients = [
+    ...(message.parsed.to ? [message.parsed.to] : []),
+    ...(message.parsed.cc ? [message.parsed.cc] : [])
+  ];
+  const receivedAt = message.parsed.date ? validIsoOrFallback(message.parsed.date, now) : now;
+  return {
+    sourceExternalId: message.sourceExternalId,
+    providerItemId: message.sourceExternalId,
+    threadId: null,
+    historyId: null,
+    messageId: message.parsed.messageId ?? message.identifiers.messageId,
+    internalDate: message.identifiers.internalDate,
+    receivedAt,
+    labels: [],
+    unread: false,
+    sender,
+    senderAddress,
+    subject,
+    recipients,
+    hasAttachment: message.parsed.attachments.length > 0,
+    automatedSender: isAutomatedSender(headers),
+    mailingList: isMailingList(headers),
+    permalink: "https://mail.google.com/mail/u/0/#inbox"
   };
 }
 
@@ -1318,6 +1581,21 @@ async function refreshGmailAccessToken(
   }
 }
 
+async function requestedGmailOAuthScope(
+  store: DentLinkStore,
+  userId: EntityId,
+  url: URL
+): Promise<string> {
+  if (url.searchParams.get("engine") === "gmail_imap") return GMAIL_IMAP_SCOPE;
+  const reconnectAccountId = url.searchParams.get("accountId");
+  if (!reconnectAccountId) return GMAIL_DEFAULT_SCOPE;
+  const account = await store.getConnectorAccount(userId, reconnectAccountId);
+  if (!account || account.connectorKey !== GMAIL_CONNECTOR_KEY) return GMAIL_DEFAULT_SCOPE;
+  return gmailIngestionEngine(account.settings) === "gmail_imap"
+    ? GMAIL_IMAP_SCOPE
+    : GMAIL_DEFAULT_SCOPE;
+}
+
 async function verifiedGmailScopes(
   gmail: GmailApiClient,
   token: GmailTokenResponse
@@ -1334,6 +1612,15 @@ async function verifyGmailReadonlyCapability(
 ): Promise<void> {
   const afterSeconds = Math.floor((Date.parse(now) - 24 * 60 * 60 * 1000) / 1000);
   await gmail.listMessages(accessToken, { query: `after:${afterSeconds}`, maxResults: 1 });
+}
+
+async function verifyGmailImapCapability(
+  env: GmailRuntimeEnv,
+  user: string,
+  accessToken: string,
+  now: string
+): Promise<void> {
+  await gmailImapClient(env).verify({ user, accessToken, now });
 }
 
 async function markFailedGmailReconnect(
@@ -1381,7 +1668,9 @@ function logGmailOAuthOutcome(input: {
     event: "gmail_oauth_credential_upgrade",
     accountId: input.accountId,
     reconnecting: input.reconnecting,
-    requestedScopes: [GMAIL_SCOPE],
+    requestedScopes: input.grantedScopes.includes(GMAIL_IMAP_SCOPE)
+      ? [GMAIL_IMAP_SCOPE]
+      : [GMAIL_DEFAULT_SCOPE],
     grantedScopes: input.grantedScopes,
     refreshTokenReturned: input.refreshTokenReturned,
     credentialReplaced: input.credentialReplaced,
@@ -1409,6 +1698,46 @@ function gmailClient(env: GmailRuntimeEnv): GmailApiClient {
   return createGoogleGmailClient(env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET);
 }
 
+function gmailImapClient(env: GmailRuntimeEnv): GmailImapClient {
+  if (env.gmailImapClient) return env.gmailImapClient;
+  return {
+    async poll(options) {
+      const client = await openImapClient(cloudflareImapSocketFactory, "imap.gmail.com", 993);
+      try {
+        return await pollGmailImap(client, options);
+      } finally {
+        await client.logout().catch(() => client.close());
+      }
+    },
+    async verify(options) {
+      const client = await openImapClient(cloudflareImapSocketFactory, "imap.gmail.com", 993);
+      try {
+        await pollGmailImap(client, { ...options, recentWindowDays: 1, maxMessages: 1 });
+      } finally {
+        await client.logout().catch(() => client.close());
+      }
+    }
+  };
+}
+
+async function cloudflareImapSocketFactory(host: string, port: number): Promise<ImapSocket> {
+  const moduleName = "cloudflare:sockets";
+  const sockets = (await import(/* @vite-ignore */ moduleName)) as {
+    connect(
+      address: { hostname: string; port: number },
+      options?: { secureTransport?: "off" | "on" | "starttls" }
+    ): ImapSocket;
+  };
+  return sockets.connect(
+    { hostname: host, port },
+    { secureTransport: port === 993 ? "on" : "starttls" }
+  );
+}
+
+function gmailIngestionEngine(settings: ConnectorAccount["settings"]): GmailIngestionEngine {
+  return settings[GMAIL_INGESTION_ENGINE_SETTING_KEY] === "gmail_imap" ? "gmail_imap" : "gmail_api";
+}
+
 function headersByName(message: GmailMessage): Map<string, string> {
   const headers = new Map<string, string>();
   for (const header of message.payload?.headers ?? []) {
@@ -1419,6 +1748,11 @@ function headersByName(message: GmailMessage): Map<string, string> {
 
 function gmailPermalink(threadId: string): string {
   return `https://mail.google.com/mail/u/0/#inbox/${encodeURIComponent(threadId)}`;
+}
+
+function validIsoOrFallback(value: string, fallback: string): string {
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? new Date(time).toISOString() : fallback;
 }
 
 function maxHistoryId(left: string | null, right?: string): string | null {
@@ -1574,6 +1908,33 @@ function withGmailOperationSummary(
   };
 }
 
+function withGmailImapSummary(
+  settings: ConnectorAccount["settings"],
+  now: string,
+  status: "success" | "partial",
+  summary: GmailSyncResult["summary"],
+  elapsedMs: number
+): ConnectorAccount["settings"] {
+  const priorAverage =
+    typeof settings.gmailLastImapAverageSyncMs === "number"
+      ? settings.gmailLastImapAverageSyncMs
+      : elapsedMs;
+  const average = Math.round((priorAverage + elapsedMs) / 2);
+  return {
+    ...settings,
+    gmailLastImapAt: now,
+    gmailLastImapStatus: status,
+    gmailLastImapDiscovered: summary.discovered,
+    gmailLastImapExamined: summary.examined,
+    gmailLastImapCreated: summary.created,
+    gmailLastImapDuplicate: summary.duplicate,
+    gmailLastImapFailed: summary.failed,
+    gmailLastImapAverageSyncMs: average,
+    gmailLastImapErrorCode: null,
+    gmailLastImapErrorMessage: null
+  };
+}
+
 function withGmailOperationFailure(
   settings: ConnectorAccount["settings"],
   operation: "incremental" | "backfill",
@@ -1599,15 +1960,19 @@ function withGmailOperationFailure(
 
 function withGmailGrantedScopes(
   settings: ConnectorAccount["settings"],
-  scope: string
+  scope: string,
+  requestedScope = GMAIL_DEFAULT_SCOPE
 ): ConnectorAccount["settings"] {
   const scopes = normalizeScopes(scope);
+  const requiredScope =
+    requestedScope === GMAIL_IMAP_SCOPE ? GMAIL_IMAP_SCOPE : GMAIL_READONLY_SCOPE;
   return {
     ...settings,
     gmailGrantedScopes: scopes.join(" "),
     gmailReadOnlyGranted: scopes.includes(GMAIL_READONLY_SCOPE),
-    gmailReconnectRequired: !scopes.includes(GMAIL_READONLY_SCOPE),
-    gmailRequestedScope: GMAIL_SCOPE
+    gmailImapGranted: scopes.includes(GMAIL_IMAP_SCOPE),
+    gmailReconnectRequired: !scopes.includes(requiredScope),
+    gmailRequestedScope: requestedScope
   };
 }
 
@@ -1615,6 +1980,48 @@ function knownGmailScopesMissReadonly(settings: ConnectorAccount["settings"]): b
   const scopeValue = settings.gmailGrantedScopes;
   if (typeof scopeValue !== "string" || scopeValue.length === 0) return false;
   return !normalizeScopes(scopeValue).includes(GMAIL_READONLY_SCOPE);
+}
+
+function knownGmailScopesMissImap(settings: ConnectorAccount["settings"]): boolean {
+  const scopeValue = settings.gmailGrantedScopes;
+  if (typeof scopeValue !== "string" || scopeValue.length === 0) return false;
+  return !normalizeScopes(scopeValue).includes(GMAIL_IMAP_SCOPE);
+}
+
+async function logGmailImapApiComparison(
+  env: GmailRuntimeEnv,
+  accessToken: string,
+  account: ConnectorAccount,
+  poll: GmailImapPollResult,
+  summary: GmailSyncResult["summary"]
+): Promise<void> {
+  try {
+    const apiMessages = await messagesForSync(gmailClient(env), accessToken, account.syncCursor);
+    console.log(
+      JSON.stringify({
+        level: "info",
+        event: "gmail_imap_parallel_comparison",
+        accountId: account.id,
+        imapDiscovered: poll.discoveredUids.length,
+        imapFetched: poll.messages.length,
+        imapCreated: summary.created,
+        imapDuplicate: summary.duplicate,
+        imapFailed: summary.failed,
+        apiDiscovered: apiMessages.messageIds.length,
+        mismatch: apiMessages.messageIds.length !== poll.discoveredUids.length
+      })
+    );
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        level: "error",
+        event: "gmail_imap_parallel_comparison_failed",
+        accountId: account.id,
+        errorCode: gmailErrorCode(error),
+        message: safeErrorMessage(error)
+      })
+    );
+  }
 }
 
 function normalizeScopes(scope: string): string[] {

@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { hashPassword, hashSessionToken } from "./auth";
 import { D1DentLinkStore } from "./d1-storage";
 import type { GoogleCalendarApiClient } from "./google-calendar";
-import { createGoogleGmailClient, type GmailApiClient } from "./gmail";
+import { createGoogleGmailClient, type GmailApiClient, type GmailImapClient } from "./gmail";
 import apiDefaultForTest, { handleApiRequest, type ApiEnv } from "./index";
 import { SqliteD1TestDatabase } from "./sqlite-d1-test";
 import { MemoryDentLinkStore, StoreError, type DentLinkStore } from "./storage";
@@ -999,6 +999,271 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
         matched_rule_action: "suppress"
       }
     });
+  });
+
+  it("syncs Gmail through IMAP behind the per-account ingestion engine flag", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-imap@example.com");
+    const env = gmailTestEnv(fakeGmailClient(), fakeGmailImapClient());
+    const start = await requestJson<{ authorizationUrl: string }>(
+      store,
+      "POST",
+      "/v1/connectors/gmail/start",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const startUrl = new URL(start.authorizationUrl);
+    const callback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${startUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    const linked = (await callback.json()) as { account: ConnectorAccount };
+    await store.updateConnectorAccount(
+      owner.user.id,
+      linked.account.id,
+      linked.account.version,
+      {
+        settings: {
+          ...linked.account.settings,
+          gmailIngestionEngine: "gmail_imap",
+          gmailGrantedScopes: "https://mail.google.com/",
+          gmailImapGranted: true,
+          gmailReconnectRequired: false
+        }
+      },
+      "2026-07-14T20:00:00.000Z"
+    );
+
+    const sync = await requestJson<{
+      account: ConnectorAccount;
+      summary: {
+        discovered: number;
+        examined: number;
+        created: number;
+        duplicate: number;
+        failed: number;
+      };
+      createdNotifications: number;
+      outcomes: Array<{ messageId: string; status: string; recordId: string | null }>;
+    }>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(sync.summary).toMatchObject({ discovered: 2, examined: 1, created: 1, failed: 0 });
+    expect(sync.createdNotifications).toBe(1);
+    expect(sync.account.settings).toMatchObject({
+      gmailLastImapStatus: "success",
+      gmailLastImapDiscovered: 2,
+      gmailLastImapExamined: 1,
+      gmailLastImapCreated: 1
+    });
+    expect(sync.outcomes[0]).toMatchObject({
+      messageId: "x-gm-msgid:imap-gm-1",
+      status: "notification_created"
+    });
+
+    const records = await requestJson<{ records: ConnectorSourceRecord[] }>(
+      store,
+      "GET",
+      `/v1/connectors/accounts/${linked.account.id}/source-records`,
+      undefined,
+      owner.session.token
+    );
+    expect(records.records[0]?.sourceExternalId).toBe("x-gm-msgid:imap-gm-1");
+    expect(records.records[0]?.normalizedPayload).toMatchObject({
+      provider: "gmail",
+      provider_item_id: "x-gm-msgid:imap-gm-1",
+      message_id: "<imap-message@example.test>",
+      has_attachment: true,
+      connector_account: linked.account.id
+    });
+
+    const repeat = await requestJson<typeof sync>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(repeat.summary).toMatchObject({ discovered: 2, examined: 1, created: 0, duplicate: 1 });
+  });
+
+  it("runs deterministic rules before IMAP Gmail notification creation", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-imap-rules@example.com");
+    const env = gmailTestEnv(fakeGmailClient(), fakeGmailImapClient());
+    const start = await requestJson<{ authorizationUrl: string }>(
+      store,
+      "POST",
+      "/v1/connectors/gmail/start",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const startUrl = new URL(start.authorizationUrl);
+    const callback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${startUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    const linked = (await callback.json()) as { account: ConnectorAccount };
+    await store.updateConnectorAccount(
+      owner.user.id,
+      linked.account.id,
+      linked.account.version,
+      {
+        settings: {
+          ...linked.account.settings,
+          gmailIngestionEngine: "gmail_imap",
+          gmailGrantedScopes: "https://mail.google.com/",
+          gmailImapGranted: true,
+          gmailReconnectRequired: false
+        }
+      },
+      "2026-07-14T20:00:00.000Z"
+    );
+    await requestJson(
+      store,
+      "PUT",
+      `/v1/connectors/gmail/${linked.account.id}/rules`,
+      {
+        rules: [
+          {
+            id: "suppress-news",
+            name: "Suppress newsletters",
+            enabled: true,
+            mailingList: true,
+            action: "suppress"
+          }
+        ]
+      },
+      owner.session.token,
+      200,
+      env
+    );
+
+    const sync = await requestJson<{
+      summary: { created: number; filtered: number };
+      outcomes: Array<{ status: string; reason: string }>;
+    }>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(sync.summary).toMatchObject({ created: 0, filtered: 1 });
+    expect(sync.outcomes[0]).toMatchObject({
+      status: "notification_suppressed",
+      reason: "Suppressed by Gmail rule: Suppress newsletters"
+    });
+    const notifications = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(notifications.notifications).toEqual([]);
+  });
+
+  it("requests mail.google.com and verifies IMAP capability during IMAP reconnect", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-imap-reconnect@example.com");
+    const initialEnv = gmailTestEnv(fakeGmailClient());
+    const start = await requestJson<{ authorizationUrl: string }>(
+      store,
+      "POST",
+      "/v1/connectors/gmail/start",
+      undefined,
+      owner.session.token,
+      201,
+      initialEnv
+    );
+    const startUrl = new URL(start.authorizationUrl);
+    const callback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${startUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...initialEnv }
+    );
+    const linked = (await callback.json()) as { account: ConnectorAccount };
+    await store.updateConnectorAccount(
+      owner.user.id,
+      linked.account.id,
+      linked.account.version,
+      {
+        settings: {
+          ...linked.account.settings,
+          gmailIngestionEngine: "gmail_imap",
+          gmailGrantedScopes: "https://www.googleapis.com/auth/gmail.readonly",
+          gmailImapGranted: false,
+          gmailReconnectRequired: true
+        }
+      },
+      "2026-07-14T20:00:00.000Z"
+    );
+    const reconnectEnv = gmailTestEnv(
+      fakeGmailClientWithMailScope("imap-refresh-token-secret"),
+      fakeGmailImapClient()
+    );
+    const reconnectStart = await requestJson<{ authorizationUrl: string }>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/start?accountId=${linked.account.id}`,
+      undefined,
+      owner.session.token,
+      201,
+      reconnectEnv
+    );
+    const reconnectUrl = new URL(reconnectStart.authorizationUrl);
+    expect(reconnectUrl.searchParams.get("scope")).toBe("https://mail.google.com/");
+    expect(reconnectUrl.searchParams.get("access_type")).toBe("offline");
+    expect(reconnectUrl.searchParams.get("prompt")).toBe("consent");
+
+    const reconnected = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${reconnectUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...reconnectEnv }
+    );
+    expect(reconnected.status).toBe(200);
+    const body = (await reconnected.json()) as { account: ConnectorAccount };
+    expect(body.account.settings).toMatchObject({
+      gmailIngestionEngine: "gmail_imap",
+      gmailGrantedScopes: "https://mail.google.com/",
+      gmailImapGranted: true,
+      gmailReconnectRequired: false
+    });
+    expect(body.account.errorCode).toBeNull();
+    expect(body.account.errorMessage).toBeNull();
   });
 
   it("runs scheduled incremental Gmail sync for connected accounts", async () => {
@@ -2737,14 +3002,18 @@ function debugSessions(store: MemoryDentLinkStore): Map<string, unknown> {
   return (store as unknown as { sessions: Map<string, unknown> }).sessions;
 }
 
-function gmailTestEnv(gmailClient: GmailApiClient): Partial<ApiEnv> {
+function gmailTestEnv(
+  gmailClient: GmailApiClient,
+  gmailImapClient?: GmailImapClient
+): Partial<ApiEnv> {
   return {
     GOOGLE_CLIENT_ID: "test-client-id",
     GOOGLE_CLIENT_SECRET: "test-client-secret",
     GOOGLE_REDIRECT_URI: "https://api.dentlink.test/v1/connectors/gmail/callback",
     GMAIL_CREDENTIAL_ENCRYPTION_KEY: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
     DENTLINK_WEB_ORIGIN: "https://web.example.test",
-    gmailClient
+    gmailClient,
+    gmailImapClient
   };
 }
 
@@ -2823,6 +3092,96 @@ function fakeGmailClientWithRefreshToken(refreshTokenValue: string): GmailApiCli
           ]
         }
       };
+    }
+  };
+}
+
+function fakeGmailClientWithMailScope(refreshTokenValue: string): GmailApiClient {
+  return {
+    async exchangeCode(code) {
+      expect(code).toBe("valid-code");
+      return {
+        accessToken: "access-token",
+        refreshToken: refreshTokenValue,
+        scope: "https://mail.google.com/"
+      };
+    },
+    async refreshAccessToken(refreshToken) {
+      expect(refreshToken).toBe(refreshTokenValue);
+      return { accessToken: "access-token-refreshed" };
+    },
+    async getAccessTokenScopes() {
+      return ["https://mail.google.com/"];
+    },
+    async getProfile() {
+      return { emailAddress: "owner.gmail@example.test", historyId: "100" };
+    },
+    async listMessages() {
+      return { messages: [{ id: "gmail-message-1", threadId: "gmail-thread-1" }] };
+    },
+    async listHistory() {
+      return { historyId: "101", history: [] };
+    },
+    async getMessage() {
+      throw new Error("Gmail API messages should not be fetched during IMAP reconnect");
+    }
+  };
+}
+
+function fakeGmailImapClient(): GmailImapClient {
+  return {
+    async poll(options) {
+      expect(options.user).toBe("owner.gmail@example.test");
+      expect(options.accessToken).toBe("access-token-refreshed");
+      expect(options.recentWindowDays).toBeGreaterThan(0);
+      expect(options.maxMessages).toBeGreaterThan(0);
+      return {
+        mailboxMessageCount: 10,
+        uidValidity: "999",
+        discoveredUids: ["10", "11"],
+        messages: [
+          {
+            uid: "10",
+            sourceExternalId: "x-gm-msgid:imap-gm-1",
+            identifiers: {
+              xGmMsgId: "imap-gm-1",
+              messageId: "<imap-message@example.test>",
+              uid: "10",
+              uidValidity: "999",
+              internalDate: "14-Jul-2026 12:00:00 -0400"
+            },
+            parsed: {
+              subject: "IMAP insurance update",
+              from: "Clinic Desk <clinic@example.test>",
+              to: "owner.gmail@example.test",
+              cc: null,
+              date: "Tue, 14 Jul 2026 12:00:00 -0400",
+              messageId: "<imap-message@example.test>",
+              plainText: "Plain text",
+              html: "<p>Plain text</p>",
+              attachments: [
+                {
+                  filename: "statement.pdf",
+                  contentType: "application/pdf",
+                  disposition: "attachment",
+                  contentId: null,
+                  sizeBytes: 123
+                }
+              ],
+              headers: new Map([
+                ["list-id", "updates.example.test"],
+                ["from", "Clinic Desk <clinic@example.test>"],
+                ["subject", "IMAP insurance update"]
+              ])
+            },
+            rawSizeBytes: 512
+          }
+        ]
+      };
+    },
+    async verify(options) {
+      expect(options.user).toBe("owner.gmail@example.test");
+      expect(options.accessToken).toBe("access-token");
     }
   };
 }
