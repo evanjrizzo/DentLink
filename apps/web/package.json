@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "vite build",
+    "dev": "vite --host 0.0.0.0",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
@@ -12,6 +14,13 @@
     "@dentlink/design-tokens": "workspace:*",
     "@dentlink/item-model": "workspace:*",
     "@dentlink/sync-engine": "workspace:*",
-    "@dentlink/ui": "workspace:*"
+    "@dentlink/ui": "workspace:*",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@dentlink/api": "workspace:*",
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11"
   }
 }

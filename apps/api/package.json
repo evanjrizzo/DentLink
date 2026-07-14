@@ -4,12 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@dentlink/ai": "workspace:*",
-    "@dentlink/connector-sdk": "workspace:*",
+    "@dentlink/api-client": "workspace:*",
     "@dentlink/item-model": "workspace:*",
     "@dentlink/ranking": "workspace:*"
   }

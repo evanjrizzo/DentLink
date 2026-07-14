@@ -8,12 +8,12 @@ DentLink is a new, independent platform. It must not depend on Odysseus, the pre
 
 ## Current status
 
-Milestone 0B: monorepo and tooling scaffold.
+Milestone 1: authentication and manual Notes vertical slice.
 
-This repository contains the pnpm TypeScript workspace structure, shared package boundaries, app
-boundaries, formatting/linting/type checking/test commands, and CI configuration. It does not yet
-contain implemented backend routes, database migrations, authentication, Notes behavior, connectors,
-calendar providers, webhooks, Tauri, Android, or AI calls.
+This repository contains the pnpm TypeScript workspace, shared package boundaries, a Worker-style API
+handler, D1 migration for auth and notes, shared auth/note/sync/conflict types, a typed API client, a
+small sync helper, and a responsive Notes UI shell. It does not yet contain email connectors,
+calendar providers, named webhooks, Tauri, Android, or AI calls.
 
 ## Product shape
 
@@ -35,14 +35,14 @@ Web, desktop, Android app, and Android homescreen widget.
 
 ```text
 apps/
-  api/                 Future Cloudflare Worker API and ingestion boundary
-  web/                 Future browser client shell
+  api/                 Worker-style auth and Notes API boundary
+  web/                 Browser Notes client shell
 packages/
   ai/                  Optional provider-neutral AI boundary
   api-client/          Versioned API client contracts
   connector-sdk/       Connector manifest and normalization contracts
   design-tokens/       Shared visual token boundary
-  item-model/          Provider-neutral DentLink item contracts
+  item-model/          Provider-neutral auth, note, sync, and conflict contracts
   ranking/             Ranking result and explanation contracts
   sync-engine/         Client sync and offline queue contracts
   ui/                  Shared presentation boundary
@@ -83,3 +83,9 @@ pnpm validate
 ```
 
 The validation command checks formatting, linting, TypeScript, and tests across the workspace.
+
+Milestone 1 also validates the D1 migration with:
+
+```bash
+sqlite3 /tmp/dentlink_m1_migration_check.db < migrations/0001_auth_notes.sql
+```

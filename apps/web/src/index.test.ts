@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { webAppBoundary } from "./index";
+import { DentLinkNotesApp } from "./notes-app";
 
 describe("@dentlink/web", () => {
-  it("declares the web app boundary", () => {
-    expect(webAppBoundary.name).toBe("@dentlink/web");
+  it("exports the notes app shell", () => {
+    expect(DentLinkNotesApp).toBeTypeOf("function");
   });
 });

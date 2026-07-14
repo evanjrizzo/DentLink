@@ -4,14 +4,16 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.tsx"
   },
   "scripts": {
+    "build": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@dentlink/design-tokens": "workspace:*",
-    "@dentlink/item-model": "workspace:*"
+    "@dentlink/item-model": "workspace:*",
+    "react": "^19.0.0"
   }
 }

@@ -1,0 +1,480 @@
+import type {
+  ConflictResolution,
+  CurrentSession,
+  EntityId,
+  Folder,
+  Note,
+  NoteConflict,
+  NoteHistoryEvent,
+  NoteInput,
+  NotePatch,
+  Session,
+  SyncChange,
+  Tag,
+  User
+} from "@dentlink/item-model";
+
+export type PasswordRecord = {
+  hash: string;
+  salt: string;
+  iterations: number;
+};
+
+export type CreateUserRecord = {
+  email: string;
+  password: PasswordRecord;
+};
+
+export interface DentLinkStore {
+  createUser(input: CreateUserRecord): User;
+  findUserByEmail(email: string): (User & { password: PasswordRecord }) | null;
+  createSession(userId: EntityId, tokenHash: string, now: string, expiresAt: string): Session;
+  findSessionByTokenHash(tokenHash: string, now: string): CurrentSession | null;
+  deleteSessionByTokenHash(tokenHash: string): void;
+  listNotes(
+    userId: EntityId,
+    query: { search?: string; folderId?: string; tagIds?: string[] }
+  ): {
+    notes: Note[];
+    folders: Folder[];
+    tags: Tag[];
+  };
+  createNote(userId: EntityId, input: NoteInput, now: string): Note;
+  updateNote(
+    userId: EntityId,
+    noteId: EntityId,
+    expectedVersion: number,
+    patch: NotePatch,
+    now: string
+  ): Note | NoteConflict;
+  deleteNote(
+    userId: EntityId,
+    noteId: EntityId,
+    expectedVersion: number,
+    now: string
+  ): Note | NoteConflict;
+  reorderNotes(
+    userId: EntityId,
+    noteOrders: Array<{ id: EntityId; expectedVersion: number; globalOrder: number }>,
+    now: string
+  ): Note[] | NoteConflict;
+  createFolder(userId: EntityId, name: string, now: string): Folder;
+  createTag(userId: EntityId, name: string, now: string): Tag;
+  listConflicts(userId: EntityId): NoteConflict[];
+  resolveConflict(
+    userId: EntityId,
+    conflictId: EntityId,
+    expectedVersion: number,
+    resolution: ConflictResolution,
+    now: string
+  ): NoteConflict | null;
+  sync(userId: EntityId, cursor: string): { cursor: string; changes: SyncChange[] };
+  listHistory(userId: EntityId, noteId: EntityId): NoteHistoryEvent[];
+}
+
+export class MemoryDentLinkStore implements DentLinkStore {
+  private users = new Map<EntityId, User & { password: PasswordRecord }>();
+  private usersByEmail = new Map<string, EntityId>();
+  private sessions = new Map<string, Session>();
+  private notes = new Map<EntityId, Note>();
+  private folders = new Map<EntityId, Folder>();
+  private tags = new Map<EntityId, Tag>();
+  private noteTagIds = new Map<EntityId, Set<EntityId>>();
+  private conflicts = new Map<EntityId, NoteConflict>();
+  private history: NoteHistoryEvent[] = [];
+  private changes: SyncChange[] = [];
+  private sequence = 0;
+
+  createUser(input: CreateUserRecord): User {
+    const email = normalizeEmail(input.email);
+    if (this.usersByEmail.has(email)) {
+      throw new StoreError("email_exists", "A user with that email already exists");
+    }
+    const user: User & { password: PasswordRecord } = {
+      id: this.nextId("user"),
+      email,
+      password: input.password,
+      createdAt: new Date().toISOString()
+    };
+    this.users.set(user.id, user);
+    this.usersByEmail.set(email, user.id);
+    return publicUser(user);
+  }
+
+  findUserByEmail(email: string): (User & { password: PasswordRecord }) | null {
+    const id = this.usersByEmail.get(normalizeEmail(email));
+    const user = id ? this.users.get(id) : undefined;
+    return user ? { ...user, password: { ...user.password } } : null;
+  }
+
+  createSession(userId: EntityId, tokenHash: string, now: string, expiresAt: string): Session {
+    const session: Session = { id: this.nextId("session"), userId, createdAt: now, expiresAt };
+    this.sessions.set(tokenHash, session);
+    return { ...session };
+  }
+
+  findSessionByTokenHash(tokenHash: string, now: string): CurrentSession | null {
+    const session = this.sessions.get(tokenHash);
+    if (!session || session.expiresAt <= now) return null;
+    const user = this.users.get(session.userId);
+    if (!user) return null;
+    return {
+      user: publicUser(user),
+      session: { expiresAt: session.expiresAt }
+    };
+  }
+
+  deleteSessionByTokenHash(tokenHash: string): void {
+    this.sessions.delete(tokenHash);
+  }
+
+  listNotes(userId: EntityId, query: { search?: string; folderId?: string; tagIds?: string[] }) {
+    const search = query.search?.trim().toLowerCase();
+    const tagFilter = new Set(query.tagIds ?? []);
+    const notes = [...this.notes.values()]
+      .filter((note) => note.userId === userId && note.status !== "deleted")
+      .filter((note) => !query.folderId || note.folderId === query.folderId)
+      .filter((note) => {
+        if (!search) return true;
+        return `${note.title} ${note.body}`.toLowerCase().includes(search);
+      })
+      .filter((note) => {
+        if (tagFilter.size === 0) return true;
+        const ids = this.noteTagIds.get(note.id) ?? new Set();
+        return [...tagFilter].every((tagId) => ids.has(tagId));
+      })
+      .map((note) => this.withTags(note))
+      .sort(compareNotes);
+    return {
+      notes,
+      folders: [...this.folders.values()]
+        .filter((folder) => folder.userId === userId)
+        .sort(compareNames),
+      tags: [...this.tags.values()].filter((tag) => tag.userId === userId).sort(compareNames)
+    };
+  }
+
+  createNote(userId: EntityId, input: NoteInput, now: string): Note {
+    const note: Note = {
+      id: this.nextId("note"),
+      userId,
+      kind: input.kind,
+      title: input.title.trim(),
+      body: input.body?.trim() ?? "",
+      folderId: input.folderId ?? null,
+      tags: [],
+      dueAt: input.dueAt ?? null,
+      priority: input.priority ?? "none",
+      pinned: input.pinned ?? false,
+      status: "active",
+      globalOrder: this.nextOrder(userId),
+      sourceUrl: input.sourceUrl ?? null,
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null
+    };
+    this.assertFolder(userId, note.folderId);
+    this.setNoteTags(userId, note.id, input.tagIds ?? []);
+    this.notes.set(note.id, note);
+    const stored = this.withTags(note);
+    this.recordHistory(userId, stored, "created", now);
+    this.recordChange({ type: "note", op: "upsert", note: stored, cursor: "0" });
+    return stored;
+  }
+
+  updateNote(
+    userId: EntityId,
+    noteId: EntityId,
+    expectedVersion: number,
+    patch: NotePatch,
+    now: string
+  ): Note | NoteConflict {
+    const existing = this.requireNote(userId, noteId);
+    if (existing.version !== expectedVersion) {
+      return this.createConflict(userId, existing, expectedVersion, patch, now);
+    }
+    const next: Note = {
+      ...existing,
+      kind: patch.kind ?? existing.kind,
+      title: patch.title === undefined ? existing.title : patch.title.trim(),
+      body: patch.body === undefined ? existing.body : patch.body.trim(),
+      folderId: patch.folderId === undefined ? existing.folderId : patch.folderId,
+      dueAt: patch.dueAt === undefined ? existing.dueAt : patch.dueAt,
+      priority: patch.priority ?? existing.priority,
+      pinned: patch.pinned ?? existing.pinned,
+      status: patch.status ?? existing.status,
+      globalOrder: patch.globalOrder ?? existing.globalOrder,
+      sourceUrl: patch.sourceUrl === undefined ? existing.sourceUrl : patch.sourceUrl,
+      version: existing.version + 1,
+      updatedAt: now,
+      completedAt:
+        patch.status === "done" ? now : patch.status === "active" ? null : existing.completedAt
+    };
+    this.assertFolder(userId, next.folderId);
+    if (patch.tagIds) this.setNoteTags(userId, next.id, patch.tagIds);
+    this.notes.set(next.id, next);
+    const stored = this.withTags(next);
+    this.recordHistory(userId, stored, actionForPatch(patch), now);
+    if (stored.status === "deleted") {
+      this.recordChange({ type: "note", op: "delete", id: stored.id, userId, cursor: "0" });
+    } else {
+      this.recordChange({ type: "note", op: "upsert", note: stored, cursor: "0" });
+    }
+    return stored;
+  }
+
+  deleteNote(
+    userId: EntityId,
+    noteId: EntityId,
+    expectedVersion: number,
+    now: string
+  ): Note | NoteConflict {
+    return this.updateNote(userId, noteId, expectedVersion, { status: "deleted" }, now);
+  }
+
+  reorderNotes(
+    userId: EntityId,
+    noteOrders: Array<{ id: EntityId; expectedVersion: number; globalOrder: number }>,
+    now: string
+  ): Note[] | NoteConflict {
+    const updated: Note[] = [];
+    for (const order of noteOrders) {
+      const note = this.requireNote(userId, order.id);
+      if (note.version !== order.expectedVersion) {
+        return this.createConflict(
+          userId,
+          note,
+          order.expectedVersion,
+          { globalOrder: order.globalOrder },
+          now
+        );
+      }
+    }
+    for (const order of noteOrders) {
+      const note = this.requireNote(userId, order.id);
+      const next = {
+        ...note,
+        globalOrder: order.globalOrder,
+        version: note.version + 1,
+        updatedAt: now
+      };
+      this.notes.set(next.id, next);
+      const stored = this.withTags(next);
+      updated.push(stored);
+      this.recordHistory(userId, stored, "reordered", now);
+      this.recordChange({ type: "note", op: "upsert", note: stored, cursor: "0" });
+    }
+    return updated.sort(compareNotes);
+  }
+
+  createFolder(userId: EntityId, name: string, now: string): Folder {
+    const folder = {
+      id: this.nextId("folder"),
+      userId,
+      name: name.trim(),
+      createdAt: now,
+      updatedAt: now
+    };
+    this.folders.set(folder.id, folder);
+    this.recordChange({ type: "folder", op: "upsert", folder, cursor: "0" });
+    return { ...folder };
+  }
+
+  createTag(userId: EntityId, name: string, now: string): Tag {
+    const tag = {
+      id: this.nextId("tag"),
+      userId,
+      name: name.trim(),
+      createdAt: now,
+      updatedAt: now
+    };
+    this.tags.set(tag.id, tag);
+    this.recordChange({ type: "tag", op: "upsert", tag, cursor: "0" });
+    return { ...tag };
+  }
+
+  listConflicts(userId: EntityId): NoteConflict[] {
+    return [...this.conflicts.values()].filter(
+      (conflict) => conflict.userId === userId && conflict.status === "open"
+    );
+  }
+
+  resolveConflict(
+    userId: EntityId,
+    conflictId: EntityId,
+    expectedVersion: number,
+    resolution: ConflictResolution,
+    now: string
+  ): NoteConflict | null {
+    const conflict = this.conflicts.get(conflictId);
+    if (!conflict || conflict.userId !== userId) return null;
+    if (conflict.version !== expectedVersion) {
+      throw new StoreError("conflict_version_mismatch", "Conflict was already changed");
+    }
+    const resolved = {
+      ...conflict,
+      status: "resolved" as const,
+      resolution,
+      resolvedAt: now,
+      version: conflict.version + 1
+    };
+    this.conflicts.set(conflictId, resolved);
+    this.recordHistory(userId, conflict.serverNote, "conflict_resolved", now);
+    this.recordChange({ type: "conflict", op: "upsert", conflict: resolved, cursor: "0" });
+    return resolved;
+  }
+
+  sync(userId: EntityId, cursor: string): { cursor: string; changes: SyncChange[] } {
+    const since = Number.parseInt(cursor, 10);
+    if (!/^\d+$/.test(cursor) || !Number.isSafeInteger(since)) {
+      throw new StoreError("invalid_cursor", "Sync cursor is invalid");
+    }
+    const minCursor = since;
+    const changes = this.changes.filter((change) => Number.parseInt(change.cursor, 10) > minCursor);
+    return {
+      cursor: String(this.sequence),
+      changes: changes.filter((change) => changeBelongsTo(change, userId))
+    };
+  }
+
+  listHistory(userId: EntityId, noteId: EntityId): NoteHistoryEvent[] {
+    return this.history.filter((event) => event.userId === userId && event.noteId === noteId);
+  }
+
+  private requireNote(userId: EntityId, noteId: EntityId): Note {
+    const note = this.notes.get(noteId);
+    if (!note || note.userId !== userId || note.status === "deleted") {
+      throw new StoreError("not_found", "Note not found");
+    }
+    return note;
+  }
+
+  private assertFolder(userId: EntityId, folderId: EntityId | null): void {
+    if (!folderId) return;
+    const folder = this.folders.get(folderId);
+    if (!folder || folder.userId !== userId)
+      throw new StoreError("invalid_folder", "Folder not found");
+  }
+
+  private setNoteTags(userId: EntityId, noteId: EntityId, tagIds: EntityId[]): void {
+    for (const tagId of tagIds) {
+      const tag = this.tags.get(tagId);
+      if (!tag || tag.userId !== userId) throw new StoreError("invalid_tag", "Tag not found");
+    }
+    this.noteTagIds.set(noteId, new Set(tagIds));
+  }
+
+  private withTags(note: Note): Note {
+    const tagIds = this.noteTagIds.get(note.id) ?? new Set();
+    const tags = [...tagIds]
+      .map((tagId) => this.tags.get(tagId))
+      .filter((tag): tag is Tag => Boolean(tag));
+    return { ...note, tags: tags.sort(compareNames) };
+  }
+
+  private createConflict(
+    userId: EntityId,
+    serverNote: Note,
+    expectedVersion: number,
+    attemptedPatch: NotePatch,
+    now: string
+  ): NoteConflict {
+    const conflict: NoteConflict = {
+      id: this.nextId("conflict"),
+      userId,
+      noteId: serverNote.id,
+      expectedVersion,
+      actualVersion: serverNote.version,
+      attemptedPatch,
+      serverNote: this.withTags(serverNote),
+      status: "open",
+      version: 1,
+      createdAt: now,
+      resolvedAt: null,
+      resolution: null
+    };
+    this.conflicts.set(conflict.id, conflict);
+    this.recordHistory(userId, this.withTags(serverNote), "conflict_created", now);
+    this.recordChange({ type: "conflict", op: "upsert", conflict, cursor: "0" });
+    return conflict;
+  }
+
+  private recordHistory(
+    userId: EntityId,
+    note: Note,
+    action: NoteHistoryEvent["action"],
+    now: string
+  ): void {
+    this.history.push({
+      id: this.nextId("history"),
+      noteId: note.id,
+      userId,
+      action,
+      version: note.version,
+      snapshot: note,
+      createdAt: now
+    });
+  }
+
+  private recordChange(change: SyncChange): void {
+    this.sequence += 1;
+    this.changes.push({ ...change, cursor: String(this.sequence) } as SyncChange);
+  }
+
+  private nextOrder(userId: EntityId): number {
+    const userNotes = [...this.notes.values()].filter((note) => note.userId === userId);
+    return userNotes.length === 0
+      ? 1000
+      : Math.max(...userNotes.map((note) => note.globalOrder)) + 1000;
+  }
+
+  private nextId(prefix: string): EntityId {
+    this.sequence += 1;
+    return `${prefix}_${this.sequence.toString(36)}`;
+  }
+}
+
+export class StoreError extends Error {
+  constructor(
+    readonly code: string,
+    message: string
+  ) {
+    super(message);
+    this.name = "StoreError";
+  }
+}
+
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function publicUser(user: User & { password: PasswordRecord }): User {
+  return { id: user.id, email: user.email, createdAt: user.createdAt };
+}
+
+function compareNames(left: { name: string }, right: { name: string }): number {
+  return left.name.localeCompare(right.name);
+}
+
+function compareNotes(left: Note, right: Note): number {
+  if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+  return left.globalOrder - right.globalOrder || left.updatedAt.localeCompare(right.updatedAt);
+}
+
+function actionForPatch(patch: NotePatch): NoteHistoryEvent["action"] {
+  if (patch.status === "deleted") return "deleted";
+  if (patch.status === "done") return "done";
+  if (patch.status === "active") return "reopened";
+  if (patch.globalOrder !== undefined) return "reordered";
+  return "updated";
+}
+
+function changeBelongsTo(change: SyncChange, userId: EntityId): boolean {
+  if (change.type === "note" && change.op === "upsert") return change.note.userId === userId;
+  if (change.type === "note" && change.op === "delete") return change.userId === userId;
+  if (change.type === "folder") return change.folder.userId === userId;
+  if (change.type === "tag") return change.tag.userId === userId;
+  if (change.type === "conflict") return change.conflict.userId === userId;
+  return true;
+}

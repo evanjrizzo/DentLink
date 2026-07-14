@@ -5,21 +5,26 @@
   "type": "module",
   "packageManager": "pnpm@9.15.4",
   "scripts": {
-    "format": "prettier --write \"**/*.{json,yaml,yml,js,mjs,ts}\"",
-    "format:check": "prettier --check \"**/*.{json,yaml,yml,js,mjs,ts}\"",
+    "build": "turbo run build",
+    "format": "prettier --write \"**/*.{css,html,json,yaml,yml,js,mjs,ts,tsx}\"",
+    "format:check": "prettier --check \"**/*.{css,html,json,yaml,yml,js,mjs,ts,tsx}\"",
     "lint": "eslint .",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
-    "validate": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test"
+    "validate": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
   },
   "devDependencies": {
     "@eslint/js": "^9.18.0",
     "@types/node": "^22.10.7",
+    "@types/react": "^19.0.7",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
     "eslint": "^9.18.0",
     "prettier": "^3.4.2",
     "turbo": "^2.3.4",
     "typescript": "^5.7.3",
     "typescript-eslint": "^8.20.0",
+    "vite": "^5.4.11",
     "vitest": "^2.1.8"
   }
 }

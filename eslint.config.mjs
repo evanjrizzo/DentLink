@@ -3,12 +3,20 @@ import tseslint from "typescript-eslint";
 
 export default [
   {
-    ignores: ["node_modules/**", "dist/**", "coverage/**", ".turbo/**", "pnpm-lock.yaml"]
+    ignores: [
+      "node_modules/**",
+      "dist/**",
+      "**/dist/**",
+      "coverage/**",
+      ".turbo/**",
+      "**/.turbo/**",
+      "pnpm-lock.yaml"
+    ]
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ["**/*.ts"],
+    files: ["**/*.ts", "**/*.tsx"],
     languageOptions: {
       parserOptions: {
         projectService: false

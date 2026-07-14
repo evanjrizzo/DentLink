@@ -2,7 +2,6 @@
 
 Responsibility: typed client for DentLink's versioned HTTP API.
 
-This package will centralize request shapes, response parsing, retry-safe conventions, error shapes,
-and sync endpoint access for clients. It must not contain server authorization logic or secrets.
-
-Milestone 0B contains only the package boundary and tooling smoke test.
+This package centralizes Milestone 1 auth, Notes, folders, tags, sync, history, and conflict request
+helpers. It must not contain server authorization logic, password handling, token persistence, or
+secrets.

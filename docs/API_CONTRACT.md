@@ -21,7 +21,7 @@ Editable mutations include `expectedVersion`. Version mismatches return or creat
 
 ## Conceptual endpoint groups
 
-- `/v1/auth/*`: sign in, sign out, session refresh, password reset, email verification, and device/session revocation.
+- `/v1/auth/*`: registration, sign in, sign out, current session, later password reset, later email verification, and later device/session revocation.
 - `/v1/sync`: cursor-based incremental sync and mutation acknowledgement.
 - `/v1/notifications/*`: list, source inbox search, mark done, pin, reorder, and Ranking Mode dismiss.
 - `/v1/notes/*`: list, create, update, complete, pin, reorder, search, and conflict-aware edits.
@@ -62,3 +62,30 @@ Conflict responses must preserve both edits and expose stable resolution choices
 - keep theirs
 - merge
 - keep both
+
+## Milestone 1 endpoints
+
+Implemented in the Worker-style API handler:
+
+- `POST /v1/auth/register`: create a user with email/password and return a session.
+- `POST /v1/auth/login`: verify credentials and return a session.
+- `GET /v1/auth/session`: return the authenticated user/session from the bearer token without echoing the raw token.
+- `POST /v1/auth/logout`: revoke the current session token.
+- `GET /v1/notes`: list authenticated user's notes, folders, and tags. Supports `search`, `folderId`, and repeated `tagId` query parameters.
+- `POST /v1/notes`: create a task or reference note.
+- `PATCH /v1/notes/:id`: update a note with `expectedVersion` optimistic concurrency.
+- `DELETE /v1/notes/:id`: soft-delete a note with `expectedVersion`.
+- `GET /v1/notes/:id/history`: list authenticated user's history events for a note.
+- `POST /v1/notes/reorder`: update global ordering with per-note `expectedVersion`.
+- `POST /v1/folders`: create one user-scoped folder.
+- `POST /v1/tags`: create a user-scoped tag.
+- `GET /v1/sync`: return cursor-based changes for the authenticated user. Empty cursor means `0`; invalid cursor values return `invalid_cursor`.
+- `GET /v1/conflicts`: list open conflicts for the authenticated user.
+- `POST /v1/conflicts/:id/resolve`: mark a conflict resolved with `expectedVersion`.
+
+Milestone 1 clients authenticate with `Authorization: Bearer <session token>`. Server-side session
+resolution determines user identity.
+
+Delete operations are soft deletes in the notes table and emit sync tombstones. Conflict responses
+use HTTP `409`; typed clients surface these as explicit conflict errors rather than silently
+overwriting local state.

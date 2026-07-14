@@ -38,7 +38,22 @@ Exit criteria:
 
 ## Milestone 1: Authentication and Notes vertical slice
 
+Status: implemented.
+
 Implement email/password authentication, server-resolved identity, sessions, initial notes API, notes data model, conflict-aware note edits, and a minimal shared client path.
+
+Implemented scope:
+
+- Email/password registration and login.
+- Secure password hashing with Web Crypto PBKDF2.
+- Server-side session identity resolution.
+- User-isolated Notes, folders, tags, sync, and conflicts.
+- Task/reference notes with CRUD, one folder, multiple tags, pin, due date, priority, done, global ordering, history, search, versioned sync, optimistic concurrency, and conflict persistence.
+- Responsive Notes UI shell with auth, folder/tag/search controls, task checkbox, pin, editing, and reorder controls.
+- D1 migration for auth and manual Notes.
+- Shared types, typed API client, sync helper, API validation, tests, and documentation.
+
+Out of scope and still not implemented: email connectors, calendar providers, named webhooks, AI, Tauri, and Android.
 
 ## Milestone 2: Named webhooks and Notifications
 

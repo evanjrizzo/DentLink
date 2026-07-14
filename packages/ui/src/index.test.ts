@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { uiPackage } from "./index";
+import { NotesWorkspace } from "./index";
 
 describe("@dentlink/ui", () => {
-  it("declares the UI package boundary", () => {
-    expect(uiPackage.name).toBe("@dentlink/ui");
+  it("exports the notes workspace component", () => {
+    expect(NotesWorkspace).toBeTypeOf("function");
   });
 });

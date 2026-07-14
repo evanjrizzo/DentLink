@@ -9,6 +9,21 @@ Priorities: cross-user exposure, stolen credentials, session theft, webhook abus
 - Do not authorize based on client-supplied user IDs.
 - Use revocable sessions and device/session management.
 - Apply authorization checks before loading or mutating user-owned records.
+- Milestone 1 uses bearer session tokens resolved server-side before Notes, folder, tag, sync, or conflict access.
+- Raw session tokens are returned only at registration/login. Server storage keeps a SHA-256 token hash.
+
+## Passwords
+
+- Milestone 1 hashes passwords with Web Crypto PBKDF2-SHA-256, per-password random salt, and 210,000 iterations.
+- Password hashes, salts, and iteration counts are stored separately from user-facing session payloads.
+- Plaintext passwords are accepted only at registration/login request boundaries and are never returned.
+
+## Sessions
+
+- Session tokens are generated from 32 cryptographically random bytes.
+- Session tokens expire after 30 days in Milestone 1.
+- Logout removes the server-side session hash, so the prior bearer token cannot be reused.
+- `GET /v1/auth/session` confirms identity without echoing the raw bearer token.
 
 ## Credentials and secrets
 
