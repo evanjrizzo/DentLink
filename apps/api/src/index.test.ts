@@ -7,10 +7,10 @@ import { describe, expect, it } from "vitest";
 import { hashPassword, hashSessionToken } from "./auth";
 import { D1DentLinkStore } from "./d1-storage";
 import type { GoogleCalendarApiClient } from "./google-calendar";
-import type { GmailApiClient } from "./gmail";
+import { createGoogleGmailClient, type GmailApiClient } from "./gmail";
 import { handleApiRequest, type ApiEnv } from "./index";
 import { SqliteD1TestDatabase } from "./sqlite-d1-test";
-import { MemoryDentLinkStore, type DentLinkStore } from "./storage";
+import { MemoryDentLinkStore, StoreError, type DentLinkStore } from "./storage";
 
 import type {
   ApiErrorBody,
@@ -1123,6 +1123,151 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       owner.session.token
     );
     expect(afterDuplicate.notifications).toHaveLength(2);
+  });
+
+  it("preserves the last incremental Gmail summary when backfill list fails", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-backfill-failure@example.com");
+    const gmailClient = fakeGmailClientForBackfillListFailure();
+    const env = gmailTestEnv(gmailClient);
+    const start = await requestJson<{ authorizationUrl: string; expiresAt: string }>(
+      store,
+      "POST",
+      "/v1/connectors/gmail/start",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const authorizationUrl = new URL(start.authorizationUrl);
+    const callback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${authorizationUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    const linked = (await callback.json()) as { account: ConnectorAccount };
+
+    const sync = await requestJson<{ account: ConnectorAccount }>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(sync.account.settings.gmailLastIncrementalStatus).toBe("success");
+    expect(sync.account.settings.gmailLastIncrementalExamined).toBe(1);
+    expect(sync.account.settings.gmailLastIncrementalCreated).toBe(1);
+
+    const failedBackfill = await requestJson<ApiErrorBody>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/backfill`,
+      undefined,
+      owner.session.token,
+      502,
+      env
+    );
+    expect(failedBackfill.error.code).toBe("gmail_query_invalid");
+    expect(failedBackfill.error.message).toBe(
+      "Backfill failed because Gmail rejected the mailbox search query."
+    );
+
+    const accounts = await requestJson<{ accounts: ConnectorAccount[] }>(
+      store,
+      "GET",
+      "/v1/connectors/accounts",
+      undefined,
+      owner.session.token
+    );
+    const account = accounts.accounts.find((item) => item.id === linked.account.id);
+    expect(account).toBeDefined();
+    expect(account?.status).toBe("connected");
+    expect(account?.healthStatus).toBe("degraded");
+    expect(account?.settings.gmailLastIncrementalStatus).toBe("success");
+    expect(account?.settings.gmailLastIncrementalCreated).toBe(1);
+    expect(account?.settings.gmailLastBackfillStatus).toBe("failed");
+    expect(account?.settings.gmailLastBackfillErrorCode).toBe("gmail_query_invalid");
+    expect(account?.settings.gmailLastBackfillErrorMessage).toBe(
+      "Backfill failed because Gmail rejected the mailbox search query."
+    );
+  });
+
+  it("maps Gmail upstream failures to safe DentLink errors", async () => {
+    const cases: Array<{
+      status: number;
+      reason: string;
+      message: string;
+      expectedCode: string;
+      expectedMessage: string;
+    }> = [
+      {
+        status: 400,
+        reason: "invalidArgument",
+        message: "Invalid query: newer:1780000000",
+        expectedCode: "gmail_query_invalid",
+        expectedMessage: "Backfill failed because Gmail rejected the mailbox search query."
+      },
+      {
+        status: 401,
+        reason: "authError",
+        message: "Invalid Credentials",
+        expectedCode: "gmail_auth_failed",
+        expectedMessage: "Gmail authentication failed. Reconnect the account."
+      },
+      {
+        status: 403,
+        reason: "insufficientPermissions",
+        message: "Insufficient Permission",
+        expectedCode: "gmail_permission_denied",
+        expectedMessage:
+          "Backfill requires Gmail read permission. Reconnect the account to grant access."
+      },
+      {
+        status: 429,
+        reason: "rateLimitExceeded",
+        message: "Rate Limit Exceeded",
+        expectedCode: "gmail_rate_limited",
+        expectedMessage: "Gmail rate limited this request. Try again later."
+      },
+      {
+        status: 503,
+        reason: "backendError",
+        message: "Backend Error",
+        expectedCode: "gmail_upstream_failed",
+        expectedMessage: "Gmail is temporarily unavailable. Try again later."
+      }
+    ];
+
+    for (const item of cases) {
+      const fetchImpl = async (input: RequestInfo | URL): Promise<Response> => {
+        const url = new URL(input.toString());
+        expect(url.href).toContain("https://gmail.googleapis.com/gmail/v1/users/me/messages");
+        expect(url.searchParams.get("q")).toBe("after:1780000000");
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: item.status,
+              message: item.message,
+              errors: [{ reason: item.reason }]
+            }
+          }),
+          { status: item.status, headers: { "Content-Type": "application/json" } }
+        );
+      };
+      const client = createGoogleGmailClient("client-id", "client-secret", fetchImpl);
+      await expect(
+        client.listMessages("access-token-secret", { query: "after:1780000000" })
+      ).rejects.toMatchObject({
+        code: item.expectedCode,
+        message: item.expectedMessage
+      });
+    }
   });
 
   it("links Google Calendar, syncs agenda events, supports dismissal, and isolates users", async () => {
@@ -2276,7 +2421,7 @@ function fakeGmailClientForBackfill(): GmailApiClient {
     async listMessages(_accessToken, options) {
       expect(typeof options).toBe("object");
       const parsed = typeof options === "object" && options ? options : {};
-      expect(parsed.query).toMatch(/^newer:\d+$/);
+      expect(parsed.query).toMatch(/^after:\d+$/);
       if (!parsed.pageToken) {
         return {
           messages: [{ id: "gmail-backfill-1", threadId: "gmail-thread-backfill-1" }],
@@ -2305,6 +2450,58 @@ function fakeGmailClientForBackfill(): GmailApiClient {
             { name: "Subject", value: `Historical message ${sequence}` },
             { name: "Date", value: "Tue, 14 Jul 2026 10:00:00 -0400" },
             { name: "Message-ID", value: `<historical-${sequence}@example.test>` }
+          ]
+        }
+      };
+    }
+  };
+}
+
+function fakeGmailClientForBackfillListFailure(): GmailApiClient {
+  return {
+    async exchangeCode(code) {
+      expect(code).toBe("valid-code");
+      return { accessToken: "access-token", refreshToken: "refresh-token-secret" };
+    },
+    async refreshAccessToken(refreshToken) {
+      expect(refreshToken).toBe("refresh-token-secret");
+      return { accessToken: "access-token-refreshed" };
+    },
+    async getProfile() {
+      return { emailAddress: "owner.gmail@example.test", historyId: "history-checkpoint-700" };
+    },
+    async listMessages(_accessToken, options) {
+      expect(typeof options).toBe("object");
+      throw new StoreError(
+        "gmail_query_invalid",
+        "Backfill failed because Gmail rejected the mailbox search query."
+      );
+    },
+    async listHistory(_accessToken, startHistoryId) {
+      expect(startHistoryId).toBe("history-checkpoint-700");
+      return {
+        historyId: "history-checkpoint-701",
+        history: [
+          {
+            id: "history-checkpoint-701",
+            messagesAdded: [{ message: { id: "gmail-incremental-ok" } }]
+          }
+        ]
+      };
+    },
+    async getMessage() {
+      return {
+        id: "gmail-incremental-ok",
+        threadId: "gmail-thread-incremental-ok",
+        historyId: "history-checkpoint-701",
+        internalDate: "1783980000000",
+        labelIds: ["INBOX"],
+        payload: {
+          headers: [
+            { name: "From", value: "Front Desk <front@example.test>" },
+            { name: "Subject", value: "Incremental message" },
+            { name: "Date", value: "Tue, 14 Jul 2026 10:00:00 -0400" },
+            { name: "Message-ID", value: "<incremental@example.test>" }
           ]
         }
       };

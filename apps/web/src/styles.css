@@ -203,6 +203,11 @@ textarea {
   padding-top: 10px;
 }
 
+.gmail-operation {
+  display: grid;
+  gap: 6px;
+}
+
 .gmail-diagnostics-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));

@@ -2089,6 +2089,7 @@ function ConnectorsView(props: {
             <GmailDiagnosticsSummary
               diagnostics={props.gmailDiagnostics[account.id]}
               degraded={account.healthStatus === "degraded"}
+              settings={account.settings}
             />
             <div className="note-order">
               <button type="button" onClick={() => void props.onSyncGmail(account)}>
@@ -2138,23 +2139,23 @@ function ConnectorsView(props: {
 function GmailDiagnosticsSummary(props: {
   diagnostics: GmailDiagnostics | undefined;
   degraded: boolean;
+  settings: ConnectorAccount["settings"];
 }): ReactElement | null {
-  if (!props.diagnostics) return null;
-  const summary = props.diagnostics.summary;
-  const recentMessages = props.diagnostics.messages.slice(0, 8);
+  const incremental = gmailOperationSummary(props.settings, "Incremental");
+  const backfill = gmailOperationSummary(props.settings, "Backfill");
+  if (!props.diagnostics && !incremental && !backfill) return null;
+  const summary = props.diagnostics?.summary;
+  const recentMessages = props.diagnostics?.messages.slice(0, 8) ?? [];
   return (
     <section className="gmail-diagnostics" aria-label="Gmail sync diagnostics">
-      <strong>Last Sync</strong>
-      <div className="gmail-diagnostics-grid">
-        <span>{summary.examined} messages examined</span>
-        <span>{summary.created} notifications created</span>
-        <span>{summary.updated} updated</span>
-        <span>{summary.duplicate} duplicates</span>
-        <span>{summary.skipped} skipped</span>
-        <span>{summary.filtered} filtered</span>
-        <span>{summary.failed} failed</span>
-      </div>
-      {props.degraded && summary.failed > 0 ? (
+      {incremental ? (
+        <GmailOperationPanel title="Last Incremental Sync" item={incremental} />
+      ) : null}
+      {backfill ? <GmailOperationPanel title="Last Backfill" item={backfill} /> : null}
+      {!incremental && !backfill && summary ? (
+        <GmailSummaryGrid title="Last Sync" summary={summary} />
+      ) : null}
+      {props.degraded && summary && summary.failed > 0 ? (
         <p className="connector-warning">
           {summary.failed} Gmail message{summary.failed === 1 ? "" : "s"} could not be processed.
           Successfully processed messages were still imported.
@@ -2195,6 +2196,89 @@ function GmailDiagnosticsSummary(props: {
       ) : null}
     </section>
   );
+}
+
+function GmailOperationPanel(props: {
+  title: string;
+  item: {
+    status: string;
+    at: string | null;
+    errorMessage: string | null;
+    summary: GmailDiagnostics["summary"] | null;
+  };
+}): ReactElement {
+  return (
+    <div className="gmail-operation">
+      <strong>{props.title}</strong>
+      <span>
+        {props.item.at ? new Date(props.item.at).toLocaleString() : "Not run"} · {props.item.status}
+      </span>
+      {props.item.summary ? <GmailSummaryGrid summary={props.item.summary} /> : null}
+      {props.item.errorMessage ? (
+        <p className="connector-warning">{props.item.errorMessage}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function GmailSummaryGrid(props: {
+  title?: string;
+  summary: GmailDiagnostics["summary"];
+}): ReactElement {
+  return (
+    <>
+      {props.title ? <strong>{props.title}</strong> : null}
+      <div className="gmail-diagnostics-grid">
+        <span>{props.summary.examined} messages examined</span>
+        <span>{props.summary.created} notifications created</span>
+        <span>{props.summary.updated} updated</span>
+        <span>{props.summary.duplicate} duplicates</span>
+        <span>{props.summary.skipped} skipped</span>
+        <span>{props.summary.filtered} filtered</span>
+        <span>{props.summary.failed} failed</span>
+      </div>
+    </>
+  );
+}
+
+function gmailOperationSummary(
+  settings: ConnectorAccount["settings"],
+  operation: "Incremental" | "Backfill"
+): {
+  status: string;
+  at: string | null;
+  errorMessage: string | null;
+  summary: GmailDiagnostics["summary"] | null;
+} | null {
+  const prefix = `gmailLast${operation}`;
+  const status = stringSetting(settings[`${prefix}Status`]);
+  const at = stringSetting(settings[`${prefix}At`]);
+  if (!status && !at) return null;
+  const summary = {
+    discovered: numberSetting(settings[`${prefix}Discovered`]),
+    examined: numberSetting(settings[`${prefix}Examined`]),
+    created: numberSetting(settings[`${prefix}Created`]),
+    updated: numberSetting(settings[`${prefix}Updated`]),
+    duplicate: numberSetting(settings[`${prefix}Duplicate`]),
+    skipped: numberSetting(settings[`${prefix}Skipped`]),
+    filtered: numberSetting(settings[`${prefix}Filtered`]),
+    failed: numberSetting(settings[`${prefix}Failed`])
+  };
+  const hasSummary = Object.values(summary).some((value) => value > 0);
+  return {
+    status: status ?? "unknown",
+    at,
+    errorMessage: stringSetting(settings[`${prefix}ErrorMessage`]),
+    summary: hasSummary ? summary : null
+  };
+}
+
+function stringSetting(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function numberSetting(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function formatOutcome(outcome: string): string {

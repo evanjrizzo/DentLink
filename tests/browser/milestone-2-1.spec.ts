@@ -239,6 +239,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       version: 1
     };
     let notifications: unknown[] = [];
+    let failNextBackfill = true;
     let gmailDiagnostics = {
       account: gmailAccount,
       summary: {
@@ -296,6 +297,18 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         gmailAccount.lastSyncAt = syncedAt;
         gmailAccount.lastHealthAt = syncedAt;
         gmailAccount.syncCursor = "history_101";
+        gmailAccount.settings = {
+          ...gmailAccount.settings,
+          gmailLastIncrementalAt: syncedAt,
+          gmailLastIncrementalStatus: "partial",
+          gmailLastIncrementalExamined: 142,
+          gmailLastIncrementalCreated: 118,
+          gmailLastIncrementalUpdated: 7,
+          gmailLastIncrementalDuplicate: 12,
+          gmailLastIncrementalSkipped: 3,
+          gmailLastIncrementalFiltered: 0,
+          gmailLastIncrementalFailed: 2
+        };
         gmailAccount.updatedAt = syncedAt;
         gmailAccount.version += 1;
         notifications = [
@@ -365,8 +378,41 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       }
       if (method === "POST" && path === `/v1/connectors/gmail/${gmailAccount.id}/backfill`) {
         const syncedAt = new Date().toISOString();
+        if (failNextBackfill) {
+          failNextBackfill = false;
+          gmailAccount.status = "connected";
+          gmailAccount.healthStatus = "degraded";
+          gmailAccount.syncStatus = "error";
+          gmailAccount.errorCode = "gmail_query_invalid";
+          gmailAccount.errorMessage =
+            "Backfill failed because Gmail rejected the mailbox search query.";
+          gmailAccount.settings = {
+            ...gmailAccount.settings,
+            gmailLastBackfillAt: syncedAt,
+            gmailLastBackfillStatus: "failed",
+            gmailLastBackfillErrorCode: "gmail_query_invalid",
+            gmailLastBackfillErrorMessage:
+              "Backfill failed because Gmail rejected the mailbox search query."
+          };
+          gmailAccount.updatedAt = syncedAt;
+          gmailAccount.version += 1;
+          await route.fulfill({
+            status: 502,
+            headers: corsHeaders(),
+            contentType: "application/json",
+            body: JSON.stringify({
+              error: {
+                code: "gmail_query_invalid",
+                message: "Backfill failed because Gmail rejected the mailbox search query.",
+                requestId: "request_backfill_failure"
+              }
+            })
+          });
+          return;
+        }
         gmailAccount.lastSyncAt = syncedAt;
         gmailAccount.lastHealthAt = syncedAt;
+        gmailAccount.syncStatus = "idle";
         gmailAccount.updatedAt = syncedAt;
         gmailAccount.version += 1;
         notifications = [
@@ -420,6 +466,20 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         gmailAccount.healthStatus = "healthy";
         gmailAccount.errorCode = null;
         gmailAccount.errorMessage = null;
+        gmailAccount.settings = {
+          ...gmailAccount.settings,
+          gmailLastBackfillAt: syncedAt,
+          gmailLastBackfillStatus: "success",
+          gmailLastBackfillExamined: 2,
+          gmailLastBackfillCreated: 2,
+          gmailLastBackfillUpdated: 0,
+          gmailLastBackfillDuplicate: 0,
+          gmailLastBackfillSkipped: 0,
+          gmailLastBackfillFiltered: 0,
+          gmailLastBackfillFailed: 0,
+          gmailLastBackfillErrorCode: null,
+          gmailLastBackfillErrorMessage: null
+        };
         await fulfillJson(route, {
           account: gmailAccount,
           processed: 2,
@@ -483,11 +543,21 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     ).toBeVisible();
 
     await page.getByRole("button", { name: "Backfill 30 Days" }).click();
+    await expect(
+      page.getByText("Backfill failed because Gmail rejected the mailbox search query.").first()
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Connectors" }).click();
+    await expect(page.getByText("Last Incremental Sync")).toBeVisible();
+    await expect(page.getByText("Last Backfill")).toBeVisible();
+    await expect(page.getByText("118 notifications created")).toBeVisible();
+    await expect(page.getByText("failed").first()).toBeVisible();
+
+    await page.getByRole("button", { name: "Backfill 30 Days" }).click();
     await expect(notificationCard(page, "Historical Gmail one")).toBeVisible();
     await expect(notificationCard(page, "Historical Gmail two")).toBeVisible();
     await page.getByRole("button", { name: "Connectors" }).click();
-    await expect(page.getByText("2 messages examined")).toBeVisible();
-    await expect(page.getByText("2 notifications created")).toBeVisible();
+    await expect(page.getByText("2 messages examined", { exact: true })).toBeVisible();
+    await expect(page.getByText("2 notifications created", { exact: true })).toBeVisible();
 
     notifications = [
       ...notifications,

@@ -28,6 +28,13 @@ const GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1";
 const INITIAL_SYNC_PAGE_SIZE = 25;
 const HISTORY_PAGE_SIZE = 100;
 
+type GmailOperation =
+  | "gmail_token_refresh"
+  | "gmail_messages_list"
+  | "gmail_message_get"
+  | "gmail_history_list"
+  | "gmail_profile_get";
+
 export type GmailRuntimeEnv = GoogleRuntimeEnv & {
   gmailClient?: GmailApiClient;
 };
@@ -85,6 +92,18 @@ export type GmailMessage = {
     headers?: Array<{ name: string; value: string }>;
   };
 };
+
+export class GmailUpstreamError extends StoreError {
+  constructor(
+    readonly operation: GmailOperation,
+    readonly upstreamStatus: number,
+    readonly upstreamReason: string | null,
+    message: string
+  ) {
+    super(gmailDentLinkErrorCode(upstreamStatus, upstreamReason), message);
+    this.name = "GmailUpstreamError";
+  }
+}
 
 export function gmailConnectorDefinition(): ConnectorDefinition {
   return {
@@ -246,7 +265,7 @@ export async function syncGmailAccount(
     if (!credential) throw new StoreError("missing_credentials", "Gmail must be reconnected");
     const refreshToken = await decryptSecret(credential.encryptedValue, env);
     const gmail = gmailClient(env);
-    const token = await gmail.refreshAccessToken(refreshToken);
+    const token = await refreshGmailAccessToken(gmail, refreshToken);
     const messages = await messagesForSync(gmail, token.accessToken, syncing.syncCursor);
     const result = await processGmailMessageIds(
       store,
@@ -276,6 +295,13 @@ export async function syncGmailAccount(
         syncCursor: nextCursor,
         lastSyncAt: now,
         lastHealthAt: now,
+        settings: withGmailOperationSummary(
+          latest.settings,
+          "incremental",
+          now,
+          failed.length > 0 ? "partial" : "success",
+          summary
+        ),
         errorCode: failed.length > 0 ? "gmail_partial_sync_failed" : null,
         errorMessage:
           failed.length > 0
@@ -300,10 +326,11 @@ export async function syncGmailAccount(
         latest.id,
         latest.version,
         {
-          status: "error",
-          healthStatus: "error",
+          status: isGmailAuthError(error) ? "error" : "connected",
+          healthStatus: isGmailAuthError(error) ? "error" : "degraded",
           syncStatus: "error",
           lastHealthAt: now,
+          settings: withGmailOperationFailure(latest.settings, "incremental", now, error),
           errorCode: gmailErrorCode(error),
           errorMessage: safeErrorMessage(error)
         },
@@ -342,7 +369,7 @@ export async function backfillGmailAccount(
     if (!credential) throw new StoreError("missing_credentials", "Gmail must be reconnected");
     const refreshToken = await decryptSecret(credential.encryptedValue, env);
     const gmail = gmailClient(env);
-    const token = await gmail.refreshAccessToken(refreshToken);
+    const token = await refreshGmailAccessToken(gmail, refreshToken);
     const messages = await messagesForBackfill(gmail, token.accessToken, now, boundedDays);
     const result = await processGmailMessageIds(
       store,
@@ -367,6 +394,13 @@ export async function backfillGmailAccount(
         syncStatus: "idle",
         lastSyncAt: now,
         lastHealthAt: now,
+        settings: withGmailOperationSummary(
+          latest.settings,
+          "backfill",
+          now,
+          failed.length > 0 ? "partial" : "success",
+          summary
+        ),
         errorCode: failed.length > 0 ? "gmail_partial_sync_failed" : null,
         errorMessage:
           failed.length > 0
@@ -391,10 +425,11 @@ export async function backfillGmailAccount(
         latest.id,
         latest.version,
         {
-          status: "error",
-          healthStatus: "error",
+          status: isGmailAuthError(error) ? "error" : "connected",
+          healthStatus: isGmailAuthError(error) ? "error" : "degraded",
           syncStatus: "error",
           lastHealthAt: now,
+          settings: withGmailOperationFailure(latest.settings, "backfill", now, error),
           errorCode: gmailErrorCode(error),
           errorMessage: safeErrorMessage(error)
         },
@@ -453,7 +488,12 @@ export function createGoogleGmailClient(
       });
     },
     async getProfile(accessToken) {
-      const response = await gmailRequest(fetchImpl, accessToken, "/users/me/profile");
+      const response = await gmailRequest(
+        fetchImpl,
+        accessToken,
+        "gmail_profile_get",
+        "/users/me/profile"
+      );
       return response as GmailProfile;
     },
     async listMessages(accessToken, options) {
@@ -463,7 +503,12 @@ export function createGoogleGmailClient(
       url.searchParams.append("labelIds", "INBOX");
       if (parsedOptions.pageToken) url.searchParams.set("pageToken", parsedOptions.pageToken);
       if (parsedOptions.query) url.searchParams.set("q", parsedOptions.query);
-      return (await gmailRequest(fetchImpl, accessToken, url)) as GmailMessageList;
+      return (await gmailRequest(
+        fetchImpl,
+        accessToken,
+        "gmail_messages_list",
+        url
+      )) as GmailMessageList;
     },
     async listHistory(accessToken, startHistoryId, pageToken) {
       const url = new URL(`${GMAIL_API_BASE_URL}/users/me/history`);
@@ -471,7 +516,12 @@ export function createGoogleGmailClient(
       url.searchParams.set("maxResults", String(HISTORY_PAGE_SIZE));
       url.searchParams.append("historyTypes", "messageAdded");
       if (pageToken) url.searchParams.set("pageToken", pageToken);
-      return (await gmailRequest(fetchImpl, accessToken, url)) as GmailHistoryList;
+      return (await gmailRequest(
+        fetchImpl,
+        accessToken,
+        "gmail_history_list",
+        url
+      )) as GmailHistoryList;
     },
     async getMessage(accessToken, messageId) {
       const url = new URL(
@@ -481,7 +531,7 @@ export function createGoogleGmailClient(
       for (const header of ["From", "Subject", "Date", "Message-ID"]) {
         url.searchParams.append("metadataHeaders", header);
       }
-      return (await gmailRequest(fetchImpl, accessToken, url)) as GmailMessage;
+      return (await gmailRequest(fetchImpl, accessToken, "gmail_message_get", url)) as GmailMessage;
     }
   };
 }
@@ -567,7 +617,7 @@ async function messagesForBackfill(
   const ids = new Set<string>();
   let pageToken: string | undefined;
   const afterSeconds = Math.floor((Date.parse(now) - days * 24 * 60 * 60 * 1000) / 1000);
-  const query = `newer:${afterSeconds}`;
+  const query = `after:${afterSeconds}`;
   do {
     const page = await gmail.listMessages(accessToken, { pageToken, query });
     for (const message of page.messages ?? []) ids.add(message.id);
@@ -861,6 +911,7 @@ function isDiagnosticOutcome(
 async function gmailRequest(
   fetchImpl: typeof fetch,
   accessToken: string,
+  operation: GmailOperation,
   pathOrUrl: string | URL
 ): Promise<unknown> {
   const url = typeof pathOrUrl === "string" ? `${GMAIL_API_BASE_URL}${pathOrUrl}` : pathOrUrl;
@@ -868,8 +919,50 @@ async function gmailRequest(
     headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" }
   });
   const json = await response.json().catch(() => null);
-  if (!response.ok) throw new StoreError("gmail_api_error", "Gmail API request failed");
+  if (!response.ok) {
+    const reason = gmailErrorReason(json);
+    const message = gmailSafeUpstreamMessage(operation, response.status, reason, json);
+    logGmailUpstreamFailure(operation, response.status, reason, message, url);
+    throw new GmailUpstreamError(operation, response.status, reason, message);
+  }
+  if (!json) throw new StoreError("gmail_response_invalid", "Gmail response was invalid");
   return json;
+}
+
+async function refreshGmailAccessToken(
+  gmail: GmailApiClient,
+  refreshToken: string
+): Promise<GmailTokenResponse> {
+  try {
+    const token = await gmail.refreshAccessToken(refreshToken);
+    console.log(
+      JSON.stringify({
+        level: "info",
+        event: "gmail_token_refresh",
+        operation: "gmail_token_refresh",
+        succeeded: true
+      })
+    );
+    return token;
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        level: "error",
+        event: "gmail_token_refresh",
+        operation: "gmail_token_refresh",
+        succeeded: false,
+        errorCode: gmailErrorCode(error),
+        message: safeErrorMessage(error)
+      })
+    );
+    if (error instanceof StoreError) {
+      throw new StoreError(
+        "gmail_auth_failed",
+        "Gmail authentication failed. Reconnect the account."
+      );
+    }
+    throw error;
+  }
 }
 
 function gmailOAuthConfig(
@@ -920,4 +1013,155 @@ function safeErrorMessage(error: unknown): string {
   if (error instanceof StoreError) return error.message;
   if (error instanceof Error) return error.message;
   return "Gmail sync failed";
+}
+
+function isGmailAuthError(error: unknown): boolean {
+  return (
+    error instanceof StoreError &&
+    (error.code === "gmail_auth_failed" || error.code === "gmail_permission_denied")
+  );
+}
+
+function gmailDentLinkErrorCode(status: number, reason: string | null): string {
+  const normalized = reason?.toLowerCase() ?? "";
+  if (status === 401 || normalized.includes("auth") || normalized.includes("invalidcredentials")) {
+    return "gmail_auth_failed";
+  }
+  if (
+    status === 403 &&
+    (normalized.includes("insufficient") ||
+      normalized.includes("forbidden") ||
+      normalized.includes("permission"))
+  ) {
+    return "gmail_permission_denied";
+  }
+  if (status === 400) return "gmail_query_invalid";
+  if (status === 429 || normalized.includes("ratelimit")) return "gmail_rate_limited";
+  return "gmail_upstream_failed";
+}
+
+function gmailSafeUpstreamMessage(
+  operation: GmailOperation,
+  status: number,
+  reason: string | null,
+  json: unknown
+): string {
+  const upstreamMessage = sanitizeGmailMessage(gmailErrorMessage(json));
+  if (operation === "gmail_messages_list" && status === 400) {
+    return "Backfill failed because Gmail rejected the mailbox search query.";
+  }
+  if (status === 401) return "Gmail authentication failed. Reconnect the account.";
+  if (status === 403) {
+    return reason?.toLowerCase().includes("insufficient")
+      ? "Backfill requires Gmail read permission. Reconnect the account to grant access."
+      : "Gmail denied access to this mailbox operation.";
+  }
+  if (status === 429) return "Gmail rate limited this request. Try again later.";
+  if (status >= 500) return "Gmail is temporarily unavailable. Try again later.";
+  return upstreamMessage || "Gmail API request failed.";
+}
+
+function gmailErrorReason(json: unknown): string | null {
+  if (!isRecord(json)) return null;
+  const error = json.error;
+  if (!isRecord(error)) return null;
+  const errors = error.errors;
+  if (Array.isArray(errors)) {
+    const first = errors.find(isRecord);
+    if (first && typeof first.reason === "string") return first.reason;
+  }
+  if (typeof error.status === "string") return error.status;
+  return null;
+}
+
+function gmailErrorMessage(json: unknown): string | null {
+  if (!isRecord(json)) return null;
+  const error = json.error;
+  if (!isRecord(error)) return null;
+  return typeof error.message === "string" ? error.message : null;
+}
+
+function sanitizeGmailMessage(message: string | null): string | null {
+  if (!message) return null;
+  return message
+    .replaceAll(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer [redacted]")
+    .replaceAll(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]")
+    .slice(0, 240);
+}
+
+function logGmailUpstreamFailure(
+  operation: GmailOperation,
+  status: number,
+  reason: string | null,
+  message: string,
+  url: string | URL
+): void {
+  const parsed = new URL(url.toString());
+  console.error(
+    JSON.stringify({
+      level: "error",
+      event: "gmail_upstream_failure",
+      operation,
+      upstreamStatus: status,
+      upstreamReason: reason,
+      message,
+      endpoint: `${parsed.origin}${parsed.pathname}`,
+      query: sanitizedGmailQuery(parsed)
+    })
+  );
+}
+
+function sanitizedGmailQuery(url: URL): Record<string, string | string[]> {
+  const query: Record<string, string | string[]> = {};
+  for (const [key, value] of url.searchParams) {
+    const existing = query[key];
+    if (existing) query[key] = Array.isArray(existing) ? [...existing, value] : [existing, value];
+    else query[key] = value;
+  }
+  return query;
+}
+
+function withGmailOperationSummary(
+  settings: ConnectorAccount["settings"],
+  operation: "incremental" | "backfill",
+  now: string,
+  status: "success" | "partial",
+  summary: GmailSyncResult["summary"]
+): ConnectorAccount["settings"] {
+  const prefix = operation === "incremental" ? "gmailLastIncremental" : "gmailLastBackfill";
+  return {
+    ...settings,
+    [`${prefix}At`]: now,
+    [`${prefix}Status`]: status,
+    [`${prefix}ErrorCode`]: null,
+    [`${prefix}ErrorMessage`]: null,
+    [`${prefix}Discovered`]: summary.discovered,
+    [`${prefix}Examined`]: summary.examined,
+    [`${prefix}Created`]: summary.created,
+    [`${prefix}Updated`]: summary.updated,
+    [`${prefix}Duplicate`]: summary.duplicate,
+    [`${prefix}Skipped`]: summary.skipped,
+    [`${prefix}Filtered`]: summary.filtered,
+    [`${prefix}Failed`]: summary.failed
+  };
+}
+
+function withGmailOperationFailure(
+  settings: ConnectorAccount["settings"],
+  operation: "incremental" | "backfill",
+  now: string,
+  error: unknown
+): ConnectorAccount["settings"] {
+  const prefix = operation === "incremental" ? "gmailLastIncremental" : "gmailLastBackfill";
+  return {
+    ...settings,
+    [`${prefix}At`]: now,
+    [`${prefix}Status`]: "failed",
+    [`${prefix}ErrorCode`]: gmailErrorCode(error),
+    [`${prefix}ErrorMessage`]: safeErrorMessage(error)
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

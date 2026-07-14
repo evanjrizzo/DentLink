@@ -646,11 +646,22 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
             ? 400
             : caught.code === "rate_limited"
               ? 429
-              : caught.code === "invalid_oauth_state" ||
-                  caught.code === "invalid_oauth_callback" ||
-                  caught.code === "oauth_denied"
-                ? 400
-                : 409;
+              : caught.code === "gmail_auth_failed"
+                ? 401
+                : caught.code === "gmail_permission_denied"
+                  ? 403
+                  : caught.code === "gmail_rate_limited"
+                    ? 429
+                    : caught.code === "gmail_query_invalid" ||
+                        caught.code === "gmail_response_invalid"
+                      ? 502
+                      : caught.code === "gmail_upstream_failed"
+                        ? 502
+                        : caught.code === "invalid_oauth_state" ||
+                            caught.code === "invalid_oauth_callback" ||
+                            caught.code === "oauth_denied"
+                          ? 400
+                          : 409;
       return error(caught.code, caught.message, status);
     }
     const requestId = crypto.randomUUID();
