@@ -36,7 +36,8 @@ type SyncPayload =
   | Omit<Extract<SyncChange, { type: "tag" }>, "cursor">
   | Omit<Extract<SyncChange, { type: "notification"; op: "upsert" }>, "cursor">
   | Omit<Extract<SyncChange, { type: "notification"; op: "delete" }>, "cursor">
-  | Omit<Extract<SyncChange, { type: "webhook" }>, "cursor">
+  | Omit<Extract<SyncChange, { type: "webhook"; op: "upsert" }>, "cursor">
+  | Omit<Extract<SyncChange, { type: "webhook"; op: "delete" }>, "cursor">
   | Omit<Extract<SyncChange, { type: "conflict" }>, "cursor">;
 
 export type D1Result<T = unknown> = {
@@ -864,6 +865,34 @@ export class D1DentLinkStore implements DentLinkStore {
       })
     ]);
     return next;
+  }
+
+  async deleteWebhookEndpoint(
+    userId: EntityId,
+    endpointId: EntityId,
+    expectedVersion: number,
+    now: string
+  ): Promise<WebhookEndpoint | null> {
+    const existing = await this.getWebhook(userId, endpointId);
+    if (!existing) return null;
+    const result = await this.db
+      .prepare(`DELETE FROM webhook_endpoints WHERE id = ? AND user_id = ? AND version = ?`)
+      .bind(endpointId, userId, expectedVersion)
+      .run();
+    if ((result.meta?.changes ?? 0) !== 1) {
+      const stillExists = await this.getWebhook(userId, endpointId);
+      if (stillExists) throw new StoreError("version_mismatch", "Webhook changed on the server");
+    }
+    const deleted = { ...existing, enabled: false, version: existing.version + 1, updatedAt: now };
+    await this.batch([
+      this.changeStatement(userId, "webhook", endpointId, "delete", {
+        type: "webhook",
+        op: "delete",
+        id: endpointId,
+        userId
+      })
+    ]);
+    return deleted;
   }
 
   async deliverWebhook(

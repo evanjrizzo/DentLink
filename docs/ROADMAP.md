@@ -116,6 +116,25 @@ Implemented scope:
 Out of scope and still not implemented: email connectors, calendar providers, provider OAuth,
 AI calls, Tauri, Android, widgets, and richer ranking models.
 
+## Milestone 2.1: Browser verification and webhook hardening
+
+Status: implemented after Milestone 2.
+
+Implemented scope:
+
+- Repeatable Playwright browser verification against the deployed preview web and API environments.
+- Browser coverage for authentication, session restore, Notes, Notifications, Ranking Mode dismiss
+  gating, webhook creation, one-time secret display, copy feedback, endpoint disable/enable,
+  endpoint deletion, invalid/missing secrets, notification and note webhook destinations, and
+  logout/invalid-token behavior.
+- Web UI hardening for request ordering, in-flight note mutation controls, notification
+  create/delete/refresh, webhook copy/enable/delete/refresh controls, and stale webhook version
+  retry.
+- D1 webhook delete hardening for remote D1 responses that omit affected-row metadata.
+
+Out of scope and still not implemented: Gmail, Google Calendar, Microsoft 365, IMAP, AI, Tauri,
+Android, widgets, push notifications, provider connectors, and webhook provider templates.
+
 ## Milestone 3: Calendar foundation and ICS
 
 Implement calendar data model, DentLink-local events, ICS import/export, agenda/grid views,

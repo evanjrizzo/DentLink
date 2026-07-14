@@ -5,6 +5,8 @@ node_modules/
 dist/
 **/dist/
 coverage/
+playwright-report/
+test-results/
 .turbo/
 **/.turbo/
 .wrangler/

@@ -121,3 +121,10 @@ sqlite3 /tmp/dentlink_m2_migration_check.db "PRAGMA integrity_check;"
 ```
 
 Deployment, preview, production, smoke-test, and rollback instructions live in `docs/DEPLOYMENT.md`.
+Repeatable preview browser verification is available with:
+
+```bash
+DENTLINK_PREVIEW_WEB_URL=https://dentlink-web-preview.pages.dev \
+DENTLINK_PREVIEW_API_URL=https://dentlink-api-preview.evanjrizzo.workers.dev \
+pnpm test:browser
+```

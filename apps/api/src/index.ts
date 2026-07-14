@@ -271,6 +271,16 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
       if (!webhook) return error("not_found", "Webhook not found", 404);
       return json({ ...webhook, ingestUrl: webhookIngestUrl(url, webhook.slug) });
     }
+    if (webhookMatch && method === "DELETE") {
+      const webhook = await store.deleteWebhookEndpoint(
+        auth.user.id,
+        webhookMatch[1] ?? "",
+        parseExpectedVersion(await readJson(request)),
+        now
+      );
+      if (!webhook) return error("not_found", "Webhook not found", 404);
+      return json({ ...webhook, ingestUrl: webhookIngestUrl(url, webhook.slug) });
+    }
     if (method === "GET" && path === "/v1/sync") {
       return json(await store.sync(auth.user.id, parseCursor(url.searchParams.get("cursor"))));
     }

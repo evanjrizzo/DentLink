@@ -706,6 +706,16 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       404
     );
 
+    const missingSecret = await handleApiRequest(
+      new Request("https://api.dentlink.test/v1/ingest/webhooks/front-desk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "No secret" })
+      }),
+      { store }
+    );
+    expect(missingSecret.status).toBe(401);
+
     const denied = await deliverWebhook(
       store,
       "front-desk",
@@ -737,6 +747,34 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       "New patient callback"
     );
 
+    const disabled = await requestJson<WebhookEndpoint & { ingestUrl: string }>(
+      store,
+      "PATCH",
+      `/v1/webhooks/${created.webhook.id}`,
+      { expectedVersion: created.webhook.version, patch: { enabled: false } },
+      owner.session.token
+    );
+    expect(disabled.enabled).toBe(false);
+    await deliverWebhook(store, "front-desk", created.secret, { title: "Disabled endpoint" }, 404);
+    const reenabled = await requestJson<WebhookEndpoint & { ingestUrl: string }>(
+      store,
+      "PATCH",
+      `/v1/webhooks/${created.webhook.id}`,
+      { expectedVersion: disabled.version, patch: { enabled: true } },
+      owner.session.token
+    );
+    expect(reenabled.enabled).toBe(true);
+
+    const deleted = await requestJson<WebhookEndpoint & { ingestUrl: string }>(
+      store,
+      "DELETE",
+      `/v1/webhooks/${created.webhook.id}`,
+      { expectedVersion: reenabled.version },
+      owner.session.token
+    );
+    expect(deleted.enabled).toBe(false);
+    await deliverWebhook(store, "front-desk", created.secret, { title: "Deleted endpoint" }, 404);
+
     const noteWebhook = await requestJson<{
       webhook: WebhookEndpoint & { ingestUrl: string };
       secret: string;
@@ -762,6 +800,24 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     );
     expect(deliveredNote.note?.title).toBe("Prepare estimate");
     expect(deliveredNote.note?.priority).toBe("high");
+
+    for (let index = 0; index < 59; index += 1) {
+      await deliverWebhook(
+        store,
+        "tasks",
+        noteWebhook.secret,
+        { title: `Rate ${index}`, kind: "task" },
+        202
+      );
+    }
+    const rateLimited = await deliverWebhook<ApiErrorBody>(
+      store,
+      "tasks",
+      noteWebhook.secret,
+      { title: "Too many", kind: "task" },
+      429
+    );
+    expect(rateLimited.error.code).toBe("rate_limited");
   });
 });
 

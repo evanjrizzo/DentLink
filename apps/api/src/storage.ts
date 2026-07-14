@@ -104,6 +104,12 @@ export interface DentLinkStore {
     patch: WebhookEndpointPatch,
     now: string
   ): Promise<WebhookEndpoint | null>;
+  deleteWebhookEndpoint(
+    userId: EntityId,
+    endpointId: EntityId,
+    expectedVersion: number,
+    now: string
+  ): Promise<WebhookEndpoint | null>;
   deliverWebhook(
     slug: string,
     secretHash: string,
@@ -545,6 +551,23 @@ export class MemoryDentLinkStore implements DentLinkStore {
     return publicWebhook(next);
   }
 
+  async deleteWebhookEndpoint(
+    userId: EntityId,
+    endpointId: EntityId,
+    expectedVersion: number,
+    now: string
+  ): Promise<WebhookEndpoint | null> {
+    const existing = this.webhooks.get(endpointId);
+    if (!existing || existing.userId !== userId) return null;
+    if (existing.version !== expectedVersion) {
+      throw new StoreError("version_mismatch", "Webhook changed on the server");
+    }
+    const deleted = { ...existing, enabled: false, version: existing.version + 1, updatedAt: now };
+    this.webhooks.delete(endpointId);
+    this.recordChange({ type: "webhook", op: "delete", id: endpointId, userId, cursor: "0" });
+    return publicWebhook(deleted);
+  }
+
   async deliverWebhook(
     slug: string,
     secretHash: string,
@@ -837,7 +860,8 @@ function changeBelongsTo(change: SyncChange, userId: EntityId): boolean {
   if (change.type === "notification" && change.op === "upsert")
     return change.notification.userId === userId;
   if (change.type === "notification" && change.op === "delete") return change.userId === userId;
-  if (change.type === "webhook") return change.webhook.userId === userId;
+  if (change.type === "webhook" && change.op === "upsert") return change.webhook.userId === userId;
+  if (change.type === "webhook" && change.op === "delete") return change.userId === userId;
   if (change.type === "conflict") return change.conflict.userId === userId;
   return true;
 }

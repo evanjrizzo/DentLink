@@ -18,6 +18,7 @@ export type NotesWorkspaceProps = {
   onUpdateNote: (note: Note, patch: NotePatch) => Promise<void> | void;
   onDeleteNote: (note: Note) => Promise<void> | void;
   onReorderNotes: (orderedNotes: Note[]) => Promise<void> | void;
+  updatingNoteIds?: EntityId[];
 };
 
 export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
@@ -151,139 +152,160 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
 
         <div className="note-list" aria-label="Notes">
           {sortedNotes.map((note, index) => (
-            <article
+            <NoteCard
               key={note.id}
-              className={`note-card ${note.status === "done" ? "done" : ""}`}
-              draggable
-            >
-              <div className="note-card-top">
-                <input
-                  aria-label={`Mark ${note.title} done`}
-                  type="checkbox"
-                  checked={note.status === "done"}
-                  disabled={note.kind !== "task"}
-                  onChange={(event) =>
-                    void props.onUpdateNote(note, {
-                      status: event.currentTarget.checked ? "done" : "active"
-                    })
-                  }
-                />
-                <input
-                  className="note-title"
-                  value={note.title}
-                  onChange={(event) =>
-                    void props.onUpdateNote(note, { title: event.currentTarget.value })
-                  }
-                />
-                <button
-                  aria-label={note.pinned ? "Unpin note" : "Pin note"}
-                  onClick={() => void props.onUpdateNote(note, { pinned: !note.pinned })}
-                >
-                  {note.pinned ? "Pinned" : "Pin"}
-                </button>
-              </div>
-              <textarea
-                value={note.body}
-                onChange={(event) =>
-                  void props.onUpdateNote(note, { body: event.currentTarget.value })
-                }
-              />
-              <div className="note-meta">
-                <span>{note.kind}</span>
-                <label>
-                  Priority
-                  <select
-                    aria-label={`Priority for ${note.title}`}
-                    value={note.priority}
-                    onChange={(event) =>
-                      void props.onUpdateNote(note, {
-                        priority: event.currentTarget.value as NoteInput["priority"]
-                      })
-                    }
-                  >
-                    <option value="none">None</option>
-                    <option value="low">Low</option>
-                    <option value="medium">Medium</option>
-                    <option value="high">High</option>
-                  </select>
-                </label>
-                <label>
-                  Folder
-                  <select
-                    aria-label={`Folder for ${note.title}`}
-                    value={note.folderId ?? ""}
-                    onChange={(event) =>
-                      void props.onUpdateNote(note, {
-                        folderId: event.currentTarget.value || null
-                      })
-                    }
-                  >
-                    <option value="">No folder</option>
-                    {props.folders.map((folder) => (
-                      <option key={folder.id} value={folder.id}>
-                        {folder.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Due
-                  <input
-                    aria-label={`Due date for ${note.title}`}
-                    type="date"
-                    value={note.dueAt?.slice(0, 10) ?? ""}
-                    onChange={(event) =>
-                      void props.onUpdateNote(note, {
-                        dueAt: event.currentTarget.value
-                          ? `${event.currentTarget.value}T00:00:00.000Z`
-                          : null
-                      })
-                    }
-                  />
-                </label>
-                {props.tags.map((tag) => (
-                  <label key={tag.id} className="check-row">
-                    <input
-                      aria-label={`${tag.name} tag for ${note.title}`}
-                      type="checkbox"
-                      checked={note.tags.some((item) => item.id === tag.id)}
-                      onChange={(event) => {
-                        const tagIds = event.currentTarget.checked
-                          ? [...note.tags.map((item) => item.id), tag.id]
-                          : note.tags.filter((item) => item.id !== tag.id).map((item) => item.id);
-                        void props.onUpdateNote(note, { tagIds });
-                      }}
-                    />
-                    <span>{tag.name}</span>
-                  </label>
-                ))}
-              </div>
-              <div className="note-order">
-                <button
-                  disabled={index === 0}
-                  onClick={() => {
-                    const next = move(sortedNotes, index, index - 1);
-                    void props.onReorderNotes(next);
-                  }}
-                >
-                  Up
-                </button>
-                <button
-                  disabled={index === sortedNotes.length - 1}
-                  onClick={() => {
-                    const next = move(sortedNotes, index, index + 1);
-                    void props.onReorderNotes(next);
-                  }}
-                >
-                  Down
-                </button>
-                <button onClick={() => void props.onDeleteNote(note)}>Delete</button>
-              </div>
-            </article>
+              note={note}
+              index={index}
+              sortedNotes={sortedNotes}
+              {...props}
+            />
           ))}
         </div>
       </section>
     </main>
+  );
+}
+
+function NoteCard(
+  props: NotesWorkspaceProps & { note: Note; index: number; sortedNotes: Note[] }
+): ReactElement {
+  const { note, index, sortedNotes } = props;
+  const disabled = props.updatingNoteIds?.includes(note.id) ?? false;
+  return (
+    <article
+      aria-label={`Note ${note.title}`}
+      className={`note-card ${note.status === "done" ? "done" : ""}`}
+      draggable
+    >
+      <div className="note-card-top">
+        <input
+          aria-label={`Mark ${note.title} done`}
+          type="checkbox"
+          checked={note.status === "done"}
+          disabled={disabled || note.kind !== "task"}
+          onChange={(event) =>
+            void props.onUpdateNote(note, {
+              status: event.currentTarget.checked ? "done" : "active"
+            })
+          }
+        />
+        <input
+          className="note-title"
+          value={note.title}
+          disabled={disabled}
+          onChange={(event) => void props.onUpdateNote(note, { title: event.currentTarget.value })}
+        />
+        <button
+          aria-label={note.pinned ? "Unpin note" : "Pin note"}
+          disabled={disabled}
+          onClick={() => void props.onUpdateNote(note, { pinned: !note.pinned })}
+        >
+          {note.pinned ? "Pinned" : "Pin"}
+        </button>
+      </div>
+      <textarea
+        value={note.body}
+        disabled={disabled}
+        onChange={(event) => void props.onUpdateNote(note, { body: event.currentTarget.value })}
+      />
+      <div className="note-meta">
+        <span>{note.kind}</span>
+        <label>
+          Priority
+          <select
+            aria-label={`Priority for ${note.title}`}
+            value={note.priority}
+            disabled={disabled}
+            onChange={(event) =>
+              void props.onUpdateNote(note, {
+                priority: event.currentTarget.value as NoteInput["priority"]
+              })
+            }
+          >
+            <option value="none">None</option>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+          </select>
+        </label>
+        <label>
+          Folder
+          <select
+            aria-label={`Folder for ${note.title}`}
+            value={note.folderId ?? ""}
+            disabled={disabled}
+            onChange={(event) =>
+              void props.onUpdateNote(note, {
+                folderId: event.currentTarget.value || null
+              })
+            }
+          >
+            <option value="">No folder</option>
+            {props.folders.map((folder) => (
+              <option key={folder.id} value={folder.id}>
+                {folder.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Due
+          <input
+            aria-label={`Due date for ${note.title}`}
+            type="date"
+            value={note.dueAt?.slice(0, 10) ?? ""}
+            disabled={disabled}
+            onChange={(event) =>
+              void props.onUpdateNote(note, {
+                dueAt: event.currentTarget.value
+                  ? `${event.currentTarget.value}T00:00:00.000Z`
+                  : null
+              })
+            }
+          />
+        </label>
+        {props.tags.map((tag) => (
+          <label key={tag.id} className="check-row">
+            <input
+              aria-label={`${tag.name} tag for ${note.title}`}
+              type="checkbox"
+              checked={note.tags.some((item) => item.id === tag.id)}
+              disabled={disabled}
+              onChange={(event) => {
+                const tagIds = event.currentTarget.checked
+                  ? [...note.tags.map((item) => item.id), tag.id]
+                  : note.tags.filter((item) => item.id !== tag.id).map((item) => item.id);
+                void props.onUpdateNote(note, { tagIds });
+              }}
+            />
+            <span>{tag.name}</span>
+          </label>
+        ))}
+      </div>
+      <div className="note-order">
+        <button
+          disabled={disabled || index === 0}
+          onClick={() => {
+            const next = move(sortedNotes, index, index - 1);
+            void props.onReorderNotes(next);
+          }}
+        >
+          Up
+        </button>
+        <button
+          disabled={disabled || index === sortedNotes.length - 1}
+          onClick={() => {
+            const next = move(sortedNotes, index, index + 1);
+            void props.onReorderNotes(next);
+          }}
+        >
+          Down
+        </button>
+        <button disabled={disabled} onClick={() => void props.onDeleteNote(note)}>
+          Delete
+        </button>
+      </div>
+    </article>
   );
 }
 

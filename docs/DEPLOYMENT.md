@@ -186,6 +186,22 @@ DENTLINK_SMOKE_BASE_URL=http://127.0.0.1:8787 pnpm smoke:api
 The script creates temporary users and notes through the public API. It does not print bearer tokens
 or passwords.
 
+## Browser Verification
+
+Milestone 2.1 adds repeatable Playwright browser verification for the deployed preview web client:
+
+```bash
+DENTLINK_PREVIEW_WEB_URL=https://dentlink-web-preview.pages.dev \
+DENTLINK_PREVIEW_API_URL=https://dentlink-api-preview.evanjrizzo.workers.dev \
+pnpm test:browser
+```
+
+The browser suite creates temporary users and data through the UI, uses public webhook ingest calls
+to simulate external delivery, and checks session restore, local storage contents, CORS-backed API
+requests, Notes, Notifications, webhook secret lifecycle, endpoint disabling, endpoint deletion,
+last-triggered refresh, and logout behavior. It must not print passwords, bearer tokens, or webhook
+secrets in logs.
+
 ## Rollback
 
 - Redeploy a known-good Worker version through Cloudflare or the deployment workflow.

@@ -65,6 +65,9 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   ingest URLs.
 - Wrong-secret, disabled, or unknown webhook endpoints return a safe not-found response.
 - Accepted deliveries are recorded and capped at 60 accepted deliveries per minute per endpoint.
+- Deleted webhook endpoints are removed from active storage and cannot be reused for ingestion.
+- Milestone 2.1 does not deduplicate webhook request replays. Replayed valid requests create another
+  accepted delivery until a future idempotency key contract is added.
 
 ## Local agents and platform actions
 

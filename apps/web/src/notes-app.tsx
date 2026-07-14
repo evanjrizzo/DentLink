@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState, type ReactElement } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 
 import { DentLinkApiClient, DentLinkApiError } from "@dentlink/api-client";
 import type {
   AuthSession,
   EntityId,
   Notification,
+  NotificationInput,
+  NotificationSeverity,
   Note,
   NoteInput,
   NotePatch,
@@ -42,6 +44,10 @@ export function DentLinkNotesApp(): ReactElement {
   const [folderId, setFolderId] = useState<EntityId | null>(null);
   const [tagIds, setTagIds] = useState<EntityId[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [updatingNoteIds, setUpdatingNoteIds] = useState<EntityId[]>([]);
+  const notesRequest = useRef(0);
+  const notificationsRequest = useRef(0);
+  const webhooksRequest = useRef(0);
 
   const filteredNotes = useMemo(() => notesList.notes, [notesList.notes]);
 
@@ -76,22 +82,25 @@ export function DentLinkNotesApp(): ReactElement {
     nextFolderId = folderId,
     nextTagIds = tagIds
   ): Promise<void> {
+    const requestId = (notesRequest.current += 1);
     const response = await client.listNotes({
       search: nextSearch || undefined,
       folderId: nextFolderId ?? undefined,
       tagIds: nextTagIds
     });
-    setNotesList(response);
+    if (requestId === notesRequest.current) setNotesList(response);
   }
 
   async function loadNotifications(): Promise<void> {
+    const requestId = (notificationsRequest.current += 1);
     const response = await client.listNotifications();
-    setNotifications(response.notifications);
+    if (requestId === notificationsRequest.current) setNotifications(response.notifications);
   }
 
   async function loadWebhooks(): Promise<void> {
+    const requestId = (webhooksRequest.current += 1);
     const response = await client.listWebhooks();
-    setWebhooks(response.webhooks);
+    if (requestId === webhooksRequest.current) setWebhooks(response.webhooks);
   }
 
   async function authenticate(mode: "login" | "register"): Promise<void> {
@@ -140,18 +149,22 @@ export function DentLinkNotesApp(): ReactElement {
 
   async function updateNote(note: Note, patch: NotePatch): Promise<void> {
     const previous = notesList;
+    const current = notesList.notes.find((item) => item.id === note.id) ?? note;
+    setUpdatingNoteIds((ids) => [...new Set([...ids, note.id])]);
     setNotesList({
       ...notesList,
       notes: notesList.notes.map((item) =>
-        item.id === note.id ? { ...item, ...patch, version: item.version + 1 } : item
+        item.id === note.id ? optimisticNote(item, patch, notesList.tags) : item
       )
     });
     try {
-      await client.updateNote(note.id, note.version, patch);
+      await client.updateNote(note.id, current.version, patch);
       await loadNotes();
     } catch (caught) {
       setNotesList(previous);
       handleFailure(caught);
+    } finally {
+      setUpdatingNoteIds((ids) => ids.filter((id) => id !== note.id));
     }
   }
 
@@ -182,6 +195,27 @@ export function DentLinkNotesApp(): ReactElement {
     );
     try {
       await client.updateNotification(notification.id, notification.version, patch);
+      await loadNotifications();
+    } catch (caught) {
+      setNotifications(previous);
+      handleFailure(caught);
+    }
+  }
+
+  async function createNotification(input: NotificationInput): Promise<void> {
+    try {
+      await client.createNotification(input);
+      await loadNotifications();
+    } catch (caught) {
+      handleFailure(caught);
+    }
+  }
+
+  async function deleteNotification(notification: Notification): Promise<void> {
+    const previous = notifications;
+    setNotifications(notifications.filter((item) => item.id !== notification.id));
+    try {
+      await client.deleteNotification(notification.id, notification.version);
       await loadNotifications();
     } catch (caught) {
       setNotifications(previous);
@@ -222,6 +256,57 @@ export function DentLinkNotesApp(): ReactElement {
     } catch (caught) {
       handleFailure(caught);
     }
+  }
+
+  async function updateWebhook(
+    webhook: WebhookEndpoint & { ingestUrl: string },
+    patch: { enabled: boolean }
+  ): Promise<void> {
+    try {
+      const current = webhooks.find((item) => item.id === webhook.id) ?? webhook;
+      await client.updateWebhook(webhook.id, current.version, patch);
+      await loadWebhooks();
+    } catch (caught) {
+      if (await retryWebhookUpdate(webhook.id, patch, caught)) return;
+      handleFailure(caught);
+    }
+  }
+
+  async function deleteWebhook(webhook: WebhookEndpoint & { ingestUrl: string }): Promise<void> {
+    try {
+      const current = webhooks.find((item) => item.id === webhook.id) ?? webhook;
+      await client.deleteWebhook(webhook.id, current.version);
+      await loadWebhooks();
+    } catch (caught) {
+      if (await retryWebhookDelete(webhook.id, caught)) return;
+      handleFailure(caught);
+    }
+  }
+
+  async function retryWebhookUpdate(
+    webhookId: EntityId,
+    patch: { enabled: boolean },
+    caught: unknown
+  ): Promise<boolean> {
+    if (!(caught instanceof DentLinkApiError) || caught.code !== "version_mismatch") return false;
+    const latest = await client.listWebhooks();
+    setWebhooks(latest.webhooks);
+    const current = latest.webhooks.find((webhook) => webhook.id === webhookId);
+    if (!current) return true;
+    await client.updateWebhook(webhookId, current.version, patch);
+    await loadWebhooks();
+    return true;
+  }
+
+  async function retryWebhookDelete(webhookId: EntityId, caught: unknown): Promise<boolean> {
+    if (!(caught instanceof DentLinkApiError) || caught.code !== "version_mismatch") return false;
+    const latest = await client.listWebhooks();
+    setWebhooks(latest.webhooks);
+    const current = latest.webhooks.find((webhook) => webhook.id === webhookId);
+    if (!current) return true;
+    await client.deleteWebhook(webhookId, current.version);
+    await loadWebhooks();
+    return true;
   }
 
   async function logout(): Promise<void> {
@@ -346,7 +431,10 @@ export function DentLinkNotesApp(): ReactElement {
       {view === "notifications" ? (
         <NotificationsView
           notifications={notifications}
+          onCreateNotification={createNotification}
           onUpdateNotification={updateNotification}
+          onDeleteNotification={deleteNotification}
+          onRefreshNotifications={loadNotifications}
           onReorderNotifications={reorderNotifications}
         />
       ) : null}
@@ -379,6 +467,7 @@ export function DentLinkNotesApp(): ReactElement {
           onUpdateNote={updateNote}
           onDeleteNote={deleteNote}
           onReorderNotes={reorderNotes}
+          updatingNoteIds={updatingNoteIds}
         />
       ) : null}
       {view === "webhooks" ? (
@@ -388,21 +477,45 @@ export function DentLinkNotesApp(): ReactElement {
           lastSecret={lastWebhookSecret}
           onDraftChange={setWebhookDraft}
           onCreateWebhook={createWebhook}
+          onUpdateWebhook={updateWebhook}
+          onDeleteWebhook={deleteWebhook}
+          onRefreshWebhooks={loadWebhooks}
         />
       ) : null}
     </>
   );
 }
 
+function optimisticNote(note: Note, patch: NotePatch, tags: NotesList["tags"]): Note {
+  return {
+    ...note,
+    ...patch,
+    tags: patch.tagIds
+      ? tags
+          .filter((tag) => patch.tagIds?.includes(tag.id))
+          .sort((left, right) => left.name.localeCompare(right.name))
+      : note.tags,
+    version: note.version + 1
+  };
+}
+
 function NotificationsView(props: {
   notifications: Notification[];
+  onCreateNotification: (input: NotificationInput) => Promise<void>;
   onUpdateNotification: (
     notification: Notification,
     patch: Partial<Pick<Notification, "pinned" | "status">>
   ) => Promise<void>;
+  onDeleteNotification: (notification: Notification) => Promise<void>;
+  onRefreshNotifications: () => Promise<void>;
   onReorderNotifications: (notifications: Notification[]) => Promise<void>;
 }): ReactElement {
   const [rankingMode, setRankingMode] = useState(false);
+  const [draft, setDraft] = useState<NotificationInput>({
+    title: "",
+    summary: "",
+    severity: "info"
+  });
   const sorted = [...props.notifications].sort((left, right) => {
     if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
     return right.rank - left.rank || left.globalOrder - right.globalOrder;
@@ -416,7 +529,46 @@ function NotificationsView(props: {
         >
           Ranking Mode
         </button>
+        <button onClick={() => void props.onRefreshNotifications()}>Refresh</button>
       </div>
+      <form
+        className="note-composer"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!draft.title.trim()) return;
+          void props.onCreateNotification(draft);
+          setDraft({ title: "", summary: "", severity: "info" });
+        }}
+      >
+        <input
+          aria-label="New notification title"
+          placeholder="New notification"
+          value={draft.title}
+          onChange={(event) => setDraft({ ...draft, title: event.currentTarget.value })}
+        />
+        <input
+          aria-label="New notification summary"
+          placeholder="Summary"
+          value={draft.summary ?? ""}
+          onChange={(event) => setDraft({ ...draft, summary: event.currentTarget.value })}
+        />
+        <select
+          aria-label="New notification severity"
+          value={draft.severity}
+          onChange={(event) =>
+            setDraft({
+              ...draft,
+              severity: event.currentTarget.value as NotificationSeverity
+            })
+          }
+        >
+          <option value="info">Info</option>
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+        </select>
+        <button type="submit">Add</button>
+      </form>
       {sorted.length === 0 ? <p>No notifications yet.</p> : null}
       {sorted.map((notification, index) => (
         <article key={notification.id} className={`notification-card ${notification.status}`}>
@@ -460,6 +612,7 @@ function NotificationsView(props: {
             >
               Down
             </button>
+            <button onClick={() => void props.onDeleteNotification(notification)}>Delete</button>
           </div>
         </article>
       ))}
@@ -473,9 +626,27 @@ function WebhooksView(props: {
   lastSecret: string | null;
   onDraftChange: (draft: { name: string; slug: string; destination: WebhookDestination }) => void;
   onCreateWebhook: () => Promise<void>;
+  onUpdateWebhook: (
+    webhook: WebhookEndpoint & { ingestUrl: string },
+    patch: { enabled: boolean }
+  ) => Promise<void>;
+  onDeleteWebhook: (webhook: WebhookEndpoint & { ingestUrl: string }) => Promise<void>;
+  onRefreshWebhooks: () => Promise<void>;
 }): ReactElement {
+  const [copyStatus, setCopyStatus] = useState<string | null>(null);
+  async function copyValue(label: string, value: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopyStatus(`${label} copied`);
+    } catch {
+      setCopyStatus(`Could not copy ${label.toLowerCase()}`);
+    }
+  }
   return (
     <main className="webhooks-shell">
+      <div className="note-toolbar">
+        <button onClick={() => void props.onRefreshWebhooks()}>Refresh</button>
+      </div>
       <form
         className="note-composer"
         onSubmit={(event) => {
@@ -514,8 +685,17 @@ function WebhooksView(props: {
         <button type="submit">Create</button>
       </form>
       {props.lastSecret ? (
+        <div className="app-error" role="status">
+          <span>Webhook secret shown once: </span>
+          <code>{props.lastSecret}</code>
+          <button type="button" onClick={() => void copyValue("Secret", props.lastSecret ?? "")}>
+            Copy secret
+          </button>
+        </div>
+      ) : null}
+      {copyStatus ? (
         <p className="app-error" role="status">
-          Webhook secret shown once: {props.lastSecret}
+          {copyStatus}
         </p>
       ) : null}
       <div className="note-list">
@@ -525,6 +705,26 @@ function WebhooksView(props: {
             <span>{webhook.destination}</span>
             <code>{webhook.ingestUrl}</code>
             <span>{webhook.enabled ? "Enabled" : "Disabled"}</span>
+            <span>
+              Last triggered:{" "}
+              {webhook.lastTriggeredAt
+                ? new Date(webhook.lastTriggeredAt).toLocaleString()
+                : "Never"}
+            </span>
+            <div className="note-order">
+              <button type="button" onClick={() => void copyValue("URL", webhook.ingestUrl)}>
+                Copy URL
+              </button>
+              <button
+                type="button"
+                onClick={() => void props.onUpdateWebhook(webhook, { enabled: !webhook.enabled })}
+              >
+                {webhook.enabled ? "Disable" : "Enable"}
+              </button>
+              <button type="button" onClick={() => void props.onDeleteWebhook(webhook)}>
+                Delete
+              </button>
+            </div>
           </article>
         ))}
       </div>

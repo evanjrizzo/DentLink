@@ -18,6 +18,7 @@
     "deploy:production": "wrangler deploy --env production",
     "deploy:web:preview": "wrangler pages deploy apps/web/dist --project-name dentlink-web-preview --branch development",
     "smoke:api": "node scripts/smoke-api.mjs",
+    "test:browser": "playwright test",
     "format": "prettier --write \"**/*.{css,html,json,yaml,yml,js,mjs,ts,tsx}\"",
     "format:check": "prettier --check \"**/*.{css,html,json,yaml,yml,js,mjs,ts,tsx}\"",
     "lint": "eslint .",
@@ -27,6 +28,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.18.0",
+    "@playwright/test": "^1.61.1",
     "@types/node": "^22.10.7",
     "@types/react": "^19.0.7",
     "@types/react-dom": "^19.0.3",

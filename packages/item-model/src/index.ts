@@ -232,6 +232,7 @@ export type SyncChange =
   | { type: "notification"; op: "upsert"; notification: Notification; cursor: SyncCursor }
   | { type: "notification"; op: "delete"; id: EntityId; userId: EntityId; cursor: SyncCursor }
   | { type: "webhook"; op: "upsert"; webhook: WebhookEndpoint; cursor: SyncCursor }
+  | { type: "webhook"; op: "delete"; id: EntityId; userId: EntityId; cursor: SyncCursor }
   | { type: "conflict"; op: "upsert"; conflict: NoteConflict; cursor: SyncCursor };
 
 export type SyncResponse = {

@@ -158,6 +158,16 @@ export class DentLinkApiClient {
     });
   }
 
+  async deleteNotification(
+    notificationId: EntityId,
+    expectedVersion: number
+  ): Promise<Notification> {
+    return this.request<Notification>(`/v1/notifications/${notificationId}`, {
+      method: "DELETE",
+      body: { expectedVersion }
+    });
+  }
+
   async reorderNotifications(
     notificationOrders: Array<{ id: EntityId; expectedVersion: number; globalOrder: number }>
   ): Promise<Notification[]> {
@@ -192,6 +202,16 @@ export class DentLinkApiClient {
     return this.request<WebhookEndpoint & { ingestUrl: string }>(`/v1/webhooks/${webhookId}`, {
       method: "PATCH",
       body: { expectedVersion, patch }
+    });
+  }
+
+  async deleteWebhook(
+    webhookId: EntityId,
+    expectedVersion: number
+  ): Promise<WebhookEndpoint & { ingestUrl: string }> {
+    return this.request<WebhookEndpoint & { ingestUrl: string }>(`/v1/webhooks/${webhookId}`, {
+      method: "DELETE",
+      body: { expectedVersion }
     });
   }
 

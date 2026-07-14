@@ -130,12 +130,17 @@ Notes, sync, history, or conflict contracts.
   secret once, alongside the public endpoint record and `ingestUrl`.
 - `PATCH /v1/webhooks/:id`: update an authenticated user's webhook endpoint with
   `expectedVersion`.
+- `DELETE /v1/webhooks/:id`: delete an authenticated user's webhook endpoint with
+  `expectedVersion`. Deleted endpoints are removed from authenticated listings and cannot ingest
+  new deliveries.
 - `POST /v1/ingest/webhooks/:slug`: public ingest route for enabled webhook endpoints.
 
 Webhook ingest requests authenticate with `X-DentLink-Webhook-Secret`. The slug is not treated as a
 secret. The raw secret is hashed before lookup, and only the hash is stored. Missing secrets return
 `401`; unknown, disabled, or wrong-secret endpoints return `404`; accepted deliveries return `202`.
-Endpoints are currently limited to 60 accepted deliveries per minute per endpoint.
+Endpoints are currently limited to 60 accepted deliveries per minute per endpoint. Accepted
+deliveries are not idempotency-keyed in Milestone 2.1, so callers that replay the same request with
+the same secret should expect another accepted delivery until a later idempotency contract exists.
 
 Webhook endpoints route payloads to one of two destinations:
 
@@ -144,5 +149,5 @@ Webhook endpoints route payloads to one of two destinations:
 - `note`: creates a task/reference note using the endpoint defaults and submitted note fields.
 
 Notification and webhook changes are included in `/v1/sync` through the same numeric cursor log used
-by Milestone 1. Notification deletes are emitted as tombstones. Webhook secrets and hashes are never
-included in sync payloads.
+by Milestone 1. Notification and webhook deletes are emitted as tombstones. Webhook secrets and
+hashes are never included in sync payloads.
