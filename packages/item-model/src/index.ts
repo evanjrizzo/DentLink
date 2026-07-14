@@ -45,7 +45,15 @@ export type ConnectorAccountStatus = "connected" | "paused" | "error" | "deleted
 export type ConnectorHealthStatus = "unknown" | "healthy" | "degraded" | "error";
 export type ConnectorSyncStatus = "idle" | "syncing" | "error";
 export type ConnectorSourceRecordType = "email" | "calendar_event" | "notification" | "generic";
-export type ConnectorSourceRecordStatus = "pending" | "processed" | "failed";
+export type ConnectorSourceRecordStatus =
+  | "pending"
+  | "processed"
+  | "notification_created"
+  | "notification_updated"
+  | "skipped"
+  | "duplicate"
+  | "filtered"
+  | "failed";
 export type ConnectorCredentialKind = "oauth_refresh_token";
 
 export type Folder = {
@@ -385,6 +393,7 @@ export type ConnectorSourceRecord = {
   status: ConnectorSourceRecordStatus;
   receivedAt: IsoDateTime;
   processedAt: IsoDateTime | null;
+  processingReason: string | null;
   errorMessage: string | null;
   version: number;
 };
@@ -424,6 +433,20 @@ export type GmailSyncResult = {
   account: ConnectorAccount;
   processed: number;
   createdNotifications: number;
+  outcomes: Array<{
+    messageId: EntityId;
+    status: Extract<
+      ConnectorSourceRecordStatus,
+      | "notification_created"
+      | "notification_updated"
+      | "skipped"
+      | "duplicate"
+      | "filtered"
+      | "failed"
+    >;
+    reason: string;
+    recordId: EntityId | null;
+  }>;
 };
 
 export type GoogleCalendarSyncResult = {

@@ -208,6 +208,20 @@ The Gmail connector uses the metadata-only Gmail scope:
 https://www.googleapis.com/auth/gmail.metadata
 ```
 
+Milestone 7 Phase 1 extends Gmail sync responses with per-message processing outcomes while keeping
+the same endpoint:
+
+- `processed`: number of Gmail message IDs attempted.
+- `createdNotifications`: number of DentLink notifications newly created.
+- `outcomes`: ordered entries containing `messageId`, `status`, `reason`, and `recordId`.
+
+Outcome `status` values are `notification_created`, `notification_updated`, `skipped`, `duplicate`,
+`filtered`, and `failed`. Source records expose the same final processing status plus
+`processingReason`, `processedAt`, and `errorMessage` for failures. A sync with partial message
+failures returns `200` with connector `healthStatus = "degraded"` and a stable
+`errorCode = "gmail_partial_sync_failed"`; global provider, credential, or database failures still
+return normal API errors and set connector sync status to `error`.
+
 ## Milestone 4 Google Calendar endpoints
 
 Milestone 4 adds Google Calendar as a read-only calendar connector through the same connector
@@ -253,11 +267,11 @@ import/export, source filters, and DentLink-only annotations on provider events.
 
 - `GET /v1/calendar/events`: list normalized calendar events for the authenticated user. Supports
   bounded `timeMin`, `timeMax`, `source=all|google-calendar|local`, and `includeHidden=true`.
-- `POST /v1/calendar/events`: create a DentLink Local calendar event. The server resolves
-  ownership and rejects client-supplied provider ownership fields.
+- `POST /v1/calendar/events`: create a DentLink Local calendar event. The server resolves ownership
+  and rejects client-supplied provider ownership fields.
 - `GET /v1/calendar/events/:eventId`: read one authenticated user's calendar event.
-- `PATCH /v1/calendar/events/:eventId`: update DentLink-local agenda state with
-  `expectedVersion`; provider-owned content fields remain read-only.
+- `PATCH /v1/calendar/events/:eventId`: update DentLink-local agenda state with `expectedVersion`;
+  provider-owned content fields remain read-only.
 - `PATCH /v1/calendar/local-events/:eventId`: update editable DentLink Local event fields with
   `expectedVersion`.
 - `DELETE /v1/calendar/local-events/:eventId`: soft-delete a DentLink Local event with
@@ -266,8 +280,8 @@ import/export, source filters, and DentLink-only annotations on provider events.
   normalized event. Supported fields are `notes`, `pinned`, `completed`, `hidden`, and `tagIds`.
 - `POST /v1/calendar/ics/import`: import posted ICS text into the authenticated user's DentLink
   Local calendar. The request body is `{ "ics": "BEGIN:VCALENDAR..." }` and is size-limited.
-- `GET /v1/calendar/ics/export`: export DentLink Local events in the requested bounded date range
-  as `text/calendar` with an attachment disposition.
+- `GET /v1/calendar/ics/export`: export DentLink Local events in the requested bounded date range as
+  `text/calendar` with an attachment disposition.
 
 Local event recurrence is stored as RFC 5545 RRULE text when supported. ICS import preserves UID,
 description, location, safe URL, all-day dates, timezone metadata, and recurrence where recognized.

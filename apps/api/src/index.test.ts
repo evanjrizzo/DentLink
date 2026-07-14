@@ -57,6 +57,10 @@ const milestone5SchemaPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../migrations/0006_calendar_foundation_ics.sql"
 );
+const milestone7SchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0007_gmail_ingestion_outcomes.sql"
+);
 
 type StoreFixture = {
   name: string;
@@ -85,7 +89,8 @@ const fixtures: StoreFixture[] = [
         milestone3SchemaPath,
         milestone31SchemaPath,
         milestone4SchemaPath,
-        milestone5SchemaPath
+        milestone5SchemaPath,
+        milestone7SchemaPath
       ]);
       return {
         store: new D1DentLinkStore(db),
@@ -667,6 +672,12 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       account: ConnectorAccount;
       processed: number;
       createdNotifications: number;
+      outcomes: Array<{
+        messageId: string;
+        status: string;
+        reason: string;
+        recordId: string | null;
+      }>;
     }>(
       store,
       "POST",
@@ -678,6 +689,14 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     );
     expect(sync.processed).toBe(1);
     expect(sync.createdNotifications).toBe(1);
+    expect(sync.outcomes).toEqual([
+      {
+        messageId: "gmail-message-1",
+        status: "notification_created",
+        reason: "Created a Gmail notification",
+        recordId: expect.any(String) as string
+      }
+    ]);
     expect(sync.account.syncCursor).toBe("101");
     expect(sync.account.healthStatus).toBe("healthy");
 
@@ -690,7 +709,16 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       200,
       env
     );
+    expect(secondSync.processed).toBe(1);
     expect(secondSync.createdNotifications).toBe(0);
+    expect(secondSync.outcomes).toEqual([
+      {
+        messageId: "gmail-message-1",
+        status: "duplicate",
+        reason: "Gmail message already has a source record",
+        recordId: expect.any(String) as string
+      }
+    ]);
 
     const records = await requestJson<{ records: ConnectorSourceRecord[] }>(
       store,
@@ -700,6 +728,12 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       owner.session.token
     );
     expect(records.records).toHaveLength(1);
+    expect(records.records[0]).toMatchObject({
+      status: "notification_created",
+      processingReason: "Created a Gmail notification",
+      errorMessage: null
+    });
+    expect(records.records[0]?.processedAt).toBeTruthy();
     expect(records.records[0]?.normalizedPayload).toMatchObject({
       provider: "gmail",
       provider_item_id: "gmail-message-1",
@@ -707,6 +741,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       thread_id: "gmail-thread-1",
       message_id: "<message-1@example.test>",
       unread: true,
+      notification_id: expect.any(String),
       connector_account: linked.account.id
     });
     expect(JSON.stringify(records)).not.toContain("refresh-token-secret");
@@ -755,6 +790,77 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       409,
       env
     );
+  });
+
+  it("records Gmail per-message outcomes and keeps partial sync failures observable", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-outcomes@example.com");
+    const gmailClient = fakeGmailClientWithPartialFailure();
+    const env = gmailTestEnv(gmailClient);
+    const start = await requestJson<{ authorizationUrl: string; expiresAt: string }>(
+      store,
+      "POST",
+      "/v1/connectors/gmail/start",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const authorizationUrl = new URL(start.authorizationUrl);
+    const callback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${authorizationUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    const linked = (await callback.json()) as { account: ConnectorAccount };
+
+    const sync = await requestJson<{
+      account: ConnectorAccount;
+      processed: number;
+      createdNotifications: number;
+      outcomes: Array<{ messageId: string; status: string; reason: string; recordId: string }>;
+    }>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+
+    expect(sync.processed).toBe(2);
+    expect(sync.createdNotifications).toBe(1);
+    expect(sync.account.healthStatus).toBe("degraded");
+    expect(sync.account.errorCode).toBe("gmail_partial_sync_failed");
+    expect(sync.outcomes.map((outcome) => outcome.status)).toEqual([
+      "notification_created",
+      "failed"
+    ]);
+    expect(sync.outcomes[1]).toMatchObject({
+      messageId: "gmail-message-failure",
+      reason: "Gmail API request failed"
+    });
+
+    const records = await requestJson<{ records: ConnectorSourceRecord[] }>(
+      store,
+      "GET",
+      `/v1/connectors/accounts/${linked.account.id}/source-records`,
+      undefined,
+      owner.session.token
+    );
+    expect(records.records.map((record) => record.status).sort()).toEqual([
+      "failed",
+      "notification_created"
+    ]);
+    expect(records.records.find((record) => record.status === "failed")).toMatchObject({
+      processingReason: "Gmail API request failed",
+      errorMessage: "Gmail API request failed"
+    });
   });
 
   it("links Google Calendar, syncs agenda events, supports dismissal, and isolates users", async () => {
@@ -1753,7 +1859,7 @@ function fakeGmailClient(): GmailApiClient {
       return { messages: [{ id: "gmail-message-1", threadId: "gmail-thread-1" }] };
     },
     async listHistory(_accessToken, startHistoryId) {
-      if (startHistoryId === "100") {
+      if (startHistoryId === "100" || startHistoryId === "101") {
         return {
           historyId: "101",
           history: [
@@ -1780,6 +1886,59 @@ function fakeGmailClient(): GmailApiClient {
             { name: "Subject", value: "Insurance update" },
             { name: "Date", value: "Tue, 14 Jul 2026 10:00:00 -0400" },
             { name: "Message-ID", value: "<message-1@example.test>" }
+          ]
+        }
+      };
+    }
+  };
+}
+
+function fakeGmailClientWithPartialFailure(): GmailApiClient {
+  return {
+    async exchangeCode(code) {
+      expect(code).toBe("valid-code");
+      return { accessToken: "access-token", refreshToken: "refresh-token-secret" };
+    },
+    async refreshAccessToken(refreshToken) {
+      expect(refreshToken).toBe("refresh-token-secret");
+      return { accessToken: "access-token-refreshed" };
+    },
+    async getProfile() {
+      return { emailAddress: "owner.gmail@example.test", historyId: "100" };
+    },
+    async listMessages() {
+      return { messages: [] };
+    },
+    async listHistory(_accessToken, startHistoryId) {
+      return {
+        historyId: "102",
+        history: [
+          {
+            id: startHistoryId === "100" ? "101" : startHistoryId,
+            messagesAdded: [
+              { message: { id: "gmail-message-ok", threadId: "gmail-thread-ok" } },
+              { message: { id: "gmail-message-failure", threadId: "gmail-thread-failure" } }
+            ]
+          }
+        ]
+      };
+    },
+    async getMessage(_accessToken, messageId) {
+      if (messageId === "gmail-message-failure") {
+        throw new Error("Gmail API request failed");
+      }
+      return {
+        id: "gmail-message-ok",
+        threadId: "gmail-thread-ok",
+        historyId: "101",
+        internalDate: "1783980000000",
+        labelIds: ["INBOX"],
+        payload: {
+          headers: [
+            { name: "From", value: "Front Desk <front@example.test>" },
+            { name: "Subject", value: "Successful message" },
+            { name: "Date", value: "Tue, 14 Jul 2026 10:00:00 -0400" },
+            { name: "Message-ID", value: "<message-ok@example.test>" }
           ]
         }
       };

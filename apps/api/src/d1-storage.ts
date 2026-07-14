@@ -223,6 +223,7 @@ type ConnectorSourceRecordRow = {
   status: ConnectorSourceRecord["status"];
   received_at: string;
   processed_at: string | null;
+  processing_reason: string | null;
   error_message: string | null;
   version: number;
 };
@@ -908,6 +909,7 @@ export class D1DentLinkStore implements DentLinkStore {
       status: "pending",
       receivedAt: now,
       processedAt: null,
+      processingReason: null,
       errorMessage: null,
       version: 1
     };
@@ -917,8 +919,8 @@ export class D1DentLinkStore implements DentLinkStore {
           `INSERT INTO connector_source_records
            (id, user_id, account_id, connector_key, source_external_id, source_type,
             payload_hash, normalized_payload_json, status, received_at, processed_at,
-            error_message, version)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            processing_reason, error_message, version)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .bind(
           record.id,
@@ -932,6 +934,7 @@ export class D1DentLinkStore implements DentLinkStore {
           record.status,
           record.receivedAt,
           record.processedAt,
+          record.processingReason,
           record.errorMessage,
           record.version
         )
@@ -985,6 +988,54 @@ export class D1DentLinkStore implements DentLinkStore {
       }
       throw error;
     }
+  }
+
+  async updateConnectorSourceRecordProcessing(
+    userId: EntityId,
+    accountId: EntityId,
+    sourceExternalId: string,
+    patch: {
+      status: ConnectorSourceRecord["status"];
+      processingReason: string;
+      errorMessage?: string | null;
+      normalizedPayload?: Record<string, unknown>;
+      payloadHash?: string;
+    },
+    now: string
+  ): Promise<ConnectorSourceRecord> {
+    const existing = await this.findConnectorSourceRecord(userId, accountId, sourceExternalId);
+    if (!existing) throw new StoreError("not_found", "Connector source record not found");
+    const next: ConnectorSourceRecord = {
+      ...existing,
+      payloadHash: patch.payloadHash ?? existing.payloadHash,
+      normalizedPayload: patch.normalizedPayload ?? existing.normalizedPayload,
+      status: patch.status,
+      processedAt: now,
+      processingReason: patch.processingReason,
+      errorMessage: patch.errorMessage === undefined ? null : patch.errorMessage,
+      version: existing.version + 1
+    };
+    await this.db
+      .prepare(
+        `UPDATE connector_source_records
+         SET payload_hash = ?, normalized_payload_json = ?, status = ?, processed_at = ?,
+             processing_reason = ?, error_message = ?, version = ?
+         WHERE user_id = ? AND account_id = ? AND source_external_id = ?`
+      )
+      .bind(
+        next.payloadHash,
+        JSON.stringify(next.normalizedPayload),
+        next.status,
+        next.processedAt,
+        next.processingReason,
+        next.errorMessage,
+        next.version,
+        userId,
+        accountId,
+        sourceExternalId
+      )
+      .run();
+    return next;
   }
 
   async listConnectorSourceRecords(
@@ -2509,6 +2560,7 @@ function connectorSourceRecordFromRow(row: ConnectorSourceRecordRow): ConnectorS
     status: row.status,
     receivedAt: row.received_at,
     processedAt: row.processed_at,
+    processingReason: row.processing_reason,
     errorMessage: row.error_message,
     version: row.version
   };

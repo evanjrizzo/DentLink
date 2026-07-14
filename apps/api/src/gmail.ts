@@ -13,7 +13,12 @@ import {
 } from "./google";
 import { StoreError, type DentLinkStore } from "./storage";
 
-import type { ConnectorAccount, EntityId, GmailSyncResult } from "@dentlink/item-model";
+import type {
+  ConnectorAccount,
+  ConnectorSourceRecord,
+  EntityId,
+  GmailSyncResult
+} from "@dentlink/item-model";
 import type { ConnectorDefinition } from "@dentlink/connector-sdk";
 
 const GMAIL_CONNECTOR_KEY = "gmail";
@@ -236,35 +241,57 @@ export async function syncGmailAccount(
     const messages = await messagesForSync(gmail, token.accessToken, syncing.syncCursor);
     let processed = 0;
     let createdNotifications = 0;
+    const outcomes: GmailSyncResult["outcomes"] = [];
     let nextCursor = syncing.syncCursor;
     for (const messageId of messages.messageIds) {
-      const message = await gmail.getMessage(token.accessToken, messageId);
-      nextCursor = maxHistoryId(nextCursor, message.historyId);
-      const created = await ingestGmailMessage(store, userId, syncing, message, now);
       processed += 1;
-      if (created) createdNotifications += 1;
+      try {
+        const existingRecord = await store.findConnectorSourceRecord(userId, syncing.id, messageId);
+        if (existingRecord && !shouldRetryGmailSourceRecord(existingRecord.status)) {
+          outcomes.push({
+            messageId,
+            status: "duplicate",
+            reason: "Gmail message already has a source record",
+            recordId: existingRecord.id
+          });
+          continue;
+        }
+        const message = await gmail.getMessage(token.accessToken, messageId);
+        nextCursor = maxHistoryId(nextCursor, message.historyId);
+        const outcome = await ingestGmailMessage(store, userId, syncing, message, now);
+        outcomes.push(outcome);
+        if (outcome.status === "notification_created") createdNotifications += 1;
+      } catch (error) {
+        outcomes.push(
+          await recordGmailMessageFailure(store, userId, syncing, messageId, error, now)
+        );
+      }
     }
     nextCursor = messages.historyId ?? nextCursor;
     const latest = await store.getConnectorAccount(userId, account.id);
     if (!latest) throw new StoreError("not_found", "Gmail account not found");
+    const failed = outcomes.filter((outcome) => outcome.status === "failed");
     const updated = await store.updateConnectorAccount(
       userId,
       latest.id,
       latest.version,
       {
         status: "connected",
-        healthStatus: "healthy",
+        healthStatus: failed.length > 0 ? "degraded" : "healthy",
         syncStatus: "idle",
         syncCursor: nextCursor,
         lastSyncAt: now,
         lastHealthAt: now,
-        errorCode: null,
-        errorMessage: null
+        errorCode: failed.length > 0 ? "gmail_partial_sync_failed" : null,
+        errorMessage:
+          failed.length > 0
+            ? `${failed.length} Gmail message${failed.length === 1 ? "" : "s"} failed processing`
+            : null
       },
       now
     );
     if (!updated) throw new StoreError("not_found", "Gmail account not found");
-    return { account: updated, processed, createdNotifications };
+    return { account: updated, processed, createdNotifications, outcomes };
   } catch (error) {
     const latest = await store.getConnectorAccount(userId, account.id);
     if (latest) {
@@ -422,7 +449,7 @@ async function ingestGmailMessage(
   account: ConnectorAccount,
   message: GmailMessage,
   now: string
-): Promise<boolean> {
+): Promise<GmailSyncResult["outcomes"][number]> {
   const headers = headersByName(message);
   const subject = headers.get("subject") ?? "(no subject)";
   const sender = headers.get("from") ?? "Unknown sender";
@@ -446,19 +473,27 @@ async function ingestGmailMessage(
     permalink: gmailPermalink(message.threadId),
     connector_account: account.id
   };
-  const { created } = await store.createConnectorSourceRecordIfAbsent(
+  const payloadHash = await hashSessionToken(JSON.stringify(normalizedPayload));
+  const { record, created } = await store.createConnectorSourceRecordIfAbsent(
     userId,
     {
       accountId: account.id,
       sourceExternalId: message.id,
       sourceType: "email",
-      payloadHash: await hashSessionToken(JSON.stringify(normalizedPayload)),
+      payloadHash,
       normalizedPayload
     },
     now
   );
-  if (!created) return false;
-  await store.createNotification(
+  if (!created && record.status !== "failed") {
+    return {
+      messageId: message.id,
+      status: "duplicate",
+      reason: "Gmail message already has a source record",
+      recordId: record.id
+    };
+  }
+  const notification = await store.createNotification(
     userId,
     {
       title: subject,
@@ -471,7 +506,88 @@ async function ingestGmailMessage(
     },
     now
   );
-  return true;
+  const updatedPayload = {
+    ...normalizedPayload,
+    notification_id: notification.id
+  };
+  const updatedRecord = await store.updateConnectorSourceRecordProcessing(
+    userId,
+    account.id,
+    message.id,
+    {
+      status: "notification_created",
+      processingReason: "Created a Gmail notification",
+      normalizedPayload: updatedPayload,
+      payloadHash: await hashSessionToken(JSON.stringify(updatedPayload))
+    },
+    now
+  );
+  return {
+    messageId: message.id,
+    status: "notification_created",
+    reason: updatedRecord.processingReason ?? "Created a Gmail notification",
+    recordId: updatedRecord.id
+  };
+}
+
+async function recordGmailMessageFailure(
+  store: DentLinkStore,
+  userId: EntityId,
+  account: ConnectorAccount,
+  messageId: string,
+  error: unknown,
+  now: string
+): Promise<GmailSyncResult["outcomes"][number]> {
+  const existing = await store.findConnectorSourceRecord(userId, account.id, messageId);
+  if (existing && !shouldRetryGmailSourceRecord(existing.status)) {
+    return {
+      messageId,
+      status: "duplicate",
+      reason: "Gmail message already has a source record",
+      recordId: existing.id
+    };
+  }
+  const normalizedPayload = {
+    provider: "gmail",
+    provider_item_id: messageId,
+    connector_account: account.id
+  };
+  const payloadHash = await hashSessionToken(JSON.stringify(normalizedPayload));
+  const { record } = await store.createConnectorSourceRecordIfAbsent(
+    userId,
+    {
+      accountId: account.id,
+      sourceExternalId: messageId,
+      sourceType: "email",
+      payloadHash,
+      normalizedPayload
+    },
+    now
+  );
+  const message = safeErrorMessage(error);
+  const updated = await store.updateConnectorSourceRecordProcessing(
+    userId,
+    account.id,
+    messageId,
+    {
+      status: "failed",
+      processingReason: message,
+      errorMessage: message,
+      normalizedPayload: record.normalizedPayload,
+      payloadHash: record.payloadHash
+    },
+    now
+  );
+  return {
+    messageId,
+    status: "failed",
+    reason: updated.processingReason ?? message,
+    recordId: updated.id
+  };
+}
+
+function shouldRetryGmailSourceRecord(status: ConnectorSourceRecord["status"]): boolean {
+  return status === "pending" || status === "failed";
 }
 
 async function gmailRequest(

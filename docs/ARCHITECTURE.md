@@ -69,12 +69,17 @@ user data paths. OAuth callbacks link accounts server-side, encrypted refresh to
 connector credential storage, and Gmail messages are normalized into source records before creating
 DentLink notifications.
 
+Milestone 7 Phase 1 hardens Gmail ingestion before dashboard, ranking, or AI work. Each fetched
+Gmail message now records a source-record processing outcome such as `notification_created`,
+`duplicate`, or `failed` with a reason. Partial per-message failures do not hide successful
+notifications; the connector reports degraded health and keeps the failed source record visible for
+diagnostics and retry analysis.
+
 Milestone 4 adds Google Calendar using the same provider-neutral connector framework. Google
 Calendar OAuth links a calendar connector account, encrypted refresh tokens remain in connector
-credential storage, and synced event instances are normalized into `calendar_events` plus
-connector source records. Google Calendar remains authoritative: DentLink supports agenda viewing
-and local agenda dismissal only, not provider event creation, editing, deletion, RSVP, or attendee
-management.
+credential storage, and synced event instances are normalized into `calendar_events` plus connector
+source records. Google Calendar remains authoritative: DentLink supports agenda viewing and local
+agenda dismissal only, not provider event creation, editing, deletion, RSVP, or attendee management.
 
 Milestone 5 adds a provider-neutral local calendar foundation on top of the Google Calendar agenda.
 DentLink Local events use the shared normalized calendar event envelope with `source = 'local'`,

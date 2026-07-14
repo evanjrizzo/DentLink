@@ -89,16 +89,20 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
 - Milestone 3.1 Gmail synchronization uses the metadata-only Gmail scope, stores normalized headers
   and identifiers, and does not download attachments or message bodies. Gmail-created notifications
   use sender, subject, unread state, received metadata, connector reference, and a Gmail deep link.
+- Milestone 7 Phase 1 records safe per-message Gmail ingestion outcomes and reasons in source
+  records. It does not store raw message bodies, attachments, OAuth tokens, or provider credentials
+  in diagnostics. Partial message failures are surfaced through degraded connector health instead of
+  being treated as a healthy ingestion result.
 - Milestone 4 Google Calendar synchronization uses the read-only Calendar scope, stores normalized
   event metadata and provider identifiers, and does not create, edit, delete, RSVP to, or manage
   attendees on Google Calendar events. Calendar refresh tokens use the same AES-GCM encrypted
   connector credential storage as Gmail. Agenda dismissal is DentLink-local state only.
-- Milestone 5 ICS import accepts only authenticated, size-limited posted ICS text. DentLink does
-  not fetch remote ICS URLs, read local filesystem paths, or execute/render HTML from event
+- Milestone 5 ICS import accepts only authenticated, size-limited posted ICS text. DentLink does not
+  fetch remote ICS URLs, read local filesystem paths, or execute/render HTML from event
   descriptions. Imported URLs are validated before being stored as source links.
-- Milestone 5 local calendar event APIs reject provider ownership fields and require
-  server-resolved user scope plus version checks. Google Calendar event fields remain read-only;
-  DentLink annotations are stored separately and cannot mutate provider data.
+- Milestone 5 local calendar event APIs reject provider ownership fields and require server-resolved
+  user scope plus version checks. Google Calendar event fields remain read-only; DentLink
+  annotations are stored separately and cannot mutate provider data.
 - Milestone 5 ICS export emits only the authenticated user's allowed DentLink Local events by
   default and uses calendar download headers without exposing provider credentials or connector
   secrets.

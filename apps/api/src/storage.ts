@@ -122,6 +122,19 @@ export interface DentLinkStore {
     input: ConnectorSourceRecordInput,
     now: string
   ): Promise<{ record: ConnectorSourceRecord; created: boolean }>;
+  updateConnectorSourceRecordProcessing(
+    userId: EntityId,
+    accountId: EntityId,
+    sourceExternalId: string,
+    patch: {
+      status: ConnectorSourceRecord["status"];
+      processingReason: string;
+      errorMessage?: string | null;
+      normalizedPayload?: Record<string, unknown>;
+      payloadHash?: string;
+    },
+    now: string
+  ): Promise<ConnectorSourceRecord>;
   listConnectorSourceRecords(
     userId: EntityId,
     accountId: EntityId
@@ -655,6 +668,7 @@ export class MemoryDentLinkStore implements DentLinkStore {
       status: "pending",
       receivedAt: now,
       processedAt: null,
+      processingReason: null,
       errorMessage: null,
       version: 1
     };
@@ -688,6 +702,40 @@ export class MemoryDentLinkStore implements DentLinkStore {
     );
     if (existing) return { record: existing, created: false };
     return { record: await this.createConnectorSourceRecord(userId, input, now), created: true };
+  }
+
+  async updateConnectorSourceRecordProcessing(
+    userId: EntityId,
+    accountId: EntityId,
+    sourceExternalId: string,
+    patch: {
+      status: ConnectorSourceRecord["status"];
+      processingReason: string;
+      errorMessage?: string | null;
+      normalizedPayload?: Record<string, unknown>;
+      payloadHash?: string;
+    },
+    now: string
+  ): Promise<ConnectorSourceRecord> {
+    const existing = [...this.connectorSourceRecords.values()].find(
+      (item) =>
+        item.userId === userId &&
+        item.accountId === accountId &&
+        item.sourceExternalId === sourceExternalId
+    );
+    if (!existing) throw new StoreError("not_found", "Connector source record not found");
+    const next: ConnectorSourceRecord = {
+      ...existing,
+      payloadHash: patch.payloadHash ?? existing.payloadHash,
+      normalizedPayload: patch.normalizedPayload ?? existing.normalizedPayload,
+      status: patch.status,
+      processedAt: now,
+      processingReason: patch.processingReason,
+      errorMessage: patch.errorMessage === undefined ? null : patch.errorMessage,
+      version: existing.version + 1
+    };
+    this.connectorSourceRecords.set(next.id, next);
+    return copyConnectorSourceRecord(next);
   }
 
   async listConnectorSourceRecords(
