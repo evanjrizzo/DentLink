@@ -47,6 +47,17 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
+      - name: Build preview web client
+        run: pnpm --filter @dentlink/web build
+        env:
+          VITE_DENTLINK_API_BASE_URL: ${{ secrets.DENTLINK_PREVIEW_API_BASE_URL }}
+
+      - name: Deploy preview web client
+        run: pnpm deploy:web:preview
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
       - name: Smoke test preview API
         run: pnpm smoke:api
         env:

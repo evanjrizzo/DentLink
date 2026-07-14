@@ -16,6 +16,7 @@
     "db:migrate:production": "wrangler d1 migrations apply dentlink-production --env production --remote",
     "deploy:preview": "wrangler deploy --env preview",
     "deploy:production": "wrangler deploy --env production",
+    "deploy:web:preview": "wrangler pages deploy apps/web/dist --project-name dentlink-web-preview --branch development",
     "smoke:api": "node scripts/smoke-api.mjs",
     "format": "prettier --write \"**/*.{css,html,json,yaml,yml,js,mjs,ts,tsx}\"",
     "format:check": "prettier --check \"**/*.{css,html,json,yaml,yml,js,mjs,ts,tsx}\"",

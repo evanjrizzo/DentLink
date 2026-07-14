@@ -17,7 +17,8 @@ Use the project dependency rather than a global Wrangler installation.
 `wrangler.toml` defines three environments using the same `DB` binding name:
 
 - Local: `dentlink`, local D1 through `wrangler dev --local`.
-- Preview: `dentlink-api-preview`, D1 database `dentlink-preview`.
+- Preview API: `dentlink-api-preview`, D1 database `dentlink-preview`.
+- Preview web: Cloudflare Pages project `dentlink-web-preview`.
 - Production: `dentlink-api-production`, D1 database `dentlink-production`.
 
 The preview database ID is configured after creating `dentlink-preview`. The production database ID
@@ -53,9 +54,15 @@ Use these steps for the first real preview deployment. Do not reuse production i
 4. Replace the preview `database_id` in `wrangler.toml` if the preview database is recreated. Leave
    the production placeholder unchanged until production is intentionally configured.
 
-5. Replace `https://REPLACE_WITH_PREVIEW_WEB_ORIGIN` in `[env.preview.vars]` with the exact preview
-   web origin that will call the API. Use a comma-separated list for multiple preview origins. Do not
-   use `*` for preview or production.
+5. Set `[env.preview.vars].ALLOWED_ORIGINS` to the exact preview web origin that will call the API.
+   The Milestone 1.3 preview origin is:
+
+   ```text
+   https://dentlink-web-preview.pages.dev
+   ```
+
+   Use a comma-separated list only if there are multiple intentional preview origins. Do not use `*`
+   for preview or production.
 
 6. Apply remote preview migrations:
 
@@ -72,20 +79,31 @@ Use these steps for the first real preview deployment. Do not reuse production i
 8. Configure the web client to use the deployed preview API origin:
 
    ```bash
-   VITE_DENTLINK_API_BASE_URL=https://REPLACE_WITH_PREVIEW_WORKER_URL pnpm --filter @dentlink/web build
+   VITE_DENTLINK_API_BASE_URL=https://dentlink-api-preview.evanjrizzo.workers.dev pnpm --filter @dentlink/web build
+   pnpm deploy:web:preview
    ```
 
    For hosted web deployments, set `VITE_DENTLINK_API_BASE_URL` in the web hosting environment
    instead of committing it.
 
-9. Run the remote smoke test against the actual preview API URL:
+9. Run the remote API smoke test against the actual preview API URL:
 
    ```bash
-   DENTLINK_SMOKE_BASE_URL=https://REPLACE_WITH_PREVIEW_WORKER_URL pnpm smoke:api
+   DENTLINK_SMOKE_BASE_URL=https://dentlink-api-preview.evanjrizzo.workers.dev pnpm smoke:api
    ```
 
-10. If validation fails, redeploy the last known-good Worker version or disable the preview Worker
-    route. Do not run destructive database rollback automation.
+10. Verify the deployed web client in a browser at:
+
+    ```text
+    https://dentlink-web-preview.pages.dev
+    ```
+
+    Confirm registration, login, logout, refresh session restore, Notes CRUD, folders, tags, search,
+    reorder, pin, due date, priority, done state, and optimistic-concurrency conflict handling
+    against the preview API.
+
+11. If validation fails, redeploy the last known-good Worker or Pages deployment, or disable the
+    preview route. Do not run destructive database rollback automation.
 
 ## Configuration
 
@@ -143,6 +161,10 @@ Preview deployment is manual through the `Deploy Preview` workflow. Required Git
 preview workflow assumes `wrangler.toml` already contains the real preview D1 `database_id` and
 allowed web origin.
 
+The preview workflow also builds and deploys the Cloudflare Pages web client to
+`dentlink-web-preview` with `VITE_DENTLINK_API_BASE_URL` set from
+`DENTLINK_PREVIEW_API_BASE_URL`.
+
 Production deployment is manual through the `Deploy Production` workflow and requires typing
 `production`. Configure a protected GitHub `production` environment with required reviewers before
 using it. Required GitHub secrets:
@@ -165,6 +187,7 @@ or passwords.
 ## Rollback
 
 - Redeploy a known-good Worker version through Cloudflare or the deployment workflow.
+- Redeploy a known-good Pages deployment for preview web rollback.
 - Do not run destructive down migrations automatically.
 - Treat code rollback and database rollback separately.
 - If a migration fails, stop deployment, inspect D1 migration state, and preserve existing user

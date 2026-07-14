@@ -11,8 +11,8 @@ inspected only as behavioral references.
 
 ## Current status
 
-Milestone 1.2: authentication and manual Notes vertical slice with Cloudflare runtime and deployment
-baseline.
+Milestone 1.3: authentication and manual Notes vertical slice with Cloudflare preview API and web
+deployment baseline.
 
 This repository contains the pnpm TypeScript workspace, shared package boundaries, a Worker-style
 API handler, Cloudflare D1 storage adapter, D1 migration for auth and notes, shared

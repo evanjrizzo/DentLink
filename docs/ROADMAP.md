@@ -83,6 +83,18 @@ Exit criteria:
 - CI validates Worker and D1 migration setup without production secrets.
 - Preview and production workflows are explicit and safe.
 
+## Milestone 1.3: Preview web deployment and browser verification
+
+Status: implemented after Milestone 1.2.
+
+Scope:
+
+- Deploy the preview web client to Cloudflare Pages.
+- Configure preview API CORS for the deployed web origin.
+- Verify authentication, session restore, manual Notes workflows, and optimistic-concurrency
+  behavior in a real browser against the preview API.
+- Do not add Milestone 2 product functionality.
+
 ## Milestone 2: Named webhooks and Notifications
 
 Implement named webhook endpoints, normalized notification creation, webhook health/rate limiting,

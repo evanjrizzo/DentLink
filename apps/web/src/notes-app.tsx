@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactElement } from "react";
+import { useEffect, useMemo, useState, type ReactElement } from "react";
 
 import { DentLinkApiClient, DentLinkApiError } from "@dentlink/api-client";
 import type {
@@ -12,12 +12,17 @@ import type {
 import { NotesWorkspace } from "@dentlink/ui";
 
 const initialList: NotesList = { notes: [], folders: [], tags: [] };
+const SESSION_STORAGE_KEY = "dentlink.auth.session.v1";
 
 export function DentLinkNotesApp(): ReactElement {
   const [client] = useState(
-    () => new DentLinkApiClient({ baseUrl: import.meta.env.VITE_DENTLINK_API_BASE_URL ?? "" })
+    () =>
+      new DentLinkApiClient({
+        baseUrl: import.meta.env.VITE_DENTLINK_API_BASE_URL ?? "",
+        token: storedSession()?.session.token ?? null
+      })
   );
-  const [auth, setAuth] = useState<AuthSession | null>(null);
+  const [auth, setAuth] = useState<AuthSession | null>(() => storedSession());
   const [credentials, setCredentials] = useState({ email: "", password: "" });
   const [notesList, setNotesList] = useState<NotesList>(initialList);
   const [search, setSearch] = useState("");
@@ -26,6 +31,30 @@ export function DentLinkNotesApp(): ReactElement {
   const [error, setError] = useState<string | null>(null);
 
   const filteredNotes = useMemo(() => notesList.notes, [notesList.notes]);
+
+  useEffect(() => {
+    if (!auth) return;
+    let cancelled = false;
+    client
+      .currentSession()
+      .then(async (current) => {
+        if (cancelled) return;
+        setAuth({
+          user: current.user,
+          session: { token: auth.session.token, expiresAt: current.session.expiresAt }
+        });
+        await loadNotes("", null, []);
+      })
+      .catch((caught: unknown) => {
+        if (cancelled) return;
+        clearStoredSession();
+        handleFailure(caught);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Run once for the restored token. User-initiated auth paths load notes directly.
+  }, []);
 
   async function loadNotes(
     nextSearch = search,
@@ -48,6 +77,7 @@ export function DentLinkNotesApp(): ReactElement {
           ? await client.login(credentials.email, credentials.password)
           : await client.register(credentials.email, credentials.password);
       setAuth(session);
+      storeSession(session);
       await loadNotes("", null, []);
     } catch (caught) {
       handleFailure(caught);
@@ -57,6 +87,24 @@ export function DentLinkNotesApp(): ReactElement {
   async function createNote(input: NoteInput): Promise<void> {
     try {
       await client.createNote(input);
+      await loadNotes();
+    } catch (caught) {
+      handleFailure(caught);
+    }
+  }
+
+  async function createFolder(name: string): Promise<void> {
+    try {
+      await client.createFolder({ name });
+      await loadNotes();
+    } catch (caught) {
+      handleFailure(caught);
+    }
+  }
+
+  async function createTag(name: string): Promise<void> {
+    try {
+      await client.createTag({ name });
       await loadNotes();
     } catch (caught) {
       handleFailure(caught);
@@ -77,6 +125,36 @@ export function DentLinkNotesApp(): ReactElement {
     } catch (caught) {
       setNotesList(previous);
       handleFailure(caught);
+    }
+  }
+
+  async function deleteNote(note: Note): Promise<void> {
+    const previous = notesList;
+    setNotesList({
+      ...notesList,
+      notes: notesList.notes.filter((item) => item.id !== note.id)
+    });
+    try {
+      await client.deleteNote(note.id, note.version);
+      await loadNotes();
+    } catch (caught) {
+      setNotesList(previous);
+      handleFailure(caught);
+    }
+  }
+
+  async function logout(): Promise<void> {
+    try {
+      await client.logout();
+    } catch {
+      client.setToken(null);
+    } finally {
+      clearStoredSession();
+      setAuth(null);
+      setNotesList(initialList);
+      setSearch("");
+      setFolderId(null);
+      setTagIds([]);
     }
   }
 
@@ -103,6 +181,7 @@ export function DentLinkNotesApp(): ReactElement {
   function handleFailure(caught: unknown): void {
     if (caught instanceof DentLinkApiError && caught.status === 401) {
       client.setToken(null);
+      clearStoredSession();
       setAuth(null);
     }
     setError(messageFor(caught));
@@ -156,6 +235,7 @@ export function DentLinkNotesApp(): ReactElement {
       <header className="app-header">
         <strong>DentLink Notes</strong>
         <span>{auth.user.email}</span>
+        <button onClick={() => void logout()}>Log out</button>
       </header>
       {error ? (
         <p className="app-error" role="alert">
@@ -184,12 +264,35 @@ export function DentLinkNotesApp(): ReactElement {
           setTagIds(nextTagIds);
           void loadNotes(search, folderId, nextTagIds);
         }}
+        onCreateFolder={createFolder}
+        onCreateTag={createTag}
         onCreateNote={createNote}
         onUpdateNote={updateNote}
+        onDeleteNote={deleteNote}
         onReorderNotes={reorderNotes}
       />
     </>
   );
+}
+
+function storedSession(): AuthSession | null {
+  if (typeof window === "undefined") return null;
+  const stored = window.localStorage.getItem(SESSION_STORAGE_KEY);
+  if (!stored) return null;
+  try {
+    return JSON.parse(stored) as AuthSession;
+  } catch {
+    clearStoredSession();
+    return null;
+  }
+}
+
+function storeSession(session: AuthSession): void {
+  window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+}
+
+function clearStoredSession(): void {
+  if (typeof window !== "undefined") window.localStorage.removeItem(SESSION_STORAGE_KEY);
 }
 
 function messageFor(caught: unknown): string {

@@ -12,8 +12,11 @@ export type NotesWorkspaceProps = {
   onSearchChange: (search: string) => void;
   onFolderChange: (folderId: EntityId | null) => void;
   onTagToggle: (tagId: EntityId) => void;
+  onCreateFolder: (name: string) => Promise<void> | void;
+  onCreateTag: (name: string) => Promise<void> | void;
   onCreateNote: (input: NoteInput) => Promise<void> | void;
   onUpdateNote: (note: Note, patch: NotePatch) => Promise<void> | void;
+  onDeleteNote: (note: Note) => Promise<void> | void;
   onReorderNotes: (orderedNotes: Note[]) => Promise<void> | void;
 };
 
@@ -24,6 +27,8 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
     priority: "none",
     tagIds: []
   });
+  const [folderName, setFolderName] = useState("");
+  const [tagName, setTagName] = useState("");
   const sortedNotes = useMemo(() => [...props.notes].sort(compareNotes), [props.notes]);
 
   return (
@@ -39,6 +44,23 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
 
         <section>
           <h2>Folders</h2>
+          <form
+            className="inline-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!folderName.trim()) return;
+              void props.onCreateFolder(folderName);
+              setFolderName("");
+            }}
+          >
+            <input
+              aria-label="New folder name"
+              placeholder="New folder"
+              value={folderName}
+              onChange={(event) => setFolderName(event.currentTarget.value)}
+            />
+            <button type="submit">Add</button>
+          </form>
           <button
             className={!props.selectedFolderId ? "selected" : ""}
             onClick={() => props.onFolderChange(null)}
@@ -58,6 +80,23 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
 
         <section>
           <h2>Tags</h2>
+          <form
+            className="inline-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!tagName.trim()) return;
+              void props.onCreateTag(tagName);
+              setTagName("");
+            }}
+          >
+            <input
+              aria-label="New tag name"
+              placeholder="New tag"
+              value={tagName}
+              onChange={(event) => setTagName(event.currentTarget.value)}
+            />
+            <button type="submit">Add</button>
+          </form>
           {props.tags.map((tag) => (
             <label key={tag.id} className="check-row">
               <input
@@ -151,12 +190,72 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
               />
               <div className="note-meta">
                 <span>{note.kind}</span>
-                <span>{note.priority}</span>
-                {note.folderId ? (
-                  <span>{props.folders.find((folder) => folder.id === note.folderId)?.name}</span>
-                ) : null}
-                {note.tags.map((tag) => (
-                  <span key={tag.id}>{tag.name}</span>
+                <label>
+                  Priority
+                  <select
+                    aria-label={`Priority for ${note.title}`}
+                    value={note.priority}
+                    onChange={(event) =>
+                      void props.onUpdateNote(note, {
+                        priority: event.currentTarget.value as NoteInput["priority"]
+                      })
+                    }
+                  >
+                    <option value="none">None</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                  </select>
+                </label>
+                <label>
+                  Folder
+                  <select
+                    aria-label={`Folder for ${note.title}`}
+                    value={note.folderId ?? ""}
+                    onChange={(event) =>
+                      void props.onUpdateNote(note, {
+                        folderId: event.currentTarget.value || null
+                      })
+                    }
+                  >
+                    <option value="">No folder</option>
+                    {props.folders.map((folder) => (
+                      <option key={folder.id} value={folder.id}>
+                        {folder.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Due
+                  <input
+                    aria-label={`Due date for ${note.title}`}
+                    type="date"
+                    value={note.dueAt?.slice(0, 10) ?? ""}
+                    onChange={(event) =>
+                      void props.onUpdateNote(note, {
+                        dueAt: event.currentTarget.value
+                          ? `${event.currentTarget.value}T00:00:00.000Z`
+                          : null
+                      })
+                    }
+                  />
+                </label>
+                {props.tags.map((tag) => (
+                  <label key={tag.id} className="check-row">
+                    <input
+                      aria-label={`${tag.name} tag for ${note.title}`}
+                      type="checkbox"
+                      checked={note.tags.some((item) => item.id === tag.id)}
+                      onChange={(event) => {
+                        const tagIds = event.currentTarget.checked
+                          ? [...note.tags.map((item) => item.id), tag.id]
+                          : note.tags.filter((item) => item.id !== tag.id).map((item) => item.id);
+                        void props.onUpdateNote(note, { tagIds });
+                      }}
+                    />
+                    <span>{tag.name}</span>
+                  </label>
                 ))}
               </div>
               <div className="note-order">
@@ -178,6 +277,7 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
                 >
                   Down
                 </button>
+                <button onClick={() => void props.onDeleteNote(note)}>Delete</button>
               </div>
             </article>
           ))}

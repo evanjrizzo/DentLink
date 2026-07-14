@@ -22,7 +22,7 @@ preview_urls = true
 
 [env.preview.vars]
 DENTLINK_ENV = "preview"
-ALLOWED_ORIGINS = "https://REPLACE_WITH_PREVIEW_WEB_ORIGIN"
+ALLOWED_ORIGINS = "https://dentlink-web-preview.pages.dev"
 DENTLINK_BUILD_ID = "preview"
 
 [[env.preview.d1_databases]]

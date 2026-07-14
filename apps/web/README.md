@@ -16,3 +16,15 @@ calls.
 Preview and production builds use `VITE_DENTLINK_API_BASE_URL` to select the deployed API origin.
 This value is public client configuration, not a secret. Local Vite development can continue using
 the middleware-mounted `/v1` API when the variable is unset.
+
+The Milestone 1.3 preview web deployment is hosted on Cloudflare Pages:
+
+```text
+https://dentlink-web-preview.pages.dev
+```
+
+Build preview artifacts with the preview API URL injected:
+
+```bash
+VITE_DENTLINK_API_BASE_URL=https://dentlink-api-preview.evanjrizzo.workers.dev pnpm --filter @dentlink/web build
+```
