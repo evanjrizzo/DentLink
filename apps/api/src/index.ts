@@ -62,7 +62,7 @@ import {
 } from "./validation";
 
 import type { ConnectorDefinition } from "@dentlink/connector-sdk";
-import type { AuthSession, GmailRule, NoteConflict } from "@dentlink/item-model";
+import type { AuthSession, ConnectorAccount, GmailRule, NoteConflict } from "@dentlink/item-model";
 
 export type ApiEnv = GmailRuntimeEnv & {
   googleCalendarClient?: GoogleCalendarApiClient;
@@ -390,12 +390,14 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     const gmailEngineMatch = path.match(/^\/v1\/connectors\/gmail\/([^/]+)\/engine$/);
     if (gmailEngineMatch && method === "PUT") {
       return json(
-        await updateGmailEngine(
-          store,
-          auth.user.id,
-          gmailEngineMatch[1] ?? "",
-          parseGmailEngineBody(await readJson(request)),
-          now
+        gmailEngineResponse(
+          await updateGmailEngine(
+            store,
+            auth.user.id,
+            gmailEngineMatch[1] ?? "",
+            parseGmailEngineBody(await readJson(request)),
+            now
+          )
         )
       );
     }
@@ -764,6 +766,31 @@ function parseGmailEngineBody(value: unknown): GmailEngineUpdateInput {
     expectedVersion,
     engine,
     comparisonMode: input.comparisonMode
+  };
+}
+
+function gmailEngineResponse(account: ConnectorAccount): ConnectorAccount & {
+  requestedEngine: "gmail_api" | "gmail_imap";
+  activeEngine: "gmail_api" | "gmail_imap";
+  reconnectRequired: boolean;
+  verified: boolean;
+} {
+  const activeEngine =
+    account.settings.gmailIngestionEngine === "gmail_imap" ? "gmail_imap" : "gmail_api";
+  const requestedEngine =
+    account.settings.gmailRequestedIngestionEngine === "gmail_imap" || activeEngine === "gmail_imap"
+      ? "gmail_imap"
+      : "gmail_api";
+  const verified =
+    requestedEngine === "gmail_imap"
+      ? activeEngine === "gmail_imap" && account.settings.gmailImapGranted === true
+      : activeEngine === "gmail_api" && account.settings.gmailReadonlyGranted !== false;
+  return {
+    ...account,
+    requestedEngine,
+    activeEngine,
+    reconnectRequired: account.settings.gmailReconnectRequired === true,
+    verified
   };
 }
 

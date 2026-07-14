@@ -40,6 +40,13 @@ type GmailSyncUiState = {
   error: string | null;
 };
 
+type GmailEngineSaveState = {
+  engine: "gmail_api" | "gmail_imap";
+  comparisonMode: boolean;
+  saving: boolean;
+  error: string | null;
+};
+
 export function DentLinkNotesApp(): ReactElement {
   const [client] = useState(
     () =>
@@ -64,6 +71,9 @@ export function DentLinkNotesApp(): ReactElement {
   const [connectorAccounts, setConnectorAccounts] = useState<ConnectorAccount[]>([]);
   const [gmailDiagnostics, setGmailDiagnostics] = useState<Record<EntityId, GmailDiagnostics>>({});
   const [gmailSyncStates, setGmailSyncStates] = useState<Record<EntityId, GmailSyncUiState>>({});
+  const [gmailEngineSaveStates, setGmailEngineSaveStates] = useState<
+    Record<EntityId, GmailEngineSaveState>
+  >({});
   const [webhookDraft, setWebhookDraft] = useState({
     name: "",
     slug: "",
@@ -157,7 +167,12 @@ export function DentLinkNotesApp(): ReactElement {
     const requestId = (connectorsRequest.current += 1);
     const response = await client.listConnectorAccounts();
     if (requestId === connectorsRequest.current) {
-      setConnectorAccounts(response.accounts);
+      setConnectorAccounts((current) =>
+        response.accounts.map((incoming) => {
+          const existing = current.find((account) => account.id === incoming.id);
+          return existing && existing.version > incoming.version ? existing : incoming;
+        })
+      );
       await loadGmailDiagnosticsForAccounts(response.accounts);
     }
     return response.accounts;
@@ -457,23 +472,77 @@ export function DentLinkNotesApp(): ReactElement {
     engine: "gmail_api" | "gmail_imap",
     comparisonMode = account.settings.gmailImapComparisonMode === true
   ): Promise<void> {
+    const priorState = gmailEngineSaveStates[account.id] ?? null;
+    setGmailEngineSaveStates((current) => ({
+      ...current,
+      [account.id]: { engine, comparisonMode, saving: true, error: null }
+    }));
     try {
       setError(null);
-      const updated = await client.updateGmailEngine(account.id, {
-        expectedVersion: account.version,
-        engine,
-        comparisonMode
-      });
-      setConnectorAccounts((current) =>
-        current.map((item) => (item.id === updated.id ? updated : item))
-      );
-      const diagnostics = await client.getGmailDiagnostics(account.id).catch(() => null);
-      if (diagnostics)
-        setGmailDiagnostics((current) => ({ ...current, [account.id]: diagnostics }));
+      const updated = await saveGmailEngineSelection(account, engine, comparisonMode);
+      setConnectorAccounts((current) => mergeConnectorAccount(current, updated));
+      setGmailEngineSaveStates((current) => withoutKey(current, account.id));
+      await refreshGmailDiagnostics(account.id);
     } catch (caught) {
-      handleFailure(caught);
+      if (caught instanceof DentLinkApiError && caught.code === "version_mismatch") {
+        try {
+          const latestAccounts = await loadConnectors();
+          const latest = latestAccounts.find((item) => item.id === account.id);
+          if (!latest) throw caught;
+          const updated = await saveGmailEngineSelection(latest, engine, comparisonMode);
+          setConnectorAccounts((current) => mergeConnectorAccount(current, updated));
+          setGmailEngineSaveStates((current) => withoutKey(current, account.id));
+          await refreshGmailDiagnostics(account.id);
+          return;
+        } catch (retryError) {
+          const message = gmailEngineSaveMessageFor(retryError);
+          setGmailEngineSaveStates((current) => ({
+            ...current,
+            [account.id]: {
+              ...(priorState ?? {
+                engine: gmailSelectedEngine(account.settings),
+                comparisonMode: account.settings.gmailImapComparisonMode === true
+              }),
+              saving: false,
+              error: message
+            }
+          }));
+          setError(message);
+          return;
+        }
+      }
+      const message = gmailEngineSaveMessageFor(caught);
+      setGmailEngineSaveStates((current) => ({
+        ...current,
+        [account.id]: {
+          ...(priorState ?? {
+            engine: gmailSelectedEngine(account.settings),
+            comparisonMode: account.settings.gmailImapComparisonMode === true
+          }),
+          saving: false,
+          error: message
+        }
+      }));
+      setError(message);
       await loadConnectors().catch(() => undefined);
     }
+  }
+
+  async function saveGmailEngineSelection(
+    account: ConnectorAccount,
+    engine: "gmail_api" | "gmail_imap",
+    comparisonMode: boolean
+  ): Promise<ConnectorAccount> {
+    return client.updateGmailEngine(account.id, {
+      expectedVersion: account.version,
+      engine,
+      comparisonMode
+    });
+  }
+
+  async function refreshGmailDiagnostics(accountId: EntityId): Promise<void> {
+    const diagnostics = await client.getGmailDiagnostics(accountId).catch(() => null);
+    if (diagnostics) setGmailDiagnostics((current) => ({ ...current, [accountId]: diagnostics }));
   }
 
   async function disconnectGmail(account: ConnectorAccount): Promise<void> {
@@ -830,6 +899,7 @@ export function DentLinkNotesApp(): ReactElement {
           onDisconnectGmail={disconnectGmail}
           gmailDiagnostics={gmailDiagnostics}
           gmailSyncStates={gmailSyncStates}
+          gmailEngineSaveStates={gmailEngineSaveStates}
           onConnectGoogleCalendar={connectGoogleCalendar}
           onReconnectGoogleCalendar={(account) => connectGoogleCalendar(account.id)}
           onSyncGoogleCalendar={syncGoogleCalendar}
@@ -2091,6 +2161,25 @@ function nextFrame(): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, 80));
 }
 
+function mergeConnectorAccount(
+  accounts: ConnectorAccount[],
+  updated: ConnectorAccount
+): ConnectorAccount[] {
+  let found = false;
+  const merged = accounts.map((account) => {
+    if (account.id !== updated.id) return account;
+    found = true;
+    return updated;
+  });
+  return found ? merged : [...merged, updated];
+}
+
+function withoutKey<T>(record: Record<EntityId, T>, key: EntityId): Record<EntityId, T> {
+  const next = { ...record };
+  delete next[key];
+  return next;
+}
+
 function exportGmailDiagnostics(
   account: ConnectorAccount,
   diagnostics: GmailDiagnostics | undefined
@@ -2140,6 +2229,7 @@ function ConnectorsView(props: {
   accounts: ConnectorAccount[];
   gmailDiagnostics: Record<EntityId, GmailDiagnostics>;
   gmailSyncStates: Record<EntityId, GmailSyncUiState>;
+  gmailEngineSaveStates: Record<EntityId, GmailEngineSaveState>;
   onConnectGmail: () => Promise<void>;
   onReconnectGmail: (account: ConnectorAccount) => Promise<void>;
   onSyncGmail: (account: ConnectorAccount) => Promise<void>;
@@ -2177,6 +2267,7 @@ function ConnectorsView(props: {
             account={account}
             diagnostics={props.gmailDiagnostics[account.id]}
             syncState={props.gmailSyncStates[account.id]}
+            engineSaveState={props.gmailEngineSaveStates[account.id]}
             onSync={props.onSyncGmail}
             onReconnect={props.onReconnectGmail}
             onUpdateEngine={props.onUpdateGmailEngine}
@@ -2216,6 +2307,7 @@ function GmailConnectorCard(props: {
   account: ConnectorAccount;
   diagnostics: GmailDiagnostics | undefined;
   syncState: GmailSyncUiState | undefined;
+  engineSaveState: GmailEngineSaveState | undefined;
   onSync: (account: ConnectorAccount) => Promise<void>;
   onReconnect: (account: ConnectorAccount) => Promise<void>;
   onUpdateEngine: (
@@ -2225,9 +2317,13 @@ function GmailConnectorCard(props: {
   ) => Promise<void>;
   onDisconnect: (account: ConnectorAccount) => Promise<void>;
 }): ReactElement {
-  const selectedEngine = gmailSelectedEngine(props.account.settings);
+  const selectedEngine =
+    props.engineSaveState?.engine ?? gmailSelectedEngine(props.account.settings);
   const activeEngine = gmailActiveEngine(props.account.settings);
-  const comparisonMode = props.account.settings.gmailImapComparisonMode === true;
+  const comparisonMode =
+    props.engineSaveState?.comparisonMode ??
+    props.account.settings.gmailImapComparisonMode === true;
+  const savingEngine = props.engineSaveState?.saving === true;
   const reconnectRequired =
     props.account.settings.gmailReconnectRequired === true || selectedEngine !== activeEngine;
   const engineVerified =
@@ -2292,6 +2388,7 @@ function GmailConnectorCard(props: {
         Gmail Ingestion Engine
         <select
           value={selectedEngine}
+          disabled={savingEngine}
           onChange={(event) =>
             void props.onUpdateEngine(
               props.account,
@@ -2304,11 +2401,20 @@ function GmailConnectorCard(props: {
           <option value="gmail_imap">Gmail IMAP (Preview)</option>
         </select>
       </label>
+      {savingEngine ? (
+        <p className="connector-progress" role="status">
+          Saving...
+        </p>
+      ) : null}
+      {props.engineSaveState?.error ? (
+        <p className="connector-warning">{props.engineSaveState.error}</p>
+      ) : null}
       {selectedEngine === "gmail_imap" ? (
         <label>
           <input
             type="checkbox"
             checked={comparisonMode}
+            disabled={savingEngine}
             onChange={(event) =>
               void props.onUpdateEngine(props.account, "gmail_imap", event.currentTarget.checked)
             }
@@ -2568,6 +2674,20 @@ function safeGmailStatusMessage(message: string, engine: "gmail_api" | "gmail_im
       : "Temporary Gmail API sync error. Check diagnostics and try Sync Now again.";
   }
   return message;
+}
+
+function gmailEngineSaveMessageFor(caught: unknown): string {
+  if (caught instanceof DentLinkApiError) {
+    if (caught.code === "version_mismatch") {
+      return "Gmail connector changed while saving. Refresh and try again.";
+    }
+    if (caught.code === "invalid_gmail_engine")
+      return "Gmail ingestion engine selection is invalid.";
+    if (caught.status === 401) return "Sign in again before changing the Gmail ingestion engine.";
+    return caught.message;
+  }
+  if (caught instanceof Error) return caught.message;
+  return "Gmail ingestion engine selection could not be saved.";
 }
 
 function gmailSyncMessageFor(caught: unknown, engine: "gmail_api" | "gmail_imap"): string {

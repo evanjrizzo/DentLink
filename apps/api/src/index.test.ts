@@ -1025,13 +1025,57 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       { store, ...env }
     );
     const linked = (await callback.json()) as { account: ConnectorAccount };
+    const pendingEngine = await requestJson<
+      ConnectorAccount & {
+        requestedEngine: "gmail_api" | "gmail_imap";
+        activeEngine: "gmail_api" | "gmail_imap";
+        reconnectRequired: boolean;
+        verified: boolean;
+      }
+    >(
+      store,
+      "PUT",
+      `/v1/connectors/gmail/${linked.account.id}/engine`,
+      { expectedVersion: linked.account.version, engine: "gmail_imap", comparisonMode: true },
+      owner.session.token,
+      200,
+      env
+    );
+    expect(pendingEngine).toMatchObject({
+      requestedEngine: "gmail_imap",
+      activeEngine: "gmail_api",
+      reconnectRequired: true,
+      verified: false
+    });
+    expect(pendingEngine.settings).toMatchObject({
+      gmailIngestionEngine: "gmail_api",
+      gmailRequestedIngestionEngine: "gmail_imap",
+      gmailImapComparisonMode: true,
+      gmailReconnectRequired: true
+    });
+
+    const reloadedPending = await requestJson<{ accounts: ConnectorAccount[] }>(
+      store,
+      "GET",
+      "/v1/connectors/accounts",
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(reloadedPending.accounts[0]?.settings).toMatchObject({
+      gmailIngestionEngine: "gmail_api",
+      gmailRequestedIngestionEngine: "gmail_imap",
+      gmailReconnectRequired: true
+    });
+
     const granted = await store.updateConnectorAccount(
       owner.user.id,
       linked.account.id,
-      linked.account.version,
+      pendingEngine.version,
       {
         settings: {
-          ...linked.account.settings,
+          ...pendingEngine.settings,
           gmailGrantedScopes: "https://mail.google.com/",
           gmailImapGranted: true,
           gmailReconnectRequired: false

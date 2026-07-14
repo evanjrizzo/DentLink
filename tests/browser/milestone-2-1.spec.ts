@@ -243,6 +243,8 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       version: 1
     };
     let notifications: unknown[] = [];
+    let engineUpdateAttempts = 0;
+    let serveStaleConnectorList = false;
     let gmailDiagnostics = {
       account: gmailAccount,
       summary: {
@@ -288,6 +290,23 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         return;
       }
       if (method === "GET" && path === "/v1/connectors/accounts") {
+        if (serveStaleConnectorList) {
+          serveStaleConnectorList = false;
+          await fulfillJson(route, {
+            accounts: [
+              {
+                ...gmailAccount,
+                version: gmailAccount.version - 1,
+                settings: {
+                  googleEmail: "gmail-refresh@example.invalid",
+                  gmailIngestionEngine: "gmail_api",
+                  gmailReadonlyGranted: true
+                }
+              }
+            ]
+          });
+          return;
+        }
         await fulfillJson(route, { accounts: [gmailAccount] });
         return;
       }
@@ -297,10 +316,42 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       }
       if (method === "PUT" && path === `/v1/connectors/gmail/${gmailAccount.id}/engine`) {
         const body = (await request.postDataJSON()) as {
+          expectedVersion?: number;
           engine: "gmail_api" | "gmail_imap";
           comparisonMode?: boolean;
         };
         const updatedAt = new Date().toISOString();
+        engineUpdateAttempts += 1;
+        if (engineUpdateAttempts === 1 && body.engine === "gmail_imap") {
+          gmailAccount.version += 1;
+          await fulfillJson(
+            route,
+            {
+              error: {
+                code: "version_mismatch",
+                message: "Connector account changed on the server"
+              }
+            },
+            409
+          );
+          return;
+        }
+        if (
+          typeof body.expectedVersion === "number" &&
+          body.expectedVersion !== gmailAccount.version
+        ) {
+          await fulfillJson(
+            route,
+            {
+              error: {
+                code: "version_mismatch",
+                message: "Connector account changed on the server"
+              }
+            },
+            409
+          );
+          return;
+        }
         gmailAccount.settings = {
           ...gmailAccount.settings,
           gmailRequestedIngestionEngine: body.engine,
@@ -318,7 +369,9 @@ test.describe("Milestone 2.1 preview browser verification", () => {
             : null;
         gmailAccount.updatedAt = updatedAt;
         gmailAccount.version += 1;
+        if (body.engine === "gmail_imap") serveStaleConnectorList = true;
         gmailDiagnostics = { ...gmailDiagnostics, account: gmailAccount };
+        await new Promise((resolve) => setTimeout(resolve, 150));
         await fulfillJson(route, gmailAccount);
         return;
       }
@@ -460,13 +513,26 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       page.getByText("Next Scheduled Sync: Within 5 minutes after activation")
     ).toBeVisible();
     await page.getByLabel("Gmail Ingestion Engine").selectOption("gmail_imap");
+    await expect(page.getByText("Saving...")).toBeVisible();
     await expect(
       page.getByText("Reconnect Required. IMAP requires Gmail mail access")
     ).toBeVisible();
+    await expect(page.getByLabel("Gmail Ingestion Engine")).toHaveValue("gmail_imap");
     await expect(page.getByLabel("Enable preview comparison mode")).toBeVisible();
     await expect(page.getByText("Requested Engine: Gmail IMAP (Preview)")).toBeVisible();
     await expect(page.getByText("Active Engine: Gmail API")).toBeVisible();
     await expect(page.getByText("Reason: Reconnect required")).toBeVisible();
+    await expect(page.getByText("Reconnect Required: Yes")).toBeVisible();
+    await expect(page.getByText("Verified: No")).toBeVisible();
+    expect(engineUpdateAttempts).toBe(2);
+    await page.getByRole("button", { name: "Refresh" }).click();
+    await expect(page.getByLabel("Gmail Ingestion Engine")).toHaveValue("gmail_imap");
+    await expect(page.getByText("Requested Engine: Gmail IMAP (Preview)")).toBeVisible();
+    await page.reload();
+    await expect(page.getByRole("button", { name: "Connectors" })).toBeVisible();
+    await page.getByRole("button", { name: "Connectors" }).click();
+    await expect(page.getByLabel("Gmail Ingestion Engine")).toHaveValue("gmail_imap");
+    await expect(page.getByText("Requested Engine: Gmail IMAP (Preview)")).toBeVisible();
     await page.getByLabel("Enable preview comparison mode").click();
     await expect(page.getByLabel("Enable preview comparison mode")).toBeChecked();
 
