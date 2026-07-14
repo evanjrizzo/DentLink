@@ -11,14 +11,16 @@ inspected only as behavioral references.
 
 ## Current status
 
-Milestone 3: authentication, manual Notes, named webhook ingestion, Notifications, and
-provider-neutral connector plumbing with a Cloudflare preview API and web deployment baseline.
+Milestone 3.1: authentication, manual Notes, named webhook ingestion, Notifications,
+provider-neutral connector plumbing, and the first Gmail connector with a Cloudflare preview API and
+web deployment baseline.
 
 This repository contains the pnpm TypeScript workspace, shared package boundaries, a Worker-style
 API handler, Cloudflare D1 storage adapter, D1 migrations for auth, notes, notifications, and
-webhooks, shared auth/note/notification/sync/conflict types, a typed API client, a small sync
-helper, and a responsive web UI shell. It does not yet contain email connectors, calendar providers,
-Tauri, Android, or AI calls.
+webhooks, connector framework tables, Gmail credential storage, shared
+auth/note/notification/sync/conflict types, a typed API client, a small sync helper, and a
+responsive web UI shell. It does not yet contain Google Calendar, Microsoft 365, Outlook, IMAP,
+Tauri, Android, push notifications, widgets, or AI calls.
 
 ## Product shape
 
@@ -95,9 +97,9 @@ pnpm validate
 
 The validation command checks formatting, linting, TypeScript, and tests across the workspace. The
 API test suite runs the same storage contract tests against the in-memory adapter and the
-D1-compatible adapter. The Milestone 3 connector framework stores connector account metadata and
-normalized source records, but does not implement Gmail, Google Calendar, Outlook, Microsoft Graph,
-IMAP, AI summaries, mobile, desktop, widgets, or push notifications.
+D1-compatible adapter. Gmail tests use a fake Gmail client and verify OAuth state handling,
+encrypted credential storage, idempotent sync, notification mapping, and disconnect behavior without
+requiring real Google credentials.
 
 Use Node.js `22.13.1` and pnpm `9.15.4`. Run the API locally against Wrangler's local D1 binding
 with:
@@ -119,9 +121,14 @@ Migration validation can also be run directly with:
 sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0001_auth_notes.sql
 sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0002_notifications_webhooks.sql
 sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0003_connector_framework.sql
+sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0004_gmail_connector.sql
 sqlite3 /tmp/dentlink_m3_migration_check.db "PRAGMA foreign_key_check;"
 sqlite3 /tmp/dentlink_m3_migration_check.db "PRAGMA integrity_check;"
 ```
+
+Gmail OAuth requires Google Cloud OAuth credentials and Worker secrets before real authorization can
+be completed. See `docs/DEPLOYMENT.md` for `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
+`GOOGLE_REDIRECT_URI`, and `GMAIL_CREDENTIAL_ENCRYPTION_KEY` setup.
 
 Deployment, preview, production, smoke-test, and rollback instructions live in `docs/DEPLOYMENT.md`.
 Repeatable preview browser verification is available with:

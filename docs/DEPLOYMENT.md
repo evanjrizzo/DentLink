@@ -1,7 +1,8 @@
 # Deployment
 
 DentLink targets Cloudflare Workers with D1. The runtime baseline is shared by the Milestone 1 Notes
-slice, the Milestone 2 Notifications/webhook slice, and the Milestone 3 connector framework.
+slice, the Milestone 2 Notifications/webhook slice, the Milestone 3 connector framework, and the
+Milestone 3.1 Gmail connector.
 
 ## Runtime
 
@@ -112,15 +113,57 @@ Non-secret Worker variables:
 - `DENTLINK_ENV`: `local`, `preview`, or `production`.
 - `ALLOWED_ORIGINS`: comma-separated web origins allowed to call the API.
 - `DENTLINK_BUILD_ID`: safe build identifier.
+- `GOOGLE_REDIRECT_URI`: OAuth callback URL, for example
+  `https://dentlink-api-preview.evanjrizzo.workers.dev/v1/connectors/gmail/callback`.
+- `DENTLINK_WEB_ORIGIN`: exact web origin allowed for Gmail OAuth return redirects.
+
+Worker secrets for Gmail:
+
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `GMAIL_CREDENTIAL_ENCRYPTION_KEY`
+
+`GMAIL_CREDENTIAL_ENCRYPTION_KEY` must be a base64 or base64url value that decodes to 32 bytes.
+Generate it outside the repository and store it with Wrangler secrets or local `.dev.vars`.
 
 Client-side Vite variable:
 
 - `VITE_DENTLINK_API_BASE_URL`: API origin for preview or production web builds.
 
-Current runtime does not require committed secrets. Use `.dev.vars` for local non-committed Worker
-values and Wrangler secrets for future secret values. `.dev.vars` and `.dev.vars.*` are ignored by
-Git. Webhook endpoint secrets are generated through the API and stored only as server-side hashes;
-they are not Worker environment secrets.
+Use `.dev.vars` for local non-committed Worker values and Wrangler secrets for preview/production.
+`.dev.vars` and `.dev.vars.*` are ignored by Git. Webhook endpoint secrets are generated through the
+API and stored only as server-side hashes; they are not Worker environment secrets.
+
+## Gmail OAuth Setup
+
+Create a Google Cloud OAuth client for a web application:
+
+1. Configure the OAuth consent screen for Gmail metadata access.
+2. Add the Gmail API to the Google Cloud project.
+3. Add the authorized redirect URI:
+
+   ```text
+   https://dentlink-api-preview.evanjrizzo.workers.dev/v1/connectors/gmail/callback
+   ```
+
+4. Store the Google values without printing them:
+
+   ```bash
+   pnpm exec wrangler secret put GOOGLE_CLIENT_ID --env preview
+   pnpm exec wrangler secret put GOOGLE_CLIENT_SECRET --env preview
+   pnpm exec wrangler secret put GMAIL_CREDENTIAL_ENCRYPTION_KEY --env preview
+   ```
+
+5. Set `GOOGLE_REDIRECT_URI` and `DENTLINK_WEB_ORIGIN` for preview before deploying.
+
+The Gmail connector requests only:
+
+```text
+https://www.googleapis.com/auth/gmail.metadata
+```
+
+Disconnect removes encrypted credentials and pauses the account metadata. Reconnect starts OAuth
+with the account ID and replaces the stored encrypted refresh token.
 
 ## Local Development
 
@@ -145,9 +188,9 @@ pnpm db:migrate:production
 ```
 
 Production migrations are explicit and manual. Do not add destructive production reset scripts.
-Milestone 2 adds `0002_notifications_webhooks.sql`; Milestone 3 adds
-`0003_connector_framework.sql`. Apply migrations to preview before deploying code that uses the
-corresponding sync change types.
+Milestone 2 adds `0002_notifications_webhooks.sql`; Milestone 3 adds `0003_connector_framework.sql`;
+Milestone 3.1 adds `0004_gmail_connector.sql`. Apply migrations to preview before deploying code
+that uses the corresponding sync change types.
 
 ## Workflows
 
@@ -185,8 +228,9 @@ DENTLINK_SMOKE_BASE_URL=http://127.0.0.1:8787 pnpm smoke:api
 ```
 
 The script creates temporary users, notes, notifications, webhooks, and generic connector records
-through the public API. It does not print bearer tokens, passwords, webhook secrets, or connector
-credential references.
+through the public API. It also checks that Gmail OAuth start returns a controlled response when
+Google secrets are absent. It does not print bearer tokens, passwords, webhook secrets, OAuth state
+values, or connector credential references.
 
 ## Browser Verification
 

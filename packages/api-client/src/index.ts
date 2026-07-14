@@ -10,6 +10,7 @@ import type {
   CurrentSession,
   EntityId,
   Folder,
+  GmailSyncResult,
   Notification,
   NotificationInput,
   NotificationPatch,
@@ -150,6 +151,22 @@ export class DentLinkApiClient {
     return this.request<{ connectors: ConnectorDefinition[] }>("/v1/connectors/catalog");
   }
 
+  async startGmailOAuth(
+    options: {
+      returnTo?: string;
+      accountId?: EntityId;
+    } = {}
+  ): Promise<{ authorizationUrl: string; expiresAt: string }> {
+    const params = new URLSearchParams();
+    if (options.returnTo) params.set("returnTo", options.returnTo);
+    if (options.accountId) params.set("accountId", options.accountId);
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    return this.request<{ authorizationUrl: string; expiresAt: string }>(
+      `/v1/connectors/gmail/start${suffix}`,
+      { method: "POST" }
+    );
+  }
+
   async listConnectorAccounts(): Promise<ConnectorAccountsList> {
     return this.request<ConnectorAccountsList>("/v1/connectors/accounts");
   }
@@ -197,6 +214,18 @@ export class DentLinkApiClient {
     return this.request<{ records: ConnectorSourceRecord[] }>(
       `/v1/connectors/accounts/${accountId}/source-records`
     );
+  }
+
+  async syncGmailAccount(accountId: EntityId): Promise<GmailSyncResult> {
+    return this.request<GmailSyncResult>(`/v1/connectors/gmail/${accountId}/sync`, {
+      method: "POST"
+    });
+  }
+
+  async disconnectGmailAccount(accountId: EntityId): Promise<ConnectorAccount> {
+    return this.request<ConnectorAccount>(`/v1/connectors/gmail/${accountId}/disconnect`, {
+      method: "POST"
+    });
   }
 
   async listNotifications(): Promise<NotificationsList> {

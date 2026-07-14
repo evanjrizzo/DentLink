@@ -6,7 +6,8 @@ import { describe, expect, it } from "vitest";
 
 import { hashPassword, hashSessionToken } from "./auth";
 import { D1DentLinkStore } from "./d1-storage";
-import { handleApiRequest } from "./index";
+import type { GmailApiClient } from "./gmail";
+import { handleApiRequest, type ApiEnv } from "./index";
 import { SqliteD1TestDatabase } from "./sqlite-d1-test";
 import { MemoryDentLinkStore, type DentLinkStore } from "./storage";
 
@@ -41,6 +42,10 @@ const milestone3SchemaPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../migrations/0003_connector_framework.sql"
 );
+const milestone31SchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0004_gmail_connector.sql"
+);
 
 type StoreFixture = {
   name: string;
@@ -63,7 +68,12 @@ const fixtures: StoreFixture[] = [
   {
     name: "d1",
     createStore() {
-      const db = new SqliteD1TestDatabase([schemaPath, milestone2SchemaPath, milestone3SchemaPath]);
+      const db = new SqliteD1TestDatabase([
+        schemaPath,
+        milestone2SchemaPath,
+        milestone3SchemaPath,
+        milestone31SchemaPath
+      ]);
       return {
         store: new D1DentLinkStore(db),
         async hasRawSessionToken(token: string) {
@@ -404,7 +414,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     );
   });
 
-  it("manages provider-neutral connector accounts without provider-specific APIs", async () => {
+  it("manages connector accounts while rejecting out-of-scope providers", async () => {
     const { store } = createStore();
     const owner = await register(store, "connector-owner@example.com");
     const other = await register(store, "connector-other@example.com");
@@ -417,18 +427,19 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       owner.session.token
     );
     expect(catalog.connectors.map((connector) => connector.key)).toEqual([
+      "gmail",
       "generic-email",
       "generic-calendar"
     ]);
-    expect(JSON.stringify(catalog)).not.toMatch(/gmail|outlook|imap|graph/i);
+    expect(JSON.stringify(catalog)).not.toMatch(/outlook|imap|graph|calendar api/i);
 
     const rejected = await requestJson<ApiErrorBody>(
       store,
       "POST",
       "/v1/connectors/accounts",
       {
-        connectorKey: "gmail",
-        displayName: "Gmail should wait"
+        connectorKey: "outlook",
+        displayName: "Outlook should wait"
       },
       owner.session.token,
       400
@@ -571,6 +582,165 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       owner.session.token
     );
     expect(afterDelete.accounts.map((item) => item.id)).not.toContain(account.id);
+  });
+
+  it("links Gmail with OAuth state, encrypted credentials, idempotent sync, and disconnect", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-owner@example.com");
+    const other = await register(store, "gmail-other@example.com");
+    const gmailClient = fakeGmailClient();
+    const env = gmailTestEnv(gmailClient);
+
+    const start = await requestJson<{ authorizationUrl: string; expiresAt: string }>(
+      store,
+      "POST",
+      "/v1/connectors/gmail/start?returnTo=https%3A%2F%2Fweb.example.test%2Fconnectors",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const authorizationUrl = new URL(start.authorizationUrl);
+    expect(authorizationUrl.origin).toBe("https://accounts.google.com");
+    expect(authorizationUrl.searchParams.get("scope")).toBe(
+      "https://www.googleapis.com/auth/gmail.metadata"
+    );
+    expect(authorizationUrl.searchParams.get("access_type")).toBe("offline");
+    expect(authorizationUrl.searchParams.get("state")).toMatch(/^gmail_oauth_/);
+
+    const bypass = await requestJson<ApiErrorBody>(
+      store,
+      "POST",
+      "/v1/connectors/accounts",
+      {
+        connectorKey: "gmail",
+        displayName: "Bypass",
+        credentialRef: "raw-reference"
+      },
+      owner.session.token,
+      400
+    );
+    expect(bypass.error.code).toBe("gmail_oauth_required");
+
+    const callback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${authorizationUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    expect(callback.status).toBe(200);
+    const linked = (await callback.json()) as { account: ConnectorAccount };
+    expect(linked.account.connectorKey).toBe("gmail");
+    expect(linked.account.status).toBe("connected");
+    expect(linked.account.credentialStatus).toBe("configured");
+    expect(JSON.stringify(linked)).not.toContain("refresh-token-secret");
+
+    const replay = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${authorizationUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    expect(replay.status).toBe(400);
+
+    const sync = await requestJson<{
+      account: ConnectorAccount;
+      processed: number;
+      createdNotifications: number;
+    }>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(sync.processed).toBe(1);
+    expect(sync.createdNotifications).toBe(1);
+    expect(sync.account.syncCursor).toBe("101");
+    expect(sync.account.healthStatus).toBe("healthy");
+
+    const secondSync = await requestJson<typeof sync>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(secondSync.createdNotifications).toBe(0);
+
+    const records = await requestJson<{ records: ConnectorSourceRecord[] }>(
+      store,
+      "GET",
+      `/v1/connectors/accounts/${linked.account.id}/source-records`,
+      undefined,
+      owner.session.token
+    );
+    expect(records.records).toHaveLength(1);
+    expect(records.records[0]?.normalizedPayload).toMatchObject({
+      provider: "gmail",
+      provider_item_id: "gmail-message-1",
+      history_id: "101",
+      thread_id: "gmail-thread-1",
+      message_id: "<message-1@example.test>",
+      unread: true,
+      connector_account: linked.account.id
+    });
+    expect(JSON.stringify(records)).not.toContain("refresh-token-secret");
+
+    const notifications = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(notifications.notifications).toHaveLength(1);
+    expect(notifications.notifications[0]).toMatchObject({
+      source: "connector",
+      sourceLabel: "Gmail",
+      title: "Insurance update",
+      summary: "Front Desk <front@example.test> · unread"
+    });
+
+    await requestJson<ApiErrorBody>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/sync`,
+      undefined,
+      other.session.token,
+      404,
+      env
+    );
+
+    const disconnected = await requestJson<ConnectorAccount>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/disconnect`,
+      undefined,
+      owner.session.token
+    );
+    expect(disconnected.credentialStatus).toBe("not_configured");
+    expect(disconnected.credentialRef).toBeNull();
+
+    await requestJson<ApiErrorBody>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/sync`,
+      undefined,
+      owner.session.token,
+      409,
+      env
+    );
   });
 
   it("persists and resolves conflicts with version checks and history", async () => {
@@ -1014,13 +1184,76 @@ function debugSessions(store: MemoryDentLinkStore): Map<string, unknown> {
   return (store as unknown as { sessions: Map<string, unknown> }).sessions;
 }
 
+function gmailTestEnv(gmailClient: GmailApiClient): Partial<ApiEnv> {
+  return {
+    GOOGLE_CLIENT_ID: "test-client-id",
+    GOOGLE_CLIENT_SECRET: "test-client-secret",
+    GOOGLE_REDIRECT_URI: "https://api.dentlink.test/v1/connectors/gmail/callback",
+    GMAIL_CREDENTIAL_ENCRYPTION_KEY: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+    DENTLINK_WEB_ORIGIN: "https://web.example.test",
+    gmailClient
+  };
+}
+
+function fakeGmailClient(): GmailApiClient {
+  return {
+    async exchangeCode(code) {
+      expect(code).toBe("valid-code");
+      return { accessToken: "access-token", refreshToken: "refresh-token-secret" };
+    },
+    async refreshAccessToken(refreshToken) {
+      expect(refreshToken).toBe("refresh-token-secret");
+      return { accessToken: "access-token-refreshed" };
+    },
+    async getProfile() {
+      return { emailAddress: "owner.gmail@example.test", historyId: "100" };
+    },
+    async listMessages() {
+      return { messages: [{ id: "gmail-message-1", threadId: "gmail-thread-1" }] };
+    },
+    async listHistory(_accessToken, startHistoryId) {
+      if (startHistoryId === "100") {
+        return {
+          historyId: "101",
+          history: [
+            {
+              id: "101",
+              messagesAdded: [{ message: { id: "gmail-message-1", threadId: "gmail-thread-1" } }]
+            }
+          ]
+        };
+      }
+      return { historyId: startHistoryId, history: [] };
+    },
+    async getMessage(_accessToken, messageId) {
+      expect(messageId).toBe("gmail-message-1");
+      return {
+        id: "gmail-message-1",
+        threadId: "gmail-thread-1",
+        historyId: "101",
+        internalDate: "1783980000000",
+        labelIds: ["INBOX", "UNREAD"],
+        payload: {
+          headers: [
+            { name: "From", value: "Front Desk <front@example.test>" },
+            { name: "Subject", value: "Insurance update" },
+            { name: "Date", value: "Tue, 14 Jul 2026 10:00:00 -0400" },
+            { name: "Message-ID", value: "<message-1@example.test>" }
+          ]
+        }
+      };
+    }
+  };
+}
+
 async function requestJson<T>(
   store: DentLinkStore,
   method: string,
   path: string,
   body?: unknown,
   token?: string,
-  expectedStatus = 200
+  expectedStatus = 200,
+  env: Partial<ApiEnv> = {}
 ): Promise<T> {
   const headers = new Headers();
   if (body !== undefined) headers.set("Content-Type", "application/json");
@@ -1031,7 +1264,7 @@ async function requestJson<T>(
       headers,
       body: body === undefined ? undefined : JSON.stringify(body)
     }),
-    { store }
+    { store, ...env }
   );
   expect(response.status).toBe(expectedStatus);
   return (await response.json()) as T;

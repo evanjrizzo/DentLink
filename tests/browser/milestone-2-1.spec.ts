@@ -177,6 +177,12 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await page.getByRole("button", { name: "Notes" }).click();
     await expect(noteCard(page, webhookNote)).toBeVisible();
 
+    await page.getByRole("button", { name: "Connectors" }).click();
+    await expect(page.getByRole("button", { name: "Connect Gmail" })).toBeVisible();
+    await expect(page.getByText("No Gmail accounts connected.")).toBeVisible();
+    await page.getByRole("button", { name: "Connect Gmail" }).click();
+    await expect(page.getByRole("alert")).toContainText(/GOOGLE_CLIENT_ID|GOOGLE_CLIENT_SECRET/);
+
     await page.getByRole("button", { name: "Log out" }).click();
     await expect(page.getByRole("button", { name: "Register" })).toBeVisible();
     await page.evaluate(() => {

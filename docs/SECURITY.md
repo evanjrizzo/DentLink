@@ -24,8 +24,8 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
 
 ## Passwords
 
-- Milestone 1 hashes passwords with Web Crypto PBKDF2-SHA-256, per-password random salt, and
-  100,000 iterations, the Cloudflare Workers Web Crypto maximum for PBKDF2.
+- Milestone 1 hashes passwords with Web Crypto PBKDF2-SHA-256, per-password random salt, and 100,000
+  iterations, the Cloudflare Workers Web Crypto maximum for PBKDF2.
 - Password hashes, salts, and iteration counts are stored separately from user-facing session
   payloads.
 - Plaintext passwords are accepted only at registration/login request boundaries and are never
@@ -55,11 +55,19 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   once at endpoint creation.
 - D1 and in-memory storage keep only the SHA-256 hash of webhook secrets. Raw webhook secrets are
   not listed, synced, or logged.
-- Milestone 3 connector accounts store credential references and credential status only. They do
-  not store or return raw OAuth tokens, refresh tokens, passwords, provider API keys, hashes, salts,
-  or authorization headers.
+- Milestone 3 connector accounts store credential references and credential status only. They do not
+  store or return raw OAuth tokens, refresh tokens, passwords, provider API keys, hashes, salts, or
+  authorization headers.
 - Provider-specific credential encryption and rotation remain required before any real provider
   connector, such as Gmail, is implemented.
+- Milestone 3.1 stores Gmail refresh tokens only in `connector_credentials` after AES-GCM
+  encryption. `connector_accounts` stores only a credential reference and credential status.
+- `GMAIL_CREDENTIAL_ENCRYPTION_KEY` must be supplied as a Worker secret or local `.dev.vars` value
+  and must decode to 32 bytes. Do not commit it. Rotation is handled by writing newly encrypted
+  credentials with a higher encryption version in a future migration, then re-encrypting accounts
+  during reconnect or a controlled maintenance task.
+- Gmail OAuth state values are high-entropy random values. Only SHA-256 state hashes are stored
+  server-side, and state records expire after 10 minutes and are consumed once.
 
 ## Webhooks and source content
 
@@ -78,6 +86,9 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
 - Milestone 3 source records store normalized payload metadata for connector bookkeeping. Raw
   provider payload retention, attachment handling, and replay/idempotency behavior must be defined
   by future provider connectors before they ingest real external content.
+- Milestone 3.1 Gmail synchronization uses the metadata-only Gmail scope, stores normalized headers
+  and identifiers, and does not download attachments or message bodies. Gmail-created notifications
+  use sender, subject, unread state, received metadata, connector reference, and a Gmail deep link.
 
 ## Local agents and platform actions
 

@@ -243,16 +243,30 @@ async function main() {
   const catalog = await request("/v1/connectors/catalog", { headers: auth(tokenA) });
   assert(
     catalog.status === 200 &&
+      catalog.json?.connectors?.some((connector) => connector.key === "gmail") &&
       catalog.json?.connectors?.some((connector) => connector.key === "generic-email") &&
-      !JSON.stringify(catalog.json).match(/gmail|outlook|imap|graph/i),
+      !JSON.stringify(catalog.json).match(/outlook|imap|graph/i),
     "connector catalog failed",
     catalog
+  );
+
+  const gmailStart = await request(
+    `/v1/connectors/gmail/start?returnTo=${encodeURIComponent("https://dentlink-web-preview.pages.dev/connectors")}`,
+    {
+      method: "POST",
+      headers: auth(tokenA)
+    }
+  );
+  assert(
+    gmailStart.status === 201 || gmailStart.status === 503,
+    "gmail oauth start did not return a controlled response",
+    gmailStart
   );
 
   const rejectedProvider = await request("/v1/connectors/accounts", {
     method: "POST",
     headers: auth(tokenA),
-    body: { connectorKey: "gmail", displayName: "Should not exist" }
+    body: { connectorKey: "outlook", displayName: "Should not exist" }
   });
   assert(
     rejectedProvider.status === 400,

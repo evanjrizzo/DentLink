@@ -3,6 +3,9 @@ import type {
   ConnectorAccount,
   ConnectorAccountInput,
   ConnectorAccountPatch,
+  ConnectorCredential,
+  ConnectorCredentialKind,
+  ConnectorOAuthState,
   ConnectorSourceRecord,
   ConnectorSourceRecordInput,
   CurrentSession,
@@ -83,6 +86,7 @@ export interface DentLinkStore {
     input: ConnectorAccountInput,
     now: string
   ): Promise<ConnectorAccount>;
+  getConnectorAccount(userId: EntityId, accountId: EntityId): Promise<ConnectorAccount | null>;
   updateConnectorAccount(
     userId: EntityId,
     accountId: EntityId,
@@ -101,10 +105,52 @@ export interface DentLinkStore {
     input: ConnectorSourceRecordInput,
     now: string
   ): Promise<ConnectorSourceRecord>;
+  findConnectorSourceRecord(
+    userId: EntityId,
+    accountId: EntityId,
+    sourceExternalId: string
+  ): Promise<ConnectorSourceRecord | null>;
+  createConnectorSourceRecordIfAbsent(
+    userId: EntityId,
+    input: ConnectorSourceRecordInput,
+    now: string
+  ): Promise<{ record: ConnectorSourceRecord; created: boolean }>;
   listConnectorSourceRecords(
     userId: EntityId,
     accountId: EntityId
   ): Promise<ConnectorSourceRecord[]>;
+  createConnectorOAuthState(
+    userId: EntityId,
+    input: {
+      stateHash: string;
+      connectorKey: string;
+      reconnectAccountId?: EntityId | null;
+      returnTo?: string | null;
+      expiresAt: string;
+    },
+    now: string
+  ): Promise<ConnectorOAuthState>;
+  consumeConnectorOAuthState(
+    stateHash: string,
+    connectorKey: string,
+    now: string
+  ): Promise<ConnectorOAuthState | null>;
+  upsertConnectorCredential(
+    userId: EntityId,
+    accountId: EntityId,
+    input: {
+      kind: ConnectorCredentialKind;
+      encryptedValue: string;
+      encryptionVersion: number;
+    },
+    now: string
+  ): Promise<ConnectorCredential>;
+  getConnectorCredential(
+    userId: EntityId,
+    accountId: EntityId,
+    kind: ConnectorCredentialKind
+  ): Promise<ConnectorCredential | null>;
+  deleteConnectorCredentials(userId: EntityId, accountId: EntityId): Promise<void>;
   listNotifications(userId: EntityId): Promise<{ notifications: Notification[] }>;
   createNotification(
     userId: EntityId,
@@ -170,6 +216,8 @@ export class MemoryDentLinkStore implements DentLinkStore {
   private tags = new Map<EntityId, Tag>();
   private connectorAccounts = new Map<EntityId, ConnectorAccount>();
   private connectorSourceRecords = new Map<EntityId, ConnectorSourceRecord>();
+  private connectorOAuthStates = new Map<string, ConnectorOAuthState>();
+  private connectorCredentials = new Map<EntityId, ConnectorCredential>();
   private notifications = new Map<EntityId, Notification>();
   private webhooks = new Map<EntityId, WebhookEndpoint & { secretHash: string }>();
   private webhookDeliveries: Array<{
@@ -454,6 +502,15 @@ export class MemoryDentLinkStore implements DentLinkStore {
     return { ...account, settings: { ...account.settings } };
   }
 
+  async getConnectorAccount(
+    userId: EntityId,
+    accountId: EntityId
+  ): Promise<ConnectorAccount | null> {
+    const account = this.connectorAccounts.get(accountId);
+    if (!account || account.userId !== userId || account.status === "deleted") return null;
+    return { ...account, settings: { ...account.settings } };
+  }
+
   async updateConnectorAccount(
     userId: EntityId,
     accountId: EntityId,
@@ -546,6 +603,34 @@ export class MemoryDentLinkStore implements DentLinkStore {
     return copyConnectorSourceRecord(record);
   }
 
+  async findConnectorSourceRecord(
+    userId: EntityId,
+    accountId: EntityId,
+    sourceExternalId: string
+  ): Promise<ConnectorSourceRecord | null> {
+    const record = [...this.connectorSourceRecords.values()].find(
+      (item) =>
+        item.userId === userId &&
+        item.accountId === accountId &&
+        item.sourceExternalId === sourceExternalId
+    );
+    return record ? copyConnectorSourceRecord(record) : null;
+  }
+
+  async createConnectorSourceRecordIfAbsent(
+    userId: EntityId,
+    input: ConnectorSourceRecordInput,
+    now: string
+  ): Promise<{ record: ConnectorSourceRecord; created: boolean }> {
+    const existing = await this.findConnectorSourceRecord(
+      userId,
+      input.accountId,
+      input.sourceExternalId
+    );
+    if (existing) return { record: existing, created: false };
+    return { record: await this.createConnectorSourceRecord(userId, input, now), created: true };
+  }
+
   async listConnectorSourceRecords(
     userId: EntityId,
     accountId: EntityId
@@ -556,6 +641,94 @@ export class MemoryDentLinkStore implements DentLinkStore {
       .filter((record) => record.userId === userId && record.accountId === accountId)
       .sort((left, right) => left.receivedAt.localeCompare(right.receivedAt))
       .map(copyConnectorSourceRecord);
+  }
+
+  async createConnectorOAuthState(
+    userId: EntityId,
+    input: {
+      stateHash: string;
+      connectorKey: string;
+      reconnectAccountId?: EntityId | null;
+      returnTo?: string | null;
+      expiresAt: string;
+    },
+    now: string
+  ): Promise<ConnectorOAuthState> {
+    const state: ConnectorOAuthState = {
+      id: this.nextId("oauth-state"),
+      userId,
+      stateHash: input.stateHash,
+      connectorKey: input.connectorKey,
+      reconnectAccountId: input.reconnectAccountId ?? null,
+      returnTo: input.returnTo ?? null,
+      createdAt: now,
+      expiresAt: input.expiresAt
+    };
+    this.connectorOAuthStates.set(state.stateHash, state);
+    return { ...state };
+  }
+
+  async consumeConnectorOAuthState(
+    stateHash: string,
+    connectorKey: string,
+    now: string
+  ): Promise<ConnectorOAuthState | null> {
+    const state = this.connectorOAuthStates.get(stateHash);
+    if (!state || state.connectorKey !== connectorKey || state.expiresAt <= now) return null;
+    this.connectorOAuthStates.delete(stateHash);
+    return { ...state };
+  }
+
+  async upsertConnectorCredential(
+    userId: EntityId,
+    accountId: EntityId,
+    input: {
+      kind: ConnectorCredentialKind;
+      encryptedValue: string;
+      encryptionVersion: number;
+    },
+    now: string
+  ): Promise<ConnectorCredential> {
+    const account = await this.getConnectorAccount(userId, accountId);
+    if (!account) throw new StoreError("not_found", "Connector account not found");
+    const existing = [...this.connectorCredentials.values()].find(
+      (credential) =>
+        credential.userId === userId &&
+        credential.accountId === accountId &&
+        credential.kind === input.kind
+    );
+    const credential: ConnectorCredential = {
+      id: existing?.id ?? this.nextId("credential"),
+      userId,
+      accountId,
+      connectorKey: account.connectorKey,
+      kind: input.kind,
+      encryptedValue: input.encryptedValue,
+      encryptionVersion: input.encryptionVersion,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now
+    };
+    this.connectorCredentials.set(credential.id, credential);
+    return { ...credential };
+  }
+
+  async getConnectorCredential(
+    userId: EntityId,
+    accountId: EntityId,
+    kind: ConnectorCredentialKind
+  ): Promise<ConnectorCredential | null> {
+    const credential = [...this.connectorCredentials.values()].find(
+      (item) => item.userId === userId && item.accountId === accountId && item.kind === kind
+    );
+    return credential ? { ...credential } : null;
+  }
+
+  async deleteConnectorCredentials(userId: EntityId, accountId: EntityId): Promise<void> {
+    for (const credential of this.connectorCredentials.values()) {
+      if (credential.userId === userId && credential.accountId === accountId) {
+        this.connectorCredentials.delete(credential.id);
+      }
+    }
   }
 
   async listNotifications(userId: EntityId): Promise<{ notifications: Notification[] }> {

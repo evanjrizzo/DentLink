@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { DentLinkApiClient, DentLinkApiError } from "@dentlink/api-client";
 import type {
   AuthSession,
+  ConnectorAccount,
   EntityId,
   Notification,
   NotificationInput,
@@ -18,7 +19,7 @@ import { NotesWorkspace } from "@dentlink/ui";
 
 const initialList: NotesList = { notes: [], folders: [], tags: [] };
 const SESSION_STORAGE_KEY = "dentlink.auth.session.v1";
-type View = "notifications" | "notes" | "webhooks";
+type View = "notifications" | "notes" | "webhooks" | "connectors";
 
 export function DentLinkNotesApp(): ReactElement {
   const [client] = useState(
@@ -33,6 +34,7 @@ export function DentLinkNotesApp(): ReactElement {
   const [notesList, setNotesList] = useState<NotesList>(initialList);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [webhooks, setWebhooks] = useState<Array<WebhookEndpoint & { ingestUrl: string }>>([]);
+  const [connectorAccounts, setConnectorAccounts] = useState<ConnectorAccount[]>([]);
   const [webhookDraft, setWebhookDraft] = useState({
     name: "",
     slug: "",
@@ -48,6 +50,7 @@ export function DentLinkNotesApp(): ReactElement {
   const notesRequest = useRef(0);
   const notificationsRequest = useRef(0);
   const webhooksRequest = useRef(0);
+  const connectorsRequest = useRef(0);
 
   const filteredNotes = useMemo(() => notesList.notes, [notesList.notes]);
 
@@ -65,6 +68,7 @@ export function DentLinkNotesApp(): ReactElement {
         await loadNotes("", null, []);
         await loadNotifications();
         await loadWebhooks();
+        await loadConnectors();
       })
       .catch((caught: unknown) => {
         if (cancelled) return;
@@ -103,6 +107,12 @@ export function DentLinkNotesApp(): ReactElement {
     if (requestId === webhooksRequest.current) setWebhooks(response.webhooks);
   }
 
+  async function loadConnectors(): Promise<void> {
+    const requestId = (connectorsRequest.current += 1);
+    const response = await client.listConnectorAccounts();
+    if (requestId === connectorsRequest.current) setConnectorAccounts(response.accounts);
+  }
+
   async function authenticate(mode: "login" | "register"): Promise<void> {
     try {
       setError(null);
@@ -115,6 +125,7 @@ export function DentLinkNotesApp(): ReactElement {
       await loadNotes("", null, []);
       await loadNotifications();
       await loadWebhooks();
+      await loadConnectors();
     } catch (caught) {
       handleFailure(caught);
     }
@@ -309,6 +320,39 @@ export function DentLinkNotesApp(): ReactElement {
     return true;
   }
 
+  async function connectGmail(accountId?: EntityId): Promise<void> {
+    try {
+      setError(null);
+      const returnTo = window.location.origin + window.location.pathname;
+      const response = await client.startGmailOAuth({ returnTo, accountId });
+      window.location.assign(response.authorizationUrl);
+    } catch (caught) {
+      handleFailure(caught);
+    }
+  }
+
+  async function syncGmail(account: ConnectorAccount): Promise<void> {
+    try {
+      setError(null);
+      await client.syncGmailAccount(account.id);
+      await loadConnectors();
+      await loadNotifications();
+    } catch (caught) {
+      handleFailure(caught);
+      await loadConnectors().catch(() => undefined);
+    }
+  }
+
+  async function disconnectGmail(account: ConnectorAccount): Promise<void> {
+    try {
+      setError(null);
+      await client.disconnectGmailAccount(account.id);
+      await loadConnectors();
+    } catch (caught) {
+      handleFailure(caught);
+    }
+  }
+
   async function logout(): Promise<void> {
     try {
       await client.logout();
@@ -320,6 +364,7 @@ export function DentLinkNotesApp(): ReactElement {
       setNotesList(initialList);
       setNotifications([]);
       setWebhooks([]);
+      setConnectorAccounts([]);
       setLastWebhookSecret(null);
       setSearch("");
       setFolderId(null);
@@ -419,6 +464,12 @@ export function DentLinkNotesApp(): ReactElement {
           >
             Webhooks
           </button>
+          <button
+            className={view === "connectors" ? "selected" : ""}
+            onClick={() => setView("connectors")}
+          >
+            Connectors
+          </button>
         </nav>
         <span>{auth.user.email}</span>
         <button onClick={() => void logout()}>Log out</button>
@@ -480,6 +531,16 @@ export function DentLinkNotesApp(): ReactElement {
           onUpdateWebhook={updateWebhook}
           onDeleteWebhook={deleteWebhook}
           onRefreshWebhooks={loadWebhooks}
+        />
+      ) : null}
+      {view === "connectors" ? (
+        <ConnectorsView
+          accounts={connectorAccounts}
+          onConnectGmail={connectGmail}
+          onReconnectGmail={(account) => connectGmail(account.id)}
+          onSyncGmail={syncGmail}
+          onDisconnectGmail={disconnectGmail}
+          onRefreshConnectors={loadConnectors}
         />
       ) : null}
     </>
@@ -723,6 +784,52 @@ function WebhooksView(props: {
               </button>
               <button type="button" onClick={() => void props.onDeleteWebhook(webhook)}>
                 Delete
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
+    </main>
+  );
+}
+
+function ConnectorsView(props: {
+  accounts: ConnectorAccount[];
+  onConnectGmail: () => Promise<void>;
+  onReconnectGmail: (account: ConnectorAccount) => Promise<void>;
+  onSyncGmail: (account: ConnectorAccount) => Promise<void>;
+  onDisconnectGmail: (account: ConnectorAccount) => Promise<void>;
+  onRefreshConnectors: () => Promise<void>;
+}): ReactElement {
+  const gmailAccounts = props.accounts.filter((account) => account.connectorKey === "gmail");
+  return (
+    <main className="webhooks-shell">
+      <div className="note-toolbar">
+        <button onClick={() => void props.onRefreshConnectors()}>Refresh</button>
+        <button onClick={() => void props.onConnectGmail()}>Connect Gmail</button>
+      </div>
+      {gmailAccounts.length === 0 ? <p>No Gmail accounts connected.</p> : null}
+      <div className="note-list">
+        {gmailAccounts.map((account) => (
+          <article key={account.id} className="notification-card">
+            <strong>{account.displayName}</strong>
+            <span>Status: {account.status}</span>
+            <span>Health: {account.healthStatus}</span>
+            <span>Sync: {account.syncStatus}</span>
+            <span>
+              Last sync:{" "}
+              {account.lastSyncAt ? new Date(account.lastSyncAt).toLocaleString() : "Never"}
+            </span>
+            {account.errorMessage ? <p>{account.errorMessage}</p> : null}
+            <div className="note-order">
+              <button type="button" onClick={() => void props.onSyncGmail(account)}>
+                Sync Now
+              </button>
+              <button type="button" onClick={() => void props.onReconnectGmail(account)}>
+                Reconnect
+              </button>
+              <button type="button" onClick={() => void props.onDisconnectGmail(account)}>
+                Disconnect
               </button>
             </div>
           </article>

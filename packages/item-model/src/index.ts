@@ -43,6 +43,7 @@ export type ConnectorHealthStatus = "unknown" | "healthy" | "degraded" | "error"
 export type ConnectorSyncStatus = "idle" | "syncing" | "error";
 export type ConnectorSourceRecordType = "email" | "calendar_event" | "notification" | "generic";
 export type ConnectorSourceRecordStatus = "pending" | "processed" | "failed";
+export type ConnectorCredentialKind = "oauth_refresh_token";
 
 export type Folder = {
   id: EntityId;
@@ -144,7 +145,7 @@ export type Notification = {
   title: string;
   summary: string;
   body: string;
-  source: "webhook" | "manual" | "system";
+  source: "webhook" | "manual" | "system" | "connector";
   sourceLabel: string;
   sourceUrl: string | null;
   severity: NotificationSeverity;
@@ -299,6 +300,35 @@ export type ConnectorSourceRecordInput = {
   sourceType: ConnectorSourceRecordType;
   payloadHash: string;
   normalizedPayload: Record<string, unknown>;
+};
+
+export type ConnectorCredential = {
+  id: EntityId;
+  userId: EntityId;
+  accountId: EntityId;
+  connectorKey: string;
+  kind: ConnectorCredentialKind;
+  encryptedValue: string;
+  encryptionVersion: number;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+};
+
+export type ConnectorOAuthState = {
+  id: EntityId;
+  userId: EntityId;
+  stateHash: string;
+  connectorKey: string;
+  reconnectAccountId: EntityId | null;
+  returnTo: string | null;
+  createdAt: IsoDateTime;
+  expiresAt: IsoDateTime;
+};
+
+export type GmailSyncResult = {
+  account: ConnectorAccount;
+  processed: number;
+  createdNotifications: number;
 };
 
 export type ConnectorAccountsList = {

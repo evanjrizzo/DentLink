@@ -7,6 +7,6 @@ schema contracts, health metadata, and capability flags. It must not execute arb
 connector code inside the primary Worker.
 
 Milestone 3 includes generic email and generic calendar catalog entries so the API, storage, and
-typed client can validate connector account plumbing before a real provider exists. Provider keys
-such as Gmail, Google Calendar, Outlook, Microsoft Graph, and IMAP are intentionally absent until
-their own milestones implement them through this framework.
+typed client can validate connector account plumbing. Milestone 3.1 adds Gmail as the first real
+provider connector. Google Calendar, Outlook, Microsoft Graph, and IMAP remain intentionally absent
+until their own milestones implement them through this framework.

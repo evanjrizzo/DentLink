@@ -108,13 +108,13 @@ Implemented scope:
   last-triggered health metadata.
 - Public webhook ingest endpoint using `X-DentLink-Webhook-Secret`, validated normalized payloads,
   accepted delivery recording, and per-endpoint accepted delivery rate limiting.
-- D1 migration for notifications, webhook endpoints, webhook deliveries, and sync change support
-  for notification/webhook changes.
+- D1 migration for notifications, webhook endpoints, webhook deliveries, and sync change support for
+  notification/webhook changes.
 - Shared types, typed API client methods, storage contract coverage for memory and D1 adapters, and
   web UI tabs for Notifications and Webhooks.
 
-Out of scope and still not implemented: email connectors, calendar providers, provider OAuth,
-AI calls, Tauri, Android, widgets, and richer ranking models.
+Out of scope and still not implemented: email connectors, calendar providers, provider OAuth, AI
+calls, Tauri, Android, widgets, and richer ranking models.
 
 ## Milestone 2.1: Browser verification and webhook hardening
 
@@ -153,8 +153,24 @@ IMAP, AI summaries, ranking changes, mobile, desktop, widgets, and push notifica
 
 ## Milestone 3.1: Gmail connector
 
-Implement Gmail as the first real connector using the Milestone 3 framework. Gmail must not be
-special-cased outside the connector abstraction.
+Status: implemented.
+
+Implemented scope:
+
+- Gmail OAuth authorization start and callback endpoints with server-side CSRF state storage.
+- Gmail account linking, reconnect, manual sync, status refresh, and disconnect using the Milestone
+  3 connector account framework.
+- Encrypted refresh-token storage in a separate connector credential table; connector accounts keep
+  credential references only.
+- Gmail metadata synchronization using history ID checkpoints, pagination-aware API clients,
+  idempotent source-record ingestion, connector health/status transitions, and notification
+  creation.
+- Minimal web Connectors page for Connect Gmail, Sync Now, Reconnect, Disconnect, Last Sync, Status,
+  Health, and Error display.
+
+Out of scope and still not implemented: Google Calendar, Microsoft Graph, Outlook, IMAP, AI
+summaries, attachments, email sending, notification ranking changes, widgets, desktop features,
+Android, and push notifications.
 
 ## Milestone 4: Calendar foundation and ICS
 

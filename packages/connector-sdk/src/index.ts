@@ -25,6 +25,15 @@ export type ConnectorDefinition = {
 
 export const connectorCatalog = [
   {
+    key: "gmail",
+    name: "Gmail",
+    kind: "email",
+    authType: "oauth2",
+    capabilities: ["poll", "normalize_notifications"],
+    settings: [],
+    version: 1
+  },
+  {
     key: "generic-email",
     name: "Generic Email Connector",
     kind: "email",

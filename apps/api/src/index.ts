@@ -8,6 +8,16 @@ import {
 } from "./auth";
 import { MemoryDentLinkStore, StoreError, type DentLinkStore } from "./storage";
 import {
+  completeGmailOAuth,
+  disconnectGmailAccount,
+  GmailConfigError,
+  gmailConnectorDefinition,
+  startGmailOAuth,
+  syncGmailAccount,
+  type GmailApiClient,
+  type GmailRuntimeEnv
+} from "./gmail";
+import {
   parseConnectorAccountInput,
   parseConnectorAccountPatch,
   parseConnectorSourceRecordInput,
@@ -31,17 +41,19 @@ import {
 import type { ConnectorDefinition } from "@dentlink/connector-sdk";
 import type { AuthSession, NoteConflict } from "@dentlink/item-model";
 
-export type ApiEnv = {
+export type ApiEnv = GmailRuntimeEnv & {
   store?: DentLinkStore;
   DB?: D1DatabaseLike;
   DENTLINK_ENV?: string;
   ALLOWED_ORIGINS?: string;
   DENTLINK_BUILD_ID?: string;
+  gmailClient?: GmailApiClient;
 };
 
 const defaultStore = new MemoryDentLinkStore();
 
 const connectorCatalog: ConnectorDefinition[] = [
+  gmailConnectorDefinition(),
   {
     key: "generic-email",
     name: "Generic email connector",
@@ -170,6 +182,17 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
       );
     }
 
+    if (method === "GET" && path === "/v1/connectors/gmail/callback") {
+      const result = await completeGmailOAuth(store, env, url, now);
+      if (request.headers.get("Accept")?.includes("application/json")) {
+        return json({ account: result.account });
+      }
+      const redirectTo = result.returnTo
+        ? withOAuthResult(result.returnTo, "connected")
+        : `${url.origin}/v1/connectors/accounts`;
+      return new Response(null, { status: 303, headers: { Location: redirectTo } });
+    }
+
     const token = bearerToken(request);
     const tokenHash = token ? await hashSessionToken(token) : null;
     const auth = tokenHash ? await store.findSessionByTokenHash(tokenHash, now) : null;
@@ -237,6 +260,9 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     if (method === "GET" && path === "/v1/connectors/catalog") {
       return json({ connectors: connectorCatalog });
     }
+    if (method === "POST" && path === "/v1/connectors/gmail/start") {
+      return json(await startGmailOAuth(store, auth.user.id, env, url, now), 201);
+    }
     if (method === "GET" && path === "/v1/connectors/accounts") {
       return json(await store.listConnectorAccounts(auth.user.id));
     }
@@ -244,6 +270,9 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
       const input = parseConnectorAccountInput(await readJson(request));
       if (!connectorByKey(input.connectorKey)) {
         return error("unknown_connector", "Connector is not available", 400);
+      }
+      if (input.connectorKey === "gmail") {
+        return error("gmail_oauth_required", "Use the Gmail OAuth flow to connect Gmail", 400);
       }
       return json(await store.createConnectorAccount(auth.user.id, input, now), 201);
     }
@@ -289,6 +318,16 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
           now
         ),
         201
+      );
+    }
+    const gmailSyncMatch = path.match(/^\/v1\/connectors\/gmail\/([^/]+)\/sync$/);
+    if (gmailSyncMatch && method === "POST") {
+      return json(await syncGmailAccount(store, auth.user.id, gmailSyncMatch[1] ?? "", env, now));
+    }
+    const gmailDisconnectMatch = path.match(/^\/v1\/connectors\/gmail\/([^/]+)\/disconnect$/);
+    if (gmailDisconnectMatch && method === "POST") {
+      return json(
+        await disconnectGmailAccount(store, auth.user.id, gmailDisconnectMatch[1] ?? "", now)
       );
     }
     if (method === "GET" && path === "/v1/notifications") {
@@ -408,6 +447,8 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     return error("not_found", "Endpoint not found", 404);
   } catch (caught) {
     if (caught instanceof ValidationError) return error(caught.code, caught.message, 400);
+    if (caught instanceof GmailConfigError)
+      return error("gmail_not_configured", caught.message, 503);
     if (caught instanceof StoreError) {
       const status =
         caught.code === "not_found"
@@ -416,7 +457,11 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
             ? 400
             : caught.code === "rate_limited"
               ? 429
-              : 409;
+              : caught.code === "invalid_oauth_state" ||
+                  caught.code === "invalid_oauth_callback" ||
+                  caught.code === "oauth_denied"
+                ? 400
+                : 409;
       return error(caught.code, caught.message, status);
     }
     const requestId = crypto.randomUUID();
@@ -464,6 +509,12 @@ function bearerToken(request: Request): string | null {
 
 function webhookIngestUrl(url: URL, slug: string): string {
   return `${url.origin}/v1/ingest/webhooks/${slug}`;
+}
+
+function withOAuthResult(returnTo: string, result: "connected" | "error"): string {
+  const url = new URL(returnTo);
+  url.searchParams.set("gmail", result);
+  return url.toString();
 }
 
 function sessionExpiry(now: string): string {

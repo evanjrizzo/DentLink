@@ -10,6 +10,9 @@ import type {
   ConnectorAccount,
   ConnectorAccountInput,
   ConnectorAccountPatch,
+  ConnectorCredential,
+  ConnectorCredentialKind,
+  ConnectorOAuthState,
   ConnectorSourceRecord,
   ConnectorSourceRecordInput,
   CurrentSession,
@@ -146,7 +149,7 @@ type NotificationRow = {
   title: string;
   summary: string;
   body: string;
-  source: "webhook" | "manual" | "system";
+  source: Notification["source"];
   source_label: string;
   source_url: string | null;
   severity: "info" | "low" | "medium" | "high";
@@ -213,6 +216,29 @@ type ConnectorSourceRecordRow = {
   processed_at: string | null;
   error_message: string | null;
   version: number;
+};
+
+type ConnectorOAuthStateRow = {
+  id: string;
+  user_id: string;
+  state_hash: string;
+  connector_key: string;
+  reconnect_account_id: string | null;
+  return_to: string | null;
+  created_at: string;
+  expires_at: string;
+};
+
+type ConnectorCredentialRow = {
+  id: string;
+  user_id: string;
+  account_id: string;
+  connector_key: string;
+  kind: ConnectorCredentialKind;
+  encrypted_value: string;
+  encryption_version: number;
+  created_at: string;
+  updated_at: string;
 };
 
 export class D1DentLinkStore implements DentLinkStore {
@@ -705,6 +731,17 @@ export class D1DentLinkStore implements DentLinkStore {
     return account;
   }
 
+  async getConnectorAccount(
+    userId: EntityId,
+    accountId: EntityId
+  ): Promise<ConnectorAccount | null> {
+    const row = await this.db
+      .prepare(`SELECT * FROM connector_accounts WHERE id = ? AND user_id = ?`)
+      .bind(accountId, userId)
+      .first<ConnectorAccountRow>();
+    return row ? connectorAccountFromRow(row) : null;
+  }
+
   async updateConnectorAccount(
     userId: EntityId,
     accountId: EntityId,
@@ -855,6 +892,47 @@ export class D1DentLinkStore implements DentLinkStore {
     return record;
   }
 
+  async findConnectorSourceRecord(
+    userId: EntityId,
+    accountId: EntityId,
+    sourceExternalId: string
+  ): Promise<ConnectorSourceRecord | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT * FROM connector_source_records
+         WHERE user_id = ? AND account_id = ? AND source_external_id = ?`
+      )
+      .bind(userId, accountId, sourceExternalId)
+      .first<ConnectorSourceRecordRow>();
+    return row ? connectorSourceRecordFromRow(row) : null;
+  }
+
+  async createConnectorSourceRecordIfAbsent(
+    userId: EntityId,
+    input: ConnectorSourceRecordInput,
+    now: string
+  ): Promise<{ record: ConnectorSourceRecord; created: boolean }> {
+    const existing = await this.findConnectorSourceRecord(
+      userId,
+      input.accountId,
+      input.sourceExternalId
+    );
+    if (existing) return { record: existing, created: false };
+    try {
+      return { record: await this.createConnectorSourceRecord(userId, input, now), created: true };
+    } catch (error) {
+      if (error instanceof StoreError && error.code === "connector_record_exists") {
+        const record = await this.findConnectorSourceRecord(
+          userId,
+          input.accountId,
+          input.sourceExternalId
+        );
+        if (record) return { record, created: false };
+      }
+      throw error;
+    }
+  }
+
   async listConnectorSourceRecords(
     userId: EntityId,
     accountId: EntityId
@@ -868,6 +946,139 @@ export class D1DentLinkStore implements DentLinkStore {
       [userId, accountId]
     );
     return rows.map(connectorSourceRecordFromRow);
+  }
+
+  async createConnectorOAuthState(
+    userId: EntityId,
+    input: {
+      stateHash: string;
+      connectorKey: string;
+      reconnectAccountId?: EntityId | null;
+      returnTo?: string | null;
+      expiresAt: string;
+    },
+    now: string
+  ): Promise<ConnectorOAuthState> {
+    const state: ConnectorOAuthState = {
+      id: nextId("oauth-state"),
+      userId,
+      stateHash: input.stateHash,
+      connectorKey: input.connectorKey,
+      reconnectAccountId: input.reconnectAccountId ?? null,
+      returnTo: input.returnTo ?? null,
+      createdAt: now,
+      expiresAt: input.expiresAt
+    };
+    await this.db
+      .prepare(
+        `INSERT INTO connector_oauth_states
+         (id, user_id, state_hash, connector_key, reconnect_account_id, return_to, created_at,
+          expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(
+        state.id,
+        state.userId,
+        state.stateHash,
+        state.connectorKey,
+        state.reconnectAccountId,
+        state.returnTo,
+        state.createdAt,
+        state.expiresAt
+      )
+      .run();
+    return state;
+  }
+
+  async consumeConnectorOAuthState(
+    stateHash: string,
+    connectorKey: string,
+    now: string
+  ): Promise<ConnectorOAuthState | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT * FROM connector_oauth_states
+         WHERE state_hash = ? AND connector_key = ? AND expires_at > ?`
+      )
+      .bind(stateHash, connectorKey, now)
+      .first<ConnectorOAuthStateRow>();
+    if (!row) return null;
+    await this.db.prepare(`DELETE FROM connector_oauth_states WHERE id = ?`).bind(row.id).run();
+    return connectorOAuthStateFromRow(row);
+  }
+
+  async upsertConnectorCredential(
+    userId: EntityId,
+    accountId: EntityId,
+    input: {
+      kind: ConnectorCredentialKind;
+      encryptedValue: string;
+      encryptionVersion: number;
+    },
+    now: string
+  ): Promise<ConnectorCredential> {
+    const account = await this.getConnectorAccount(userId, accountId);
+    if (!account || account.status === "deleted") {
+      throw new StoreError("not_found", "Connector account not found");
+    }
+    const existing = await this.getConnectorCredential(userId, accountId, input.kind);
+    const credential: ConnectorCredential = {
+      id: existing?.id ?? nextId("credential"),
+      userId,
+      accountId,
+      connectorKey: account.connectorKey,
+      kind: input.kind,
+      encryptedValue: input.encryptedValue,
+      encryptionVersion: input.encryptionVersion,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now
+    };
+    await this.db
+      .prepare(
+        `INSERT INTO connector_credentials
+         (id, user_id, account_id, connector_key, kind, encrypted_value, encryption_version,
+          created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(account_id, kind)
+         DO UPDATE SET encrypted_value = excluded.encrypted_value,
+                       encryption_version = excluded.encryption_version,
+                       updated_at = excluded.updated_at`
+      )
+      .bind(
+        credential.id,
+        credential.userId,
+        credential.accountId,
+        credential.connectorKey,
+        credential.kind,
+        credential.encryptedValue,
+        credential.encryptionVersion,
+        credential.createdAt,
+        credential.updatedAt
+      )
+      .run();
+    return credential;
+  }
+
+  async getConnectorCredential(
+    userId: EntityId,
+    accountId: EntityId,
+    kind: ConnectorCredentialKind
+  ): Promise<ConnectorCredential | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT * FROM connector_credentials
+         WHERE user_id = ? AND account_id = ? AND kind = ?`
+      )
+      .bind(userId, accountId, kind)
+      .first<ConnectorCredentialRow>();
+    return row ? connectorCredentialFromRow(row) : null;
+  }
+
+  async deleteConnectorCredentials(userId: EntityId, accountId: EntityId): Promise<void> {
+    await this.db
+      .prepare(`DELETE FROM connector_credentials WHERE user_id = ? AND account_id = ?`)
+      .bind(userId, accountId)
+      .run();
   }
 
   async listNotifications(userId: EntityId): Promise<{ notifications: Notification[] }> {
@@ -1347,17 +1558,6 @@ export class D1DentLinkStore implements DentLinkStore {
     return row ? webhookFromRow(row) : null;
   }
 
-  private async getConnectorAccount(
-    userId: EntityId,
-    accountId: EntityId
-  ): Promise<ConnectorAccount | null> {
-    const row = await this.db
-      .prepare(`SELECT * FROM connector_accounts WHERE id = ? AND user_id = ?`)
-      .bind(accountId, userId)
-      .first<ConnectorAccountRow>();
-    return row ? connectorAccountFromRow(row) : null;
-  }
-
   private async assertWebhookRateLimit(endpointId: EntityId, now: string): Promise<void> {
     const windowStart = new Date(new Date(now).getTime() - 60_000).toISOString();
     const row = await this.db
@@ -1694,6 +1894,33 @@ function connectorSourceRecordFromRow(row: ConnectorSourceRecordRow): ConnectorS
     processedAt: row.processed_at,
     errorMessage: row.error_message,
     version: row.version
+  };
+}
+
+function connectorOAuthStateFromRow(row: ConnectorOAuthStateRow): ConnectorOAuthState {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    stateHash: row.state_hash,
+    connectorKey: row.connector_key,
+    reconnectAccountId: row.reconnect_account_id,
+    returnTo: row.return_to,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at
+  };
+}
+
+function connectorCredentialFromRow(row: ConnectorCredentialRow): ConnectorCredential {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    accountId: row.account_id,
+    connectorKey: row.connector_key,
+    kind: row.kind,
+    encryptedValue: row.encrypted_value,
+    encryptionVersion: row.encryption_version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
   };
 }
 

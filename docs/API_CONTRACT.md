@@ -128,11 +128,9 @@ Notes, sync, history, or conflict contracts.
   `ingestUrl` but never include the endpoint secret or secret hash.
 - `POST /v1/webhooks`: create a named webhook endpoint. The response returns the generated webhook
   secret once, alongside the public endpoint record and `ingestUrl`.
-- `PATCH /v1/webhooks/:id`: update an authenticated user's webhook endpoint with
-  `expectedVersion`.
-- `DELETE /v1/webhooks/:id`: delete an authenticated user's webhook endpoint with
-  `expectedVersion`. Deleted endpoints are removed from authenticated listings and cannot ingest
-  new deliveries.
+- `PATCH /v1/webhooks/:id`: update an authenticated user's webhook endpoint with `expectedVersion`.
+- `DELETE /v1/webhooks/:id`: delete an authenticated user's webhook endpoint with `expectedVersion`.
+  Deleted endpoints are removed from authenticated listings and cannot ingest new deliveries.
 - `POST /v1/ingest/webhooks/:slug`: public ingest route for enabled webhook endpoints.
 
 Webhook ingest requests authenticate with `X-DentLink-Webhook-Secret`. The slug is not treated as a
@@ -178,3 +176,34 @@ for future connector-specific storage decisions.
 Connector account mutations participate in `/v1/sync` as `connector_account` upserts and delete
 tombstones. Source records are user-scoped bookkeeping records and are not promoted into user-facing
 items by Milestone 3.
+
+## Milestone 3.1 Gmail endpoints
+
+Milestone 3.1 adds Gmail as the first real provider through the connector framework. It does not add
+Google Calendar or any other Google service.
+
+- `POST /v1/connectors/gmail/start`: authenticated OAuth initiation. Optional query parameters:
+  `returnTo` and `accountId` for reconnect. Returns an authorization URL and state expiration. The
+  state value is stored server-side as a hash.
+- `GET /v1/connectors/gmail/callback`: public OAuth callback. Validates state, exchanges the code,
+  links or reconnects the Gmail account, stores the encrypted refresh token, and redirects to a safe
+  `returnTo` URL when present. JSON clients may send `Accept: application/json`.
+- `POST /v1/connectors/gmail/:accountId/sync`: authenticated manual Gmail sync for an owned Gmail
+  connector account.
+- `POST /v1/connectors/gmail/:accountId/disconnect`: authenticated disconnect. Removes stored
+  connector credentials and leaves the metadata account paused.
+
+Generic `POST /v1/connectors/accounts` rejects `connectorKey: "gmail"`; Gmail accounts must be
+linked through OAuth.
+
+Gmail sync stores normalized source records with provider metadata, including `provider`,
+`provider_item_id`, `history_id`, `thread_id`, `message_id`, `internal_date`, `labels`, `permalink`,
+and `connector_account`. Gmail-created notifications use source `connector`, source label `Gmail`,
+the sender and subject, unread state in summary text, received timestamp metadata in the source
+record, and a Gmail deep link. Message bodies and attachments are not downloaded.
+
+The Gmail connector uses the metadata-only Gmail scope:
+
+```text
+https://www.googleapis.com/auth/gmail.metadata
+```
