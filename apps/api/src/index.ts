@@ -927,7 +927,7 @@ function withRuntimeHeaders(response: Response, cors: CorsDecision): Response {
   headers.append("Vary", "Origin");
   if (cors.allowed && cors.origin) {
     headers.set("Access-Control-Allow-Origin", cors.origin);
-    headers.set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+    headers.set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     headers.set("Access-Control-Allow-Headers", "Authorization,Content-Type,Accept");
     headers.set("Access-Control-Max-Age", "600");
   }

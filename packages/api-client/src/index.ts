@@ -499,6 +499,13 @@ export class DentLinkApiClient {
       method: init.method ?? "GET",
       headers,
       body: init.body === undefined ? undefined : JSON.stringify(init.body)
+    }).catch((caught: unknown) => {
+      throw new DentLinkApiError(
+        "DentLink could not reach the preview API. Your request was not saved.",
+        "network_unreachable",
+        0,
+        caught instanceof Error ? { cause: caught.message } : undefined
+      );
     });
 
     const json = (await response.json().catch(() => null)) as unknown;

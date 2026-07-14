@@ -472,7 +472,6 @@ export function DentLinkNotesApp(): ReactElement {
     engine: "gmail_api" | "gmail_imap",
     comparisonMode = account.settings.gmailImapComparisonMode === true
   ): Promise<void> {
-    const priorState = gmailEngineSaveStates[account.id] ?? null;
     setGmailEngineSaveStates((current) => ({
       ...current,
       [account.id]: { engine, comparisonMode, saving: true, error: null }
@@ -498,14 +497,7 @@ export function DentLinkNotesApp(): ReactElement {
           const message = gmailEngineSaveMessageFor(retryError);
           setGmailEngineSaveStates((current) => ({
             ...current,
-            [account.id]: {
-              ...(priorState ?? {
-                engine: gmailSelectedEngine(account.settings),
-                comparisonMode: account.settings.gmailImapComparisonMode === true
-              }),
-              saving: false,
-              error: message
-            }
+            [account.id]: { engine, comparisonMode, saving: false, error: message }
           }));
           setError(message);
           return;
@@ -514,14 +506,7 @@ export function DentLinkNotesApp(): ReactElement {
       const message = gmailEngineSaveMessageFor(caught);
       setGmailEngineSaveStates((current) => ({
         ...current,
-        [account.id]: {
-          ...(priorState ?? {
-            engine: gmailSelectedEngine(account.settings),
-            comparisonMode: account.settings.gmailImapComparisonMode === true
-          }),
-          saving: false,
-          error: message
-        }
+        [account.id]: { engine, comparisonMode, saving: false, error: message }
       }));
       setError(message);
       await loadConnectors().catch(() => undefined);
@@ -2422,6 +2407,14 @@ function GmailConnectorCard(props: {
           Enable preview comparison mode
         </label>
       ) : null}
+      {props.engineSaveState?.error ? (
+        <button
+          type="button"
+          onClick={() => void props.onUpdateEngine(props.account, selectedEngine, comparisonMode)}
+        >
+          Retry
+        </button>
+      ) : null}
       {reconnectRequired ? (
         <p className="connector-warning">
           Reconnect Required. IMAP requires Gmail mail access. Reconnect upgrades your Gmail
@@ -2678,6 +2671,9 @@ function safeGmailStatusMessage(message: string, engine: "gmail_api" | "gmail_im
 
 function gmailEngineSaveMessageFor(caught: unknown): string {
   if (caught instanceof DentLinkApiError) {
+    if (caught.code === "network_unreachable") {
+      return "DentLink could not reach the preview API. Your engine selection was not saved.";
+    }
     if (caught.code === "version_mismatch") {
       return "Gmail connector changed while saving. Refresh and try again.";
     }
@@ -2685,6 +2681,9 @@ function gmailEngineSaveMessageFor(caught: unknown): string {
       return "Gmail ingestion engine selection is invalid.";
     if (caught.status === 401) return "Sign in again before changing the Gmail ingestion engine.";
     return caught.message;
+  }
+  if (caught instanceof Error && /fetch|network|cors/i.test(caught.message)) {
+    return "DentLink could not reach the preview API. Your engine selection was not saved.";
   }
   if (caught instanceof Error) return caught.message;
   return "Gmail ingestion engine selection could not be saved.";

@@ -323,17 +323,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         const updatedAt = new Date().toISOString();
         engineUpdateAttempts += 1;
         if (engineUpdateAttempts === 1 && body.engine === "gmail_imap") {
-          gmailAccount.version += 1;
-          await fulfillJson(
-            route,
-            {
-              error: {
-                code: "version_mismatch",
-                message: "Connector account changed on the server"
-              }
-            },
-            409
-          );
+          await route.abort("failed");
           return;
         }
         if (
@@ -513,6 +503,14 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       page.getByText("Next Scheduled Sync: Within 5 minutes after activation")
     ).toBeVisible();
     await page.getByLabel("Gmail Ingestion Engine").selectOption("gmail_imap");
+    await expect(page.getByText("Saving...")).toBeVisible();
+    await expect(
+      page
+        .getByRole("article")
+        .getByText("DentLink could not reach the preview API. Your engine selection was not saved.")
+    ).toBeVisible();
+    await expect(page.getByLabel("Gmail Ingestion Engine")).toHaveValue("gmail_imap");
+    await page.getByRole("button", { name: "Retry" }).click();
     await expect(page.getByText("Saving...")).toBeVisible();
     await expect(
       page.getByText("Reconnect Required. IMAP requires Gmail mail access")

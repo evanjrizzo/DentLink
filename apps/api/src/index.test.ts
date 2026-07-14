@@ -161,6 +161,121 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     expect(denied.headers.get("Access-Control-Allow-Origin")).toBeNull();
   });
 
+  it("keeps CORS headers on Gmail engine preflight and error responses", async () => {
+    const { store } = createStore();
+    const env = { store, ALLOWED_ORIGINS: "https://dentlink-web-preview.pages.dev" };
+    const origin = "https://dentlink-web-preview.pages.dev";
+    const preflight = await handleApiRequest(
+      new Request("https://api.dentlink.test/v1/connectors/gmail/account_1/engine", {
+        method: "OPTIONS",
+        headers: {
+          Origin: origin,
+          "Access-Control-Request-Method": "PUT",
+          "Access-Control-Request-Headers": "authorization,content-type"
+        }
+      }),
+      env
+    );
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+    expect(preflight.headers.get("Access-Control-Allow-Methods")).toContain("PUT");
+    expect(preflight.headers.get("Access-Control-Allow-Headers")).toContain("Authorization");
+    expect(preflight.headers.get("Access-Control-Allow-Headers")).toContain("Content-Type");
+    expect(preflight.headers.get("Vary")).toContain("Origin");
+
+    const unauthenticated = await handleApiRequest(
+      new Request("https://api.dentlink.test/v1/connectors/gmail/account_1/engine", {
+        method: "PUT",
+        headers: { Origin: origin, "Content-Type": "application/json" },
+        body: JSON.stringify({ expectedVersion: 1, engine: "gmail_imap" })
+      }),
+      env
+    );
+    expect(unauthenticated.status).toBe(401);
+    expect(unauthenticated.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+    expect(unauthenticated.headers.get("Access-Control-Allow-Methods")).toContain("PUT");
+
+    const owner = await register(store, "engine-cors@example.com");
+    const validation = await handleApiRequest(
+      new Request("https://api.dentlink.test/v1/connectors/gmail/account_1/engine", {
+        method: "PUT",
+        headers: {
+          Origin: origin,
+          Authorization: `Bearer ${owner.session.token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ expectedVersion: 1, engine: "bad_engine" })
+      }),
+      env
+    );
+    expect(validation.status).toBe(400);
+    expect(validation.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+
+    const conflictStore = Object.create(store) as DentLinkStore;
+    conflictStore.getConnectorAccount = async () => ({
+      id: "account_1",
+      userId: owner.user.id,
+      connectorKey: "gmail",
+      displayName: "Gmail",
+      status: "connected",
+      healthStatus: "healthy",
+      syncStatus: "idle",
+      settings: {},
+      credentialRef: null,
+      credentialStatus: "not_configured",
+      syncCursor: null,
+      lastSyncAt: null,
+      nextSyncAt: null,
+      lastHealthAt: null,
+      errorCode: null,
+      errorMessage: null,
+      createdAt: "2026-07-14T00:00:00.000Z",
+      updatedAt: "2026-07-14T00:00:00.000Z",
+      version: 2
+    });
+    conflictStore.updateConnectorAccount = async () => null;
+
+    const conflict = await handleApiRequest(
+      new Request("https://api.dentlink.test/v1/connectors/gmail/account_1/engine", {
+        method: "PUT",
+        headers: {
+          Origin: origin,
+          Authorization: `Bearer ${owner.session.token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ expectedVersion: 1, engine: "gmail_imap" })
+      }),
+      {
+        ...env,
+        store: conflictStore
+      }
+    );
+    expect(conflict.status).toBe(409);
+    expect(conflict.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+    expect(conflict.headers.get("Access-Control-Allow-Methods")).toContain("PUT");
+
+    const failingStore = Object.create(store) as DentLinkStore;
+    failingStore.getConnectorAccount = conflictStore.getConnectorAccount;
+    failingStore.updateConnectorAccount = async () => {
+      throw new Error("database unavailable");
+    };
+    const internal = await handleApiRequest(
+      new Request("https://api.dentlink.test/v1/connectors/gmail/account_1/engine", {
+        method: "PUT",
+        headers: {
+          Origin: origin,
+          Authorization: `Bearer ${owner.session.token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ expectedVersion: 2, engine: "gmail_imap" })
+      }),
+      { ...env, store: failingStore }
+    );
+    expect(internal.status).toBe(500);
+    expect(internal.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+    expect(internal.headers.get("Access-Control-Allow-Methods")).toContain("PUT");
+  });
+
   it("registers, logs in, and returns a session without accepting client user identity", async () => {
     const { store } = createStore();
     const registered = await requestJson<AuthSession>(

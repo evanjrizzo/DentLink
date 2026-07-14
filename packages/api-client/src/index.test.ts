@@ -34,4 +34,24 @@ describe("@dentlink/api-client", () => {
       status: 409
     });
   });
+
+  it("maps fetch rejections to network_unreachable errors", async () => {
+    const client = new DentLinkApiClient({
+      baseUrl: "https://dentlink-api-preview.evanjrizzo.workers.dev",
+      fetchImpl: async (url) => {
+        expect(url).toBe(
+          "https://dentlink-api-preview.evanjrizzo.workers.dev/v1/connectors/gmail/account_1/engine"
+        );
+        throw new TypeError("NetworkError when attempting to fetch resource");
+      }
+    });
+
+    await expect(
+      client.updateGmailEngine("account_1", { expectedVersion: 1, engine: "gmail_imap" })
+    ).rejects.toMatchObject({
+      code: "network_unreachable",
+      status: 0,
+      message: "DentLink could not reach the preview API. Your request was not saved."
+    });
+  });
 });
