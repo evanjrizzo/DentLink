@@ -5,6 +5,7 @@ import type { EntityId } from "@dentlink/item-model";
 
 export const GOOGLE_OAUTH_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 export const GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
+export const GOOGLE_OAUTH_TOKEN_INFO_URL = "https://oauth2.googleapis.com/tokeninfo";
 export const GOOGLE_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 export const GOOGLE_CREDENTIAL_ENCRYPTION_VERSION = 1;
 
@@ -20,6 +21,10 @@ export type GoogleTokenResponse = {
   accessToken: string;
   refreshToken?: string;
   expiresIn?: number;
+  scope?: string;
+};
+
+export type GoogleTokenInfo = {
   scope?: string;
 };
 
@@ -99,6 +104,22 @@ export async function tokenRequest(
     accessToken,
     refreshToken: typeof json.refresh_token === "string" ? json.refresh_token : undefined,
     expiresIn: typeof json.expires_in === "number" ? json.expires_in : undefined,
+    scope: typeof json.scope === "string" ? json.scope : undefined
+  };
+}
+
+export async function tokenInfoRequest(
+  fetchImpl: typeof fetch,
+  accessToken: string
+): Promise<GoogleTokenInfo> {
+  const url = new URL(GOOGLE_OAUTH_TOKEN_INFO_URL);
+  url.searchParams.set("access_token", accessToken);
+  const response = await fetchImpl(url);
+  const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!response.ok || !json) {
+    throw new StoreError("google_token_info_error", "Google token scope verification failed");
+  }
+  return {
     scope: typeof json.scope === "string" ? json.scope : undefined
   };
 }

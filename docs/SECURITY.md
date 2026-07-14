@@ -87,11 +87,11 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   provider payload retention, attachment handling, and replay/idempotency behavior must be defined
   by future provider connectors before they ingest real external content.
 - Gmail synchronization uses `https://www.googleapis.com/auth/gmail.readonly` and does not request
-  `gmail.modify`. The read-only scope is required because backfill uses Gmail
-  `users.messages.list` with the `q` search parameter; `gmail.metadata` cannot be used with `q`.
-  Google Cloud OAuth consent configuration must include `gmail.readonly`, and DentLink must
-  explicitly request it during Gmail OAuth. Gmail-created notifications use sender, subject, unread
-  state, received metadata, connector reference, and a Gmail deep link.
+  `gmail.modify`. The read-only scope is required because backfill uses Gmail `users.messages.list`
+  with the `q` search parameter; `gmail.metadata` cannot be used with `q`. Google Cloud OAuth
+  consent configuration must include `gmail.readonly`, and DentLink must explicitly request it
+  during Gmail OAuth. Gmail-created notifications use sender, subject, unread state, received
+  metadata, connector reference, and a Gmail deep link.
 - Milestone 7 Phase 1 records safe per-message Gmail ingestion outcomes and reasons in source
   records. It does not store raw message bodies, attachments, OAuth tokens, or provider credentials
   in diagnostics. Partial message failures are surfaced through degraded connector health instead of

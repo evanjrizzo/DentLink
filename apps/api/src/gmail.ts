@@ -7,6 +7,7 @@ import {
   GOOGLE_OAUTH_AUTHORIZE_URL,
   googleOAuthConfig,
   GoogleConfigError,
+  tokenInfoRequest,
   tokenRequest,
   type GoogleRuntimeEnv,
   type GoogleTokenResponse
@@ -45,6 +46,7 @@ export type GmailRuntimeEnv = GoogleRuntimeEnv & {
 export type GmailApiClient = {
   exchangeCode(code: string, redirectUri: string): Promise<GmailTokenResponse>;
   refreshAccessToken(refreshToken: string): Promise<GmailTokenResponse>;
+  getAccessTokenScopes(accessToken: string): Promise<string[]>;
   getProfile(accessToken: string): Promise<GmailProfile>;
   listMessages(
     accessToken: string,
@@ -73,6 +75,7 @@ export type GmailMessageList = {
 export type GmailListMessagesOptions = {
   pageToken?: string;
   query?: string;
+  maxResults?: number;
 };
 
 export type GmailHistoryList = {
@@ -145,7 +148,6 @@ export async function startGmailOAuth(
   authorizationUrl.searchParams.set("state", state);
   authorizationUrl.searchParams.set("access_type", "offline");
   authorizationUrl.searchParams.set("prompt", "consent");
-  authorizationUrl.searchParams.set("include_granted_scopes", "true");
   return { authorizationUrl: authorizationUrl.toString(), expiresAt };
 }
 
@@ -169,55 +171,96 @@ export async function completeGmailOAuth(
 
   const config = gmailOAuthConfig(env, url);
   const gmail = gmailClient(env);
-  const token = await gmail.exchangeCode(code, config.redirectUri);
-  if (!token.refreshToken) {
-    throw new StoreError("missing_refresh_token", "Gmail did not return a refresh token");
+  const reconnecting = Boolean(stateRecord.reconnectAccountId);
+  let grantedScopes: string[] = [];
+  let refreshTokenReturned = false;
+  try {
+    const token = await gmail.exchangeCode(code, config.redirectUri);
+    refreshTokenReturned = Boolean(token.refreshToken);
+    grantedScopes = await verifiedGmailScopes(gmail, token);
+    if (!grantedScopes.includes(GMAIL_READONLY_SCOPE)) {
+      throw new StoreError("gmail_permission_denied", GMAIL_READONLY_RECONNECT_MESSAGE);
+    }
+    if (!token.refreshToken) {
+      throw new StoreError(
+        "missing_refresh_token",
+        "Google did not issue an upgraded offline Gmail credential. Reconnect Gmail and approve read-only mailbox access."
+      );
+    }
+    await verifyGmailReadonlyCapability(gmail, token.accessToken, now);
+    const profile = await gmail.getProfile(token.accessToken);
+    const account = await linkGmailAccount(
+      store,
+      stateRecord.userId,
+      profile.emailAddress,
+      stateRecord.reconnectAccountId,
+      now
+    );
+    const encrypted = await encryptSecret(token.refreshToken, env);
+    const credential = await store.upsertConnectorCredential(
+      stateRecord.userId,
+      account.id,
+      {
+        kind: "oauth_refresh_token",
+        encryptedValue: encrypted,
+        encryptionVersion: GOOGLE_CREDENTIAL_ENCRYPTION_VERSION
+      },
+      now
+    );
+    const updated = await store.updateConnectorAccount(
+      stateRecord.userId,
+      account.id,
+      account.version,
+      {
+        status: "connected",
+        healthStatus: "healthy",
+        syncStatus: "idle",
+        credentialRef: credential.id,
+        credentialStatus: "configured",
+        settings: withGmailGrantedScopes(
+          {
+            ...account.settings,
+            googleEmail: profile.emailAddress
+          },
+          grantedScopes.join(" ")
+        ),
+        syncCursor: profile.historyId ?? account.syncCursor,
+        lastHealthAt: now,
+        errorCode: null,
+        errorMessage: null
+      },
+      now
+    );
+    if (!updated) throw new StoreError("not_found", "Gmail account not found");
+    logGmailOAuthOutcome({
+      accountId: updated.id,
+      reconnecting,
+      refreshTokenReturned,
+      credentialReplaced: true,
+      grantedScopes,
+      outcome: "connected"
+    });
+    return { account: updated, returnTo: stateRecord.returnTo };
+  } catch (error) {
+    await markFailedGmailReconnect(
+      store,
+      stateRecord.userId,
+      stateRecord.reconnectAccountId,
+      now,
+      error
+    );
+    logGmailOAuthOutcome({
+      accountId: stateRecord.reconnectAccountId,
+      reconnecting,
+      refreshTokenReturned,
+      credentialReplaced: false,
+      grantedScopes,
+      outcome: "failed",
+      errorCode: gmailErrorCode(error),
+      message: safeErrorMessage(error)
+    });
+    throw error;
   }
-  const profile = await gmail.getProfile(token.accessToken);
-  const account = await linkGmailAccount(
-    store,
-    stateRecord.userId,
-    profile.emailAddress,
-    stateRecord.reconnectAccountId,
-    now
-  );
-  const encrypted = await encryptSecret(token.refreshToken, env);
-  const credential = await store.upsertConnectorCredential(
-    stateRecord.userId,
-    account.id,
-    {
-      kind: "oauth_refresh_token",
-      encryptedValue: encrypted,
-      encryptionVersion: GOOGLE_CREDENTIAL_ENCRYPTION_VERSION
-    },
-    now
-  );
-  const updated = await store.updateConnectorAccount(
-    stateRecord.userId,
-    account.id,
-    account.version,
-    {
-      status: "connected",
-      healthStatus: "healthy",
-      syncStatus: "idle",
-      credentialRef: credential.id,
-      credentialStatus: "configured",
-      settings: withGmailGrantedScopes(
-        {
-          ...account.settings,
-          googleEmail: profile.emailAddress
-        },
-        token.scope ?? GMAIL_SCOPE
-      ),
-      syncCursor: profile.historyId ?? account.syncCursor,
-      lastHealthAt: now,
-      errorCode: null,
-      errorMessage: null
-    },
-    now
-  );
-  if (!updated) throw new StoreError("not_found", "Gmail account not found");
-  return { account: updated, returnTo: stateRecord.returnTo };
 }
 
 export async function disconnectGmailAccount(
@@ -499,6 +542,10 @@ export function createGoogleGmailClient(
         grant_type: "refresh_token"
       });
     },
+    async getAccessTokenScopes(accessToken) {
+      const info = await tokenInfoRequest(fetchImpl, accessToken);
+      return normalizeScopes(info.scope ?? "");
+    },
     async getProfile(accessToken) {
       const response = await gmailRequest(
         fetchImpl,
@@ -511,7 +558,10 @@ export function createGoogleGmailClient(
     async listMessages(accessToken, options) {
       const parsedOptions = typeof options === "string" ? { pageToken: options } : (options ?? {});
       const url = new URL(`${GMAIL_API_BASE_URL}/users/me/messages`);
-      url.searchParams.set("maxResults", String(INITIAL_SYNC_PAGE_SIZE));
+      url.searchParams.set(
+        "maxResults",
+        String(parsedOptions.maxResults ?? INITIAL_SYNC_PAGE_SIZE)
+      );
       url.searchParams.append("labelIds", "INBOX");
       if (parsedOptions.pageToken) url.searchParams.set("pageToken", parsedOptions.pageToken);
       if (parsedOptions.query) url.searchParams.set("q", parsedOptions.query);
@@ -975,6 +1025,82 @@ async function refreshGmailAccessToken(
     }
     throw error;
   }
+}
+
+async function verifiedGmailScopes(
+  gmail: GmailApiClient,
+  token: GmailTokenResponse
+): Promise<string[]> {
+  const tokenScopes = normalizeScopes(token.scope ?? "");
+  if (tokenScopes.length > 0) return tokenScopes;
+  return gmail.getAccessTokenScopes(token.accessToken);
+}
+
+async function verifyGmailReadonlyCapability(
+  gmail: GmailApiClient,
+  accessToken: string,
+  now: string
+): Promise<void> {
+  const afterSeconds = Math.floor((Date.parse(now) - 24 * 60 * 60 * 1000) / 1000);
+  await gmail.listMessages(accessToken, { query: `after:${afterSeconds}`, maxResults: 1 });
+}
+
+async function markFailedGmailReconnect(
+  store: DentLinkStore,
+  userId: EntityId,
+  accountId: EntityId | null,
+  now: string,
+  error: unknown
+): Promise<void> {
+  if (!accountId) return;
+  const account = await store.getConnectorAccount(userId, accountId);
+  if (!account || account.connectorKey !== GMAIL_CONNECTOR_KEY) return;
+  await store.updateConnectorAccount(
+    userId,
+    account.id,
+    account.version,
+    {
+      status: isGmailAuthFailure(error) ? "error" : "connected",
+      healthStatus: isGmailAuthFailure(error) ? "error" : "degraded",
+      syncStatus: "idle",
+      lastHealthAt: now,
+      settings: {
+        ...account.settings,
+        gmailReconnectRequired: true
+      },
+      errorCode: gmailErrorCode(error),
+      errorMessage: safeErrorMessage(error)
+    },
+    now
+  );
+}
+
+function logGmailOAuthOutcome(input: {
+  accountId: EntityId | null;
+  reconnecting: boolean;
+  refreshTokenReturned: boolean;
+  credentialReplaced: boolean;
+  grantedScopes: string[];
+  outcome: "connected" | "failed";
+  errorCode?: string;
+  message?: string;
+}): void {
+  const payload = {
+    level: input.outcome === "connected" ? "info" : "error",
+    event: "gmail_oauth_credential_upgrade",
+    accountId: input.accountId,
+    reconnecting: input.reconnecting,
+    requestedScopes: [GMAIL_SCOPE],
+    grantedScopes: input.grantedScopes,
+    refreshTokenReturned: input.refreshTokenReturned,
+    credentialReplaced: input.credentialReplaced,
+    outcome: input.outcome,
+    errorCode: input.errorCode,
+    message: input.message
+  };
+  const serialized = JSON.stringify(payload);
+  if (input.outcome === "connected") console.log(serialized);
+  else console.error(serialized);
 }
 
 function gmailOAuthConfig(
