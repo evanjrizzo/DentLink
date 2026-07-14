@@ -1025,14 +1025,13 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       { store, ...env }
     );
     const linked = (await callback.json()) as { account: ConnectorAccount };
-    await store.updateConnectorAccount(
+    const granted = await store.updateConnectorAccount(
       owner.user.id,
       linked.account.id,
       linked.account.version,
       {
         settings: {
           ...linked.account.settings,
-          gmailIngestionEngine: "gmail_imap",
           gmailGrantedScopes: "https://mail.google.com/",
           gmailImapGranted: true,
           gmailReconnectRequired: false
@@ -1040,6 +1039,22 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       },
       "2026-07-14T20:00:00.000Z"
     );
+    expect(granted).toBeTruthy();
+    const engine = await requestJson<ConnectorAccount>(
+      store,
+      "PUT",
+      `/v1/connectors/gmail/${linked.account.id}/engine`,
+      { expectedVersion: granted?.version, engine: "gmail_imap", comparisonMode: true },
+      owner.session.token,
+      200,
+      env
+    );
+    expect(engine.settings).toMatchObject({
+      gmailIngestionEngine: "gmail_imap",
+      gmailRequestedIngestionEngine: "gmail_imap",
+      gmailImapComparisonMode: true,
+      gmailReconnectRequired: false
+    });
 
     const sync = await requestJson<{
       account: ConnectorAccount;
@@ -1067,7 +1082,17 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       gmailLastImapStatus: "success",
       gmailLastImapDiscovered: 2,
       gmailLastImapExamined: 1,
-      gmailLastImapCreated: 1
+      gmailLastImapCreated: 1,
+      gmailLastSyncEngine: "gmail_imap",
+      gmailLastSyncScanned: 2,
+      gmailLastSyncProcessed: 1,
+      gmailLastSyncCreated: 1,
+      gmailExpectedMessages: 2,
+      gmailActualNotifications: 1,
+      gmailMissingMessageDifference: 1,
+      gmailLastComparisonApiDiscovered: 1,
+      gmailLastComparisonImapDiscovered: 2,
+      gmailLastComparisonMismatch: true
     });
     expect(sync.outcomes[0]).toMatchObject({
       messageId: "x-gm-msgid:imap-gm-1",
@@ -1126,7 +1151,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       { store, ...env }
     );
     const linked = (await callback.json()) as { account: ConnectorAccount };
-    await store.updateConnectorAccount(
+    const granted = await store.updateConnectorAccount(
       owner.user.id,
       linked.account.id,
       linked.account.version,
@@ -1140,6 +1165,16 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
         }
       },
       "2026-07-14T20:00:00.000Z"
+    );
+    expect(granted).toBeTruthy();
+    await requestJson<ConnectorAccount>(
+      store,
+      "PUT",
+      `/v1/connectors/gmail/${linked.account.id}/engine`,
+      { expectedVersion: granted?.version, engine: "gmail_imap" },
+      owner.session.token,
+      200,
+      env
     );
     await requestJson(
       store,
@@ -1212,21 +1247,21 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       { store, ...initialEnv }
     );
     const linked = (await callback.json()) as { account: ConnectorAccount };
-    await store.updateConnectorAccount(
-      owner.user.id,
-      linked.account.id,
-      linked.account.version,
-      {
-        settings: {
-          ...linked.account.settings,
-          gmailIngestionEngine: "gmail_imap",
-          gmailGrantedScopes: "https://www.googleapis.com/auth/gmail.readonly",
-          gmailImapGranted: false,
-          gmailReconnectRequired: true
-        }
-      },
-      "2026-07-14T20:00:00.000Z"
+    const pending = await requestJson<ConnectorAccount>(
+      store,
+      "PUT",
+      `/v1/connectors/gmail/${linked.account.id}/engine`,
+      { expectedVersion: linked.account.version, engine: "gmail_imap", comparisonMode: true },
+      owner.session.token,
+      200,
+      initialEnv
     );
+    expect(pending.settings).toMatchObject({
+      gmailIngestionEngine: "gmail_api",
+      gmailRequestedIngestionEngine: "gmail_imap",
+      gmailImapComparisonMode: true,
+      gmailReconnectRequired: true
+    });
     const reconnectEnv = gmailTestEnv(
       fakeGmailClientWithMailScope("imap-refresh-token-secret"),
       fakeGmailImapClient()
@@ -1322,6 +1357,84 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       owner.session.token
     );
     expect(afterDuplicate.notifications).toHaveLength(1);
+  });
+
+  it("runs scheduled Gmail IMAP sync for IMAP-enabled accounts", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-scheduled-imap@example.com");
+    const env = gmailTestEnv(fakeGmailClient(), fakeGmailImapClient());
+    const start = await requestJson<{ authorizationUrl: string }>(
+      store,
+      "POST",
+      "/v1/connectors/gmail/start",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const authorizationUrl = new URL(start.authorizationUrl);
+    const callback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${authorizationUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    const linked = (await callback.json()) as { account: ConnectorAccount };
+    const granted = await store.updateConnectorAccount(
+      owner.user.id,
+      linked.account.id,
+      linked.account.version,
+      {
+        settings: {
+          ...linked.account.settings,
+          gmailGrantedScopes: "https://mail.google.com/",
+          gmailImapGranted: true,
+          gmailReconnectRequired: false
+        }
+      },
+      "2026-07-14T20:00:00.000Z"
+    );
+    await requestJson<ConnectorAccount>(
+      store,
+      "PUT",
+      `/v1/connectors/gmail/${linked.account.id}/engine`,
+      { expectedVersion: granted?.version, engine: "gmail_imap" },
+      owner.session.token,
+      200,
+      env
+    );
+
+    const pending: Array<Promise<unknown>> = [];
+    apiDefaultForTest.scheduled(
+      { scheduledTime: Date.parse("2026-07-14T20:10:00.000Z"), cron: "*/5 * * * *" },
+      { store, ...env },
+      { waitUntil: (promise) => pending.push(promise) }
+    );
+    await Promise.all(pending);
+
+    const notifications = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(notifications.notifications).toHaveLength(1);
+    const accounts = await requestJson<{ accounts: ConnectorAccount[] }>(
+      store,
+      "GET",
+      "/v1/connectors/accounts",
+      undefined,
+      owner.session.token
+    );
+    expect(accounts.accounts[0]?.settings).toMatchObject({
+      gmailIngestionEngine: "gmail_imap",
+      gmailLastSyncEngine: "gmail_imap",
+      gmailLastSyncCreated: 1
+    });
   });
 
   it("records Gmail per-message outcomes and keeps partial sync failures observable", async () => {

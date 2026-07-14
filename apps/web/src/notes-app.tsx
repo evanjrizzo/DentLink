@@ -417,6 +417,30 @@ export function DentLinkNotesApp(): ReactElement {
     }
   }
 
+  async function updateGmailEngine(
+    account: ConnectorAccount,
+    engine: "gmail_api" | "gmail_imap",
+    comparisonMode = account.settings.gmailImapComparisonMode === true
+  ): Promise<void> {
+    try {
+      setError(null);
+      const updated = await client.updateGmailEngine(account.id, {
+        expectedVersion: account.version,
+        engine,
+        comparisonMode
+      });
+      setConnectorAccounts((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item))
+      );
+      const diagnostics = await client.getGmailDiagnostics(account.id).catch(() => null);
+      if (diagnostics)
+        setGmailDiagnostics((current) => ({ ...current, [account.id]: diagnostics }));
+    } catch (caught) {
+      handleFailure(caught);
+      await loadConnectors().catch(() => undefined);
+    }
+  }
+
   async function disconnectGmail(account: ConnectorAccount): Promise<void> {
     try {
       setError(null);
@@ -767,6 +791,7 @@ export function DentLinkNotesApp(): ReactElement {
           onConnectGmail={connectGmail}
           onReconnectGmail={(account) => connectGmail(account.id)}
           onSyncGmail={syncGmail}
+          onUpdateGmailEngine={updateGmailEngine}
           onDisconnectGmail={disconnectGmail}
           gmailDiagnostics={gmailDiagnostics}
           onConnectGoogleCalendar={connectGoogleCalendar}
@@ -2032,6 +2057,11 @@ function ConnectorsView(props: {
   onConnectGmail: () => Promise<void>;
   onReconnectGmail: (account: ConnectorAccount) => Promise<void>;
   onSyncGmail: (account: ConnectorAccount) => Promise<void>;
+  onUpdateGmailEngine: (
+    account: ConnectorAccount,
+    engine: "gmail_api" | "gmail_imap",
+    comparisonMode?: boolean
+  ) => Promise<void>;
   onDisconnectGmail: (account: ConnectorAccount) => Promise<void>;
   onConnectGoogleCalendar: () => Promise<void>;
   onReconnectGoogleCalendar: (account: ConnectorAccount) => Promise<void>;
@@ -2056,42 +2086,15 @@ function ConnectorsView(props: {
       {calendarAccounts.length === 0 ? <p>No Google Calendar accounts connected.</p> : null}
       <div className="note-list">
         {gmailAccounts.map((account) => (
-          <article key={account.id} className="notification-card">
-            <strong>{account.displayName}</strong>
-            <span>Status: {account.status}</span>
-            <span>Health: {account.healthStatus}</span>
-            <span>Sync: {account.syncStatus}</span>
-            <span>
-              Last sync:{" "}
-              {account.lastSyncAt ? new Date(account.lastSyncAt).toLocaleString() : "Never"}
-            </span>
-            {account.errorMessage ? <p>{account.errorMessage}</p> : null}
-            {account.settings.gmailReconnectRequired === true ? (
-              <p className="connector-warning">
-                Reconnect Gmail to grant the mailbox access required by this connector.
-              </p>
-            ) : null}
-            <p className="connector-help">
-              Sync Now checks Gmail for new messages. IMAP-enabled accounts use a rolling recent
-              scan for recovery.
-            </p>
-            <GmailDiagnosticsSummary
-              diagnostics={props.gmailDiagnostics[account.id]}
-              degraded={account.healthStatus === "degraded"}
-              settings={account.settings}
-            />
-            <div className="note-order">
-              <button type="button" onClick={() => void props.onSyncGmail(account)}>
-                Sync Now
-              </button>
-              <button type="button" onClick={() => void props.onReconnectGmail(account)}>
-                Reconnect
-              </button>
-              <button type="button" onClick={() => void props.onDisconnectGmail(account)}>
-                Disconnect
-              </button>
-            </div>
-          </article>
+          <GmailConnectorCard
+            key={account.id}
+            account={account}
+            diagnostics={props.gmailDiagnostics[account.id]}
+            onSync={props.onSyncGmail}
+            onReconnect={props.onReconnectGmail}
+            onUpdateEngine={props.onUpdateGmailEngine}
+            onDisconnect={props.onDisconnectGmail}
+          />
         ))}
         {calendarAccounts.map((account) => (
           <article key={account.id} className="notification-card">
@@ -2122,6 +2125,92 @@ function ConnectorsView(props: {
   );
 }
 
+function GmailConnectorCard(props: {
+  account: ConnectorAccount;
+  diagnostics: GmailDiagnostics | undefined;
+  onSync: (account: ConnectorAccount) => Promise<void>;
+  onReconnect: (account: ConnectorAccount) => Promise<void>;
+  onUpdateEngine: (
+    account: ConnectorAccount,
+    engine: "gmail_api" | "gmail_imap",
+    comparisonMode?: boolean
+  ) => Promise<void>;
+  onDisconnect: (account: ConnectorAccount) => Promise<void>;
+}): ReactElement {
+  const selectedEngine = gmailSelectedEngine(props.account.settings);
+  const activeEngine = gmailActiveEngine(props.account.settings);
+  const comparisonMode = props.account.settings.gmailImapComparisonMode === true;
+  const reconnectRequired =
+    props.account.settings.gmailReconnectRequired === true || selectedEngine !== activeEngine;
+  return (
+    <article className="notification-card">
+      <strong>{props.account.displayName}</strong>
+      <span>Status: {props.account.status}</span>
+      <span>Health: {props.account.healthStatus}</span>
+      <span>Sync: {props.account.syncStatus}</span>
+      <span>
+        Last sync:{" "}
+        {props.account.lastSyncAt ? new Date(props.account.lastSyncAt).toLocaleString() : "Never"}
+      </span>
+      {props.account.errorMessage ? <p>{props.account.errorMessage}</p> : null}
+      <label>
+        Gmail Ingestion Engine
+        <select
+          value={selectedEngine}
+          onChange={(event) =>
+            void props.onUpdateEngine(
+              props.account,
+              event.currentTarget.value === "gmail_imap" ? "gmail_imap" : "gmail_api",
+              comparisonMode
+            )
+          }
+        >
+          <option value="gmail_api">Gmail API</option>
+          <option value="gmail_imap">Gmail IMAP (Preview)</option>
+        </select>
+      </label>
+      <span>Active engine: {gmailEngineLabel(activeEngine)}</span>
+      {selectedEngine === "gmail_imap" ? (
+        <label>
+          <input
+            type="checkbox"
+            checked={comparisonMode}
+            onChange={(event) =>
+              void props.onUpdateEngine(props.account, "gmail_imap", event.currentTarget.checked)
+            }
+          />{" "}
+          Enable preview comparison mode
+        </label>
+      ) : null}
+      {reconnectRequired ? (
+        <p className="connector-warning">
+          Reconnect Required. Gmail IMAP requires full Gmail mailbox access for IMAP polling.
+        </p>
+      ) : null}
+      <p className="connector-help">
+        Sync Now uses the active engine. IMAP-enabled accounts use a rolling recent scan for
+        recovery.
+      </p>
+      <GmailDiagnosticsSummary
+        diagnostics={props.diagnostics}
+        degraded={props.account.healthStatus === "degraded"}
+        settings={props.account.settings}
+      />
+      <div className="note-order">
+        <button type="button" onClick={() => void props.onSync(props.account)}>
+          Sync Now
+        </button>
+        <button type="button" onClick={() => void props.onReconnect(props.account)}>
+          Reconnect
+        </button>
+        <button type="button" onClick={() => void props.onDisconnect(props.account)}>
+          Disconnect
+        </button>
+      </div>
+    </article>
+  );
+}
+
 function GmailDiagnosticsSummary(props: {
   diagnostics: GmailDiagnostics | undefined;
   degraded: boolean;
@@ -2129,11 +2218,62 @@ function GmailDiagnosticsSummary(props: {
 }): ReactElement | null {
   const incremental = gmailOperationSummary(props.settings, "Incremental");
   const imap = gmailOperationSummary(props.settings, "Imap");
-  if (!props.diagnostics && !incremental && !imap) return null;
+  const engineDiagnostics = gmailEngineDiagnostics(props.settings);
+  const comparison = gmailComparisonDiagnostics(props.settings);
+  if (!props.diagnostics && !incremental && !imap && !engineDiagnostics) return null;
   const summary = props.diagnostics?.summary;
   const recentMessages = props.diagnostics?.messages.slice(0, 8) ?? [];
   return (
     <section className="gmail-diagnostics" aria-label="Gmail sync diagnostics">
+      {engineDiagnostics ? (
+        <div className="gmail-operation">
+          <strong>Gmail Sync Diagnostics</strong>
+          <div className="gmail-diagnostics-grid">
+            <span>Engine: {gmailEngineLabel(engineDiagnostics.engine)}</span>
+            <span>
+              Last Sync:{" "}
+              {engineDiagnostics.lastSyncAt
+                ? new Date(engineDiagnostics.lastSyncAt).toLocaleString()
+                : "Never"}
+            </span>
+            <span>Duration: {engineDiagnostics.durationMs ?? 0} ms</span>
+            <span>{engineDiagnostics.scanned} messages scanned</span>
+            <span>{engineDiagnostics.processed} messages processed</span>
+            <span>{engineDiagnostics.created} notifications created</span>
+            <span>{engineDiagnostics.duplicates} duplicates</span>
+            <span>{engineDiagnostics.suppressed} suppressed</span>
+            <span>{engineDiagnostics.failures} failures</span>
+            <span>
+              Last Successful Sync:{" "}
+              {engineDiagnostics.lastSuccessfulAt
+                ? new Date(engineDiagnostics.lastSuccessfulAt).toLocaleString()
+                : "Never"}
+            </span>
+            <span>Average Sync Time: {engineDiagnostics.averageMs ?? 0} ms</span>
+            <span>Expected Messages: {engineDiagnostics.expectedMessages}</span>
+            <span>Actual Notifications: {engineDiagnostics.actualNotifications}</span>
+            <span>Difference: {engineDiagnostics.difference}</span>
+          </div>
+          {engineDiagnostics.difference !== 0 ? (
+            <p className="connector-warning">Possible missed messages detected.</p>
+          ) : null}
+        </div>
+      ) : null}
+      {comparison ? (
+        <div className="gmail-operation">
+          <strong>Preview Comparison</strong>
+          <div className="gmail-diagnostics-grid">
+            <span>Gmail API discovered: {comparison.apiDiscovered}</span>
+            <span>IMAP discovered: {comparison.imapDiscovered}</span>
+            <span>Notifications created: {comparison.notificationsCreated}</span>
+            <span>Duplicates: {comparison.duplicates}</span>
+            <span>Failures: {comparison.failures}</span>
+          </div>
+          {comparison.mismatch ? (
+            <p className="connector-warning">Possible missed messages detected.</p>
+          ) : null}
+        </div>
+      ) : null}
       {imap ? <GmailOperationPanel title="Last IMAP Sync" item={imap} /> : null}
       {incremental ? (
         <GmailOperationPanel title="Last Incremental Sync" item={incremental} />
@@ -2227,6 +2367,77 @@ function GmailSummaryGrid(props: {
       </div>
     </>
   );
+}
+
+function gmailSelectedEngine(settings: ConnectorAccount["settings"]): "gmail_api" | "gmail_imap" {
+  return settings.gmailRequestedIngestionEngine === "gmail_imap" ||
+    settings.gmailIngestionEngine === "gmail_imap"
+    ? "gmail_imap"
+    : "gmail_api";
+}
+
+function gmailActiveEngine(settings: ConnectorAccount["settings"]): "gmail_api" | "gmail_imap" {
+  return settings.gmailIngestionEngine === "gmail_imap" ? "gmail_imap" : "gmail_api";
+}
+
+function gmailEngineLabel(engine: "gmail_api" | "gmail_imap"): string {
+  return engine === "gmail_imap" ? "Gmail IMAP (Preview)" : "Gmail API";
+}
+
+function gmailEngineDiagnostics(settings: ConnectorAccount["settings"]): {
+  engine: "gmail_api" | "gmail_imap";
+  lastSyncAt: string | null;
+  durationMs: number | null;
+  scanned: number;
+  processed: number;
+  created: number;
+  duplicates: number;
+  suppressed: number;
+  failures: number;
+  lastSuccessfulAt: string | null;
+  averageMs: number | null;
+  expectedMessages: number;
+  actualNotifications: number;
+  difference: number;
+} | null {
+  const lastSyncAt = stringSetting(settings.gmailLastSyncAt);
+  const engine = settings.gmailLastSyncEngine === "gmail_imap" ? "gmail_imap" : "gmail_api";
+  if (!lastSyncAt && settings.gmailLastSyncScanned === undefined) return null;
+  return {
+    engine,
+    lastSyncAt,
+    durationMs: nullableNumberSetting(settings.gmailLastSyncDurationMs),
+    scanned: numberSetting(settings.gmailLastSyncScanned),
+    processed: numberSetting(settings.gmailLastSyncProcessed),
+    created: numberSetting(settings.gmailLastSyncCreated),
+    duplicates: numberSetting(settings.gmailLastSyncDuplicate),
+    suppressed: numberSetting(settings.gmailLastSyncSuppressed),
+    failures: numberSetting(settings.gmailLastSyncFailed),
+    lastSuccessfulAt: stringSetting(settings.gmailLastSuccessfulSyncAt),
+    averageMs: nullableNumberSetting(settings.gmailAverageSyncMs),
+    expectedMessages: numberSetting(settings.gmailExpectedMessages),
+    actualNotifications: numberSetting(settings.gmailActualNotifications),
+    difference: numberSetting(settings.gmailMissingMessageDifference)
+  };
+}
+
+function gmailComparisonDiagnostics(settings: ConnectorAccount["settings"]): {
+  apiDiscovered: number;
+  imapDiscovered: number;
+  notificationsCreated: number;
+  duplicates: number;
+  failures: number;
+  mismatch: boolean;
+} | null {
+  if (!stringSetting(settings.gmailLastComparisonAt)) return null;
+  return {
+    apiDiscovered: numberSetting(settings.gmailLastComparisonApiDiscovered),
+    imapDiscovered: numberSetting(settings.gmailLastComparisonImapDiscovered),
+    notificationsCreated: numberSetting(settings.gmailLastComparisonNotificationsCreated),
+    duplicates: numberSetting(settings.gmailLastComparisonDuplicates),
+    failures: numberSetting(settings.gmailLastComparisonFailures),
+    mismatch: settings.gmailLastComparisonMismatch === true
+  };
 }
 
 function gmailOperationSummary(

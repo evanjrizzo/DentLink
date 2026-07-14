@@ -225,7 +225,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       status: "connected",
       healthStatus: "healthy",
       syncStatus: "idle",
-      settings: { googleEmail: "gmail-refresh@example.invalid" },
+      settings: { googleEmail: "gmail-refresh@example.invalid", gmailIngestionEngine: "gmail_api" },
       credentialRef: "credential_browser_refresh",
       credentialStatus: "configured",
       syncCursor: "history_100",
@@ -291,6 +291,33 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         await fulfillJson(route, gmailDiagnostics);
         return;
       }
+      if (method === "PUT" && path === `/v1/connectors/gmail/${gmailAccount.id}/engine`) {
+        const body = (await request.postDataJSON()) as {
+          engine: "gmail_api" | "gmail_imap";
+          comparisonMode?: boolean;
+        };
+        const updatedAt = new Date().toISOString();
+        gmailAccount.settings = {
+          ...gmailAccount.settings,
+          gmailRequestedIngestionEngine: body.engine,
+          gmailIngestionEngine:
+            body.engine === "gmail_imap" ? gmailAccount.settings.gmailIngestionEngine : "gmail_api",
+          gmailImapComparisonMode: body.comparisonMode === true,
+          gmailReconnectRequired: body.engine === "gmail_imap"
+        };
+        gmailAccount.healthStatus = body.engine === "gmail_imap" ? "degraded" : "healthy";
+        gmailAccount.errorCode =
+          body.engine === "gmail_imap" ? "gmail_imap_reconnect_required" : null;
+        gmailAccount.errorMessage =
+          body.engine === "gmail_imap"
+            ? "Reconnect Gmail to grant full Gmail mailbox access required for IMAP sync."
+            : null;
+        gmailAccount.updatedAt = updatedAt;
+        gmailAccount.version += 1;
+        gmailDiagnostics = { ...gmailDiagnostics, account: gmailAccount };
+        await fulfillJson(route, gmailAccount);
+        return;
+      }
       if (method === "POST" && path === `/v1/connectors/gmail/${gmailAccount.id}/sync`) {
         const syncedAt = new Date().toISOString();
         gmailAccount.lastSyncAt = syncedAt;
@@ -306,7 +333,22 @@ test.describe("Milestone 2.1 preview browser verification", () => {
           gmailLastIncrementalDuplicate: 12,
           gmailLastIncrementalSkipped: 3,
           gmailLastIncrementalFiltered: 0,
-          gmailLastIncrementalFailed: 2
+          gmailLastIncrementalFailed: 2,
+          gmailLastSyncEngine: "gmail_api",
+          gmailLastSyncAt: syncedAt,
+          gmailLastSyncStatus: "partial",
+          gmailLastSyncDurationMs: 612,
+          gmailLastSyncScanned: 142,
+          gmailLastSyncProcessed: 142,
+          gmailLastSyncCreated: 118,
+          gmailLastSyncDuplicate: 12,
+          gmailLastSyncSuppressed: 0,
+          gmailLastSyncFailed: 2,
+          gmailLastSuccessfulSyncAt: null,
+          gmailAverageSyncMs: 612,
+          gmailExpectedMessages: 142,
+          gmailActualNotifications: 130,
+          gmailMissingMessageDifference: 12
         };
         gmailAccount.updatedAt = syncedAt;
         gmailAccount.version += 1;
@@ -392,17 +434,34 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await page.getByRole("button", { name: "Connectors" }).click();
     await expect(page.getByText(gmailAccount.displayName)).toBeVisible();
     await expect(page.getByText("Last sync: Never")).toBeVisible();
+    await expect(page.getByLabel("Gmail Ingestion Engine")).toHaveValue("gmail_api");
+    await expect(page.getByText("Active engine: Gmail API")).toBeVisible();
+    await page.getByLabel("Gmail Ingestion Engine").selectOption("gmail_imap");
+    await expect(
+      page.getByText("Reconnect Required. Gmail IMAP requires full Gmail mailbox access")
+    ).toBeVisible();
+    await expect(page.getByLabel("Enable preview comparison mode")).toBeVisible();
+    await expect(page.getByText("Active engine: Gmail API")).toBeVisible();
 
     await page.getByRole("button", { name: "Sync Now" }).click();
     await expect(notificationCard(page, "Gmail synced message")).toBeVisible();
     await page.getByRole("button", { name: "Connectors" }).click();
     await expect(page.getByText("Last sync: Never")).toHaveCount(0);
     await expect(page.getByText("142 messages examined")).toBeVisible();
-    await expect(page.getByText("118 notifications created")).toBeVisible();
+    await expect(page.getByText("118 notifications created").first()).toBeVisible();
     await expect(page.getByText("7 updated")).toBeVisible();
-    await expect(page.getByText("12 duplicates")).toBeVisible();
+    await expect(page.getByText("12 duplicates").first()).toBeVisible();
     await expect(page.getByText("3 skipped")).toBeVisible();
-    await expect(page.getByText("2 failed")).toBeVisible();
+    await expect(page.getByText("2 failed").first()).toBeVisible();
+    await expect(page.getByText("Gmail Sync Diagnostics")).toBeVisible();
+    await expect(page.getByText("Engine: Gmail API", { exact: true })).toBeVisible();
+    await expect(page.getByText("Duration: 612 ms")).toBeVisible();
+    await expect(page.getByText("142 messages scanned")).toBeVisible();
+    await expect(page.getByText("142 messages processed")).toBeVisible();
+    await expect(page.getByText("Expected Messages: 142")).toBeVisible();
+    await expect(page.getByText("Actual Notifications: 130")).toBeVisible();
+    await expect(page.getByText("Difference: 12")).toBeVisible();
+    await expect(page.getByText("Possible missed messages detected.")).toBeVisible();
     await expect(
       page.getByText(
         "2 Gmail messages could not be processed. Successfully processed messages were still imported."
@@ -414,7 +473,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByText("IMAP-enabled accounts use a rolling recent scan")).toBeVisible();
     await expect(page.getByRole("button", { name: "Backfill 30 Days" })).toHaveCount(0);
     await expect(page.getByText("Last Incremental Sync")).toBeVisible();
-    await expect(page.getByText("118 notifications created")).toBeVisible();
+    await expect(page.getByText("118 notifications created").first()).toBeVisible();
 
     notifications = [
       ...notifications,

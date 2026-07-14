@@ -98,6 +98,12 @@ must reconnect with the `https://mail.google.com/` scope and pass an IMAP capabi
 the credential is accepted. IMAP duplicate prevention prefers `X-GM-MSGID`, then `Message-ID`, then
 a mailbox UID fallback.
 
+Milestone 7 Slice 3.3 makes the IMAP engine selectable in preview without manual database edits. The
+selector persists a requested engine separately from the active engine so a failed IMAP reconnect
+does not silently switch ingestion away from Gmail API. Once reconnect succeeds, Sync Now and the
+scheduled Worker cron use the active engine. IMAP comparison mode is diagnostic-only: it runs Gmail
+API discovery after IMAP and stores comparison metrics without creating duplicate Notifications.
+
 Milestone 4 adds Google Calendar using the same provider-neutral connector framework. Google
 Calendar OAuth links a calendar connector account, encrypted refresh tokens remain in connector
 credential storage, and synced event instances are normalized into `calendar_events` plus connector

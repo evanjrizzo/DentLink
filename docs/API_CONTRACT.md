@@ -197,6 +197,11 @@ Google Calendar or any other Google service.
 - `GET /v1/connectors/gmail/:accountId/diagnostics`: authenticated diagnostics for an owned Gmail
   connector account. Returns aggregate processing counts and recent per-message outcomes without raw
   email bodies.
+- `PUT /v1/connectors/gmail/:accountId/engine`: authenticated update of the Gmail ingestion engine
+  for an owned Gmail connector account. Body includes `expectedVersion`, `engine` (`gmail_api` or
+  `gmail_imap`), and optional `comparisonMode`. Selecting IMAP without a verified IMAP credential
+  records a pending selection and reconnect requirement; it does not activate IMAP until OAuth
+  reconnect succeeds.
 - `GET /v1/connectors/gmail/:accountId/rules`: authenticated read of deterministic Gmail rules for
   an owned Gmail connector account.
 - `PUT /v1/connectors/gmail/:accountId/rules`: authenticated replacement of deterministic Gmail
@@ -211,9 +216,9 @@ Gmail sync stores normalized source records with provider metadata, including `p
 `provider_item_id`, `history_id`, `thread_id`, `message_id`, `internal_date`, `labels`, `permalink`,
 and `connector_account`. Gmail-created notifications use source `connector`, source label `Gmail`,
 the sender and subject, unread state in summary text, received timestamp metadata in the source
-record, and a Gmail deep link. The Gmail API engine does not download message bodies or
-attachments. The IMAP engine may fetch bounded MIME content for parsing, but diagnostics and
-Notifications still store only normalized metadata and attachment metadata.
+record, and a Gmail deep link. The Gmail API engine does not download message bodies or attachments.
+The IMAP engine may fetch bounded MIME content for parsing, but diagnostics and Notifications still
+store only normalized metadata and attachment metadata.
 
 The Gmail connector explicitly requests the read-only Gmail scope:
 
@@ -227,14 +232,17 @@ request it in the authorization URL. DentLink does not request `gmail.modify`. T
 the `q` search parameter when accessed with `gmail.metadata`.
 
 Milestone 7 Slice 3.2 adds a preview-only Gmail IMAP ingestion engine behind connector account
-settings. IMAP accounts require a reconnect that explicitly requests:
+settings. Slice 3.3 exposes account-level engine selection. IMAP accounts require a reconnect that
+explicitly requests:
 
 ```text
 https://mail.google.com/
 ```
 
-Existing Gmail API accounts are not migrated automatically. A successful IMAP reconnect means the
-new credential was granted the IMAP scope and passed a server-side IMAP login/capability check.
+Existing Gmail API accounts are not migrated automatically. Selecting IMAP first sets
+`gmailRequestedIngestionEngine = "gmail_imap"` and `gmailReconnectRequired = true`; the active
+`gmailIngestionEngine` remains unchanged until reconnect succeeds. A successful IMAP reconnect means
+the new credential was granted the IMAP scope and passed a server-side IMAP login/capability check.
 
 Milestone 7 Phase 1 extends Gmail sync responses with per-message processing outcomes while keeping
 the same endpoint:
@@ -275,6 +283,13 @@ The diagnostics endpoint returns:
 - `summary`: aggregate counts derived from Gmail source-record outcomes.
 - `messages`: recent entries with Gmail message ID, outcome, processing reason, processed timestamp,
   linked DentLink notification ID where present, and source record ID.
+
+Connector settings additionally store engine-aware diagnostics for the connector card: selected and
+active engine, last sync timestamp, duration, scanned count, processed count, notifications created,
+duplicates, suppressed count, failures, last successful sync, average sync time, expected messages,
+actual notifications, and missing-message difference. Preview comparison mode stores the latest
+Gmail API discovery count beside IMAP discovery, created, duplicate, and failure counts without
+creating Gmail API notifications.
 
 ## Milestone 4 Google Calendar endpoints
 

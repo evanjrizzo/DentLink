@@ -18,8 +18,10 @@ import {
   startGmailOAuth,
   syncConnectedGmailAccounts,
   syncGmailAccount,
+  updateGmailEngine,
   updateGmailRules,
   type GmailApiClient,
+  type GmailEngineUpdateInput,
   type GmailRuntimeEnv
 } from "./gmail";
 import {
@@ -385,6 +387,18 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     if (gmailDiagnosticsMatch && method === "GET") {
       return json(await getGmailDiagnostics(store, auth.user.id, gmailDiagnosticsMatch[1] ?? ""));
     }
+    const gmailEngineMatch = path.match(/^\/v1\/connectors\/gmail\/([^/]+)\/engine$/);
+    if (gmailEngineMatch && method === "PUT") {
+      return json(
+        await updateGmailEngine(
+          store,
+          auth.user.id,
+          gmailEngineMatch[1] ?? "",
+          parseGmailEngineBody(await readJson(request)),
+          now
+        )
+      );
+    }
     const gmailRulesMatch = path.match(/^\/v1\/connectors\/gmail\/([^/]+)\/rules$/);
     if (gmailRulesMatch && method === "GET") {
       return json(await getGmailRules(store, auth.user.id, gmailRulesMatch[1] ?? ""));
@@ -724,6 +738,33 @@ function parseGmailRulesBody(value: unknown): GmailRule[] {
     throw new ValidationError("too_many_gmail_rules", "Too many Gmail rules");
   }
   return rules as GmailRule[];
+}
+
+function parseGmailEngineBody(value: unknown): GmailEngineUpdateInput {
+  if (!value || typeof value !== "object") {
+    throw new ValidationError("invalid_gmail_engine", "Gmail engine payload is invalid");
+  }
+  const input = value as {
+    expectedVersion?: unknown;
+    engine?: unknown;
+    comparisonMode?: unknown;
+  };
+  if (typeof input.expectedVersion !== "number" || !Number.isInteger(input.expectedVersion)) {
+    throw new ValidationError("invalid_expected_version", "Expected version is required");
+  }
+  const expectedVersion = input.expectedVersion;
+  if (input.engine !== "gmail_api" && input.engine !== "gmail_imap") {
+    throw new ValidationError("invalid_gmail_engine", "Gmail ingestion engine is invalid");
+  }
+  const engine = input.engine;
+  if (input.comparisonMode !== undefined && typeof input.comparisonMode !== "boolean") {
+    throw new ValidationError("invalid_gmail_engine", "Comparison mode must be a boolean");
+  }
+  return {
+    expectedVersion,
+    engine,
+    comparisonMode: input.comparisonMode
+  };
 }
 
 function isConflict(value: unknown): value is NoteConflict {

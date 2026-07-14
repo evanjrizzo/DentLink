@@ -260,6 +260,20 @@ export class DentLinkApiClient {
     return this.request<GmailDiagnostics>(`/v1/connectors/gmail/${accountId}/diagnostics`);
   }
 
+  async updateGmailEngine(
+    accountId: EntityId,
+    input: {
+      expectedVersion: number;
+      engine: "gmail_api" | "gmail_imap";
+      comparisonMode?: boolean;
+    }
+  ): Promise<ConnectorAccount> {
+    return this.request<ConnectorAccount>(`/v1/connectors/gmail/${accountId}/engine`, {
+      method: "PUT",
+      body: input
+    });
+  }
+
   async getGmailRules(accountId: EntityId): Promise<GmailRulesResponse> {
     return this.request<GmailRulesResponse>(`/v1/connectors/gmail/${accountId}/rules`);
   }

@@ -67,6 +67,12 @@ export type GmailImapClient = {
   verify(options: Pick<GmailImapPollOptions, "user" | "accessToken" | "now">): Promise<void>;
 };
 
+export type GmailEngineUpdateInput = {
+  expectedVersion: number;
+  engine: GmailIngestionEngine;
+  comparisonMode?: boolean;
+};
+
 export type GmailApiClient = {
   exchangeCode(code: string, redirectUri: string): Promise<GmailTokenResponse>;
   refreshAccessToken(refreshToken: string): Promise<GmailTokenResponse>;
@@ -228,7 +234,7 @@ export async function completeGmailOAuth(
       : null;
     const targetEngine =
       targetAccount && targetAccount.connectorKey === GMAIL_CONNECTOR_KEY
-        ? gmailIngestionEngine(targetAccount.settings)
+        ? requestedGmailIngestionEngine(targetAccount.settings)
         : "gmail_api";
     const requiredScope = targetEngine === "gmail_imap" ? GMAIL_IMAP_SCOPE : GMAIL_READONLY_SCOPE;
     if (!grantedScopes.includes(requiredScope)) {
@@ -284,7 +290,8 @@ export async function completeGmailOAuth(
           {
             ...account.settings,
             googleEmail: profile.emailAddress,
-            [GMAIL_INGESTION_ENGINE_SETTING_KEY]: targetEngine
+            [GMAIL_INGESTION_ENGINE_SETTING_KEY]: targetEngine,
+            gmailRequestedIngestionEngine: targetEngine
           },
           grantedScopes.join(" "),
           requiredScope
@@ -372,6 +379,7 @@ export async function syncGmailAccount(
     now
   );
   if (!syncing) throw new StoreError("not_found", "Gmail account not found");
+  const startedAt = Date.now();
 
   try {
     const credential = await store.getConnectorCredential(
@@ -399,6 +407,7 @@ export async function syncGmailAccount(
     const latest = await store.getConnectorAccount(userId, account.id);
     if (!latest) throw new StoreError("not_found", "Gmail account not found");
     const summary = summarizeGmailOutcomes(messages.messageIds.length, result.outcomes);
+    const elapsedMs = Date.now() - startedAt;
     const failed = result.outcomes.filter((outcome) => outcome.status === "failed");
     const nextCursor =
       failed.length === 0
@@ -416,7 +425,14 @@ export async function syncGmailAccount(
         lastSyncAt: now,
         lastHealthAt: now,
         settings: withGmailOperationSummary(
-          latest.settings,
+          withGmailEngineDiagnostics(
+            latest.settings,
+            "gmail_api",
+            now,
+            failed.length > 0 ? "partial" : "success",
+            summary,
+            elapsedMs
+          ),
           "incremental",
           now,
           failed.length > 0 ? "partial" : "success",
@@ -619,6 +635,69 @@ export async function updateGmailRules(
   return { account: updated, rules: normalized };
 }
 
+export async function updateGmailEngine(
+  store: DentLinkStore,
+  userId: EntityId,
+  accountId: EntityId,
+  input: GmailEngineUpdateInput,
+  now: string
+): Promise<ConnectorAccount> {
+  const account = await requireGmailAccount(store, userId, accountId);
+  if (input.engine === "gmail_api") {
+    const updated = await store.updateConnectorAccount(
+      userId,
+      account.id,
+      input.expectedVersion,
+      {
+        status: "connected",
+        healthStatus: "healthy",
+        syncStatus: "idle",
+        lastHealthAt: now,
+        settings: {
+          ...account.settings,
+          gmailIngestionEngine: "gmail_api",
+          gmailRequestedIngestionEngine: "gmail_api",
+          gmailImapComparisonMode: false,
+          gmailReconnectRequired: knownGmailScopesMissReadonly(account.settings)
+        },
+        errorCode: null,
+        errorMessage: null
+      },
+      now
+    );
+    if (!updated)
+      throw new StoreError("version_mismatch", "Connector account changed on the server");
+    return updated;
+  }
+
+  const comparisonMode = input.comparisonMode === true;
+  const imapReady =
+    account.settings.gmailImapGranted === true && !knownGmailScopesMissImap(account.settings);
+  const updated = await store.updateConnectorAccount(
+    userId,
+    account.id,
+    input.expectedVersion,
+    {
+      status: "connected",
+      healthStatus: imapReady ? "healthy" : "degraded",
+      syncStatus: "idle",
+      lastHealthAt: now,
+      settings: {
+        ...account.settings,
+        gmailRequestedIngestionEngine: "gmail_imap",
+        gmailIngestionEngine: imapReady ? "gmail_imap" : gmailIngestionEngine(account.settings),
+        gmailImapComparisonMode: comparisonMode,
+        gmailReconnectRequired: !imapReady
+      },
+      errorCode: imapReady ? null : "gmail_imap_reconnect_required",
+      errorMessage: imapReady ? null : GMAIL_IMAP_RECONNECT_MESSAGE
+    },
+    now
+  );
+  if (!updated) throw new StoreError("version_mismatch", "Connector account changed on the server");
+  return updated;
+}
+
 export async function syncConnectedGmailAccounts(
   store: DentLinkStore,
   env: GmailRuntimeEnv,
@@ -808,6 +887,10 @@ async function syncGmailImapAccount(
   const summary = summarizeGmailOutcomes(poll.discoveredUids.length, result.outcomes);
   const failed = result.outcomes.filter((outcome) => outcome.status === "failed");
   const elapsedMs = Date.now() - startedAt;
+  const comparison =
+    latest.settings.gmailImapComparisonMode === true
+      ? await gmailImapApiComparison(env, accessToken, account, poll, summary)
+      : null;
   const updated = await store.updateConnectorAccount(
     userId,
     latest.id,
@@ -818,18 +901,28 @@ async function syncGmailImapAccount(
       syncStatus: "idle",
       lastSyncAt: now,
       lastHealthAt: now,
-      settings: withGmailImapSummary(
-        withGmailOperationSummary(
-          latest.settings,
-          "incremental",
+      settings: withGmailComparisonMetrics(
+        withGmailImapSummary(
+          withGmailOperationSummary(
+            withGmailEngineDiagnostics(
+              latest.settings,
+              "gmail_imap",
+              now,
+              failed.length > 0 ? "partial" : "success",
+              summary,
+              elapsedMs
+            ),
+            "incremental",
+            now,
+            failed.length > 0 ? "partial" : "success",
+            summary
+          ),
           now,
           failed.length > 0 ? "partial" : "success",
-          summary
+          summary,
+          elapsedMs
         ),
-        now,
-        failed.length > 0 ? "partial" : "success",
-        summary,
-        elapsedMs
+        comparison
       ),
       errorCode: failed.length > 0 ? "gmail_partial_sync_failed" : null,
       errorMessage:
@@ -840,9 +933,6 @@ async function syncGmailImapAccount(
     now
   );
   if (!updated) throw new StoreError("not_found", "Gmail account not found");
-  if (latest.settings.gmailImapParallelCompare === true) {
-    await logGmailImapApiComparison(env, accessToken, account, poll, summary);
-  }
   return {
     account: updated,
     processed: summary.examined,
@@ -1591,7 +1681,7 @@ async function requestedGmailOAuthScope(
   if (!reconnectAccountId) return GMAIL_DEFAULT_SCOPE;
   const account = await store.getConnectorAccount(userId, reconnectAccountId);
   if (!account || account.connectorKey !== GMAIL_CONNECTOR_KEY) return GMAIL_DEFAULT_SCOPE;
-  return gmailIngestionEngine(account.settings) === "gmail_imap"
+  return requestedGmailIngestionEngine(account.settings) === "gmail_imap"
     ? GMAIL_IMAP_SCOPE
     : GMAIL_DEFAULT_SCOPE;
 }
@@ -1736,6 +1826,14 @@ async function cloudflareImapSocketFactory(host: string, port: number): Promise<
 
 function gmailIngestionEngine(settings: ConnectorAccount["settings"]): GmailIngestionEngine {
   return settings[GMAIL_INGESTION_ENGINE_SETTING_KEY] === "gmail_imap" ? "gmail_imap" : "gmail_api";
+}
+
+function requestedGmailIngestionEngine(
+  settings: ConnectorAccount["settings"]
+): GmailIngestionEngine {
+  return settings.gmailRequestedIngestionEngine === "gmail_imap"
+    ? "gmail_imap"
+    : gmailIngestionEngine(settings);
 }
 
 function headersByName(message: GmailMessage): Map<string, string> {
@@ -1889,7 +1987,10 @@ function withGmailOperationSummary(
   summary: GmailSyncResult["summary"]
 ): ConnectorAccount["settings"] {
   const prefix = operation === "incremental" ? "gmailLastIncremental" : "gmailLastBackfill";
-  const reconnectRequired = knownGmailScopesMissReadonly(settings) ? true : false;
+  const reconnectRequired =
+    requestedGmailIngestionEngine(settings) === "gmail_imap"
+      ? knownGmailScopesMissImap(settings)
+      : knownGmailScopesMissReadonly(settings);
   return {
     ...settings,
     gmailReconnectRequired: reconnectRequired,
@@ -1905,6 +2006,41 @@ function withGmailOperationSummary(
     [`${prefix}Skipped`]: summary.skipped,
     [`${prefix}Filtered`]: summary.filtered,
     [`${prefix}Failed`]: summary.failed
+  };
+}
+
+function withGmailEngineDiagnostics(
+  settings: ConnectorAccount["settings"],
+  engine: GmailIngestionEngine,
+  now: string,
+  status: "success" | "partial",
+  summary: GmailSyncResult["summary"],
+  elapsedMs: number
+): ConnectorAccount["settings"] {
+  const priorAverage =
+    typeof settings.gmailAverageSyncMs === "number" ? settings.gmailAverageSyncMs : elapsedMs;
+  const average = Math.round((priorAverage + elapsedMs) / 2);
+  const actualNotifications = summary.created + summary.duplicate;
+  const expectedMessages = summary.discovered;
+  const difference = Math.max(0, expectedMessages - actualNotifications - summary.filtered);
+  return {
+    ...settings,
+    gmailLastSyncEngine: engine,
+    gmailLastSyncAt: now,
+    gmailLastSyncStatus: status,
+    gmailLastSyncDurationMs: elapsedMs,
+    gmailLastSyncScanned: summary.discovered,
+    gmailLastSyncProcessed: summary.examined,
+    gmailLastSyncCreated: summary.created,
+    gmailLastSyncDuplicate: summary.duplicate,
+    gmailLastSyncSuppressed: summary.filtered,
+    gmailLastSyncFailed: summary.failed,
+    gmailLastSuccessfulSyncAt:
+      summary.failed === 0 ? now : (settings.gmailLastSuccessfulSyncAt ?? null),
+    gmailAverageSyncMs: average,
+    gmailExpectedMessages: expectedMessages,
+    gmailActualNotifications: actualNotifications,
+    gmailMissingMessageDifference: difference
   };
 }
 
@@ -1932,6 +2068,33 @@ function withGmailImapSummary(
     gmailLastImapAverageSyncMs: average,
     gmailLastImapErrorCode: null,
     gmailLastImapErrorMessage: null
+  };
+}
+
+type GmailComparisonMetrics = {
+  at: string;
+  apiDiscovered: number;
+  imapDiscovered: number;
+  imapNotificationsCreated: number;
+  imapDuplicates: number;
+  imapFailures: number;
+  mismatch: boolean;
+};
+
+function withGmailComparisonMetrics(
+  settings: ConnectorAccount["settings"],
+  comparison: GmailComparisonMetrics | null
+): ConnectorAccount["settings"] {
+  if (!comparison) return settings;
+  return {
+    ...settings,
+    gmailLastComparisonAt: comparison.at,
+    gmailLastComparisonApiDiscovered: comparison.apiDiscovered,
+    gmailLastComparisonImapDiscovered: comparison.imapDiscovered,
+    gmailLastComparisonNotificationsCreated: comparison.imapNotificationsCreated,
+    gmailLastComparisonDuplicates: comparison.imapDuplicates,
+    gmailLastComparisonFailures: comparison.imapFailures,
+    gmailLastComparisonMismatch: comparison.mismatch
   };
 }
 
@@ -1988,29 +2151,39 @@ function knownGmailScopesMissImap(settings: ConnectorAccount["settings"]): boole
   return !normalizeScopes(scopeValue).includes(GMAIL_IMAP_SCOPE);
 }
 
-async function logGmailImapApiComparison(
+async function gmailImapApiComparison(
   env: GmailRuntimeEnv,
   accessToken: string,
   account: ConnectorAccount,
   poll: GmailImapPollResult,
   summary: GmailSyncResult["summary"]
-): Promise<void> {
+): Promise<GmailComparisonMetrics | null> {
   try {
     const apiMessages = await messagesForSync(gmailClient(env), accessToken, account.syncCursor);
+    const comparison = {
+      at: new Date().toISOString(),
+      apiDiscovered: apiMessages.messageIds.length,
+      imapDiscovered: poll.discoveredUids.length,
+      imapNotificationsCreated: summary.created,
+      imapDuplicates: summary.duplicate,
+      imapFailures: summary.failed,
+      mismatch: apiMessages.messageIds.length !== poll.discoveredUids.length
+    };
     console.log(
       JSON.stringify({
         level: "info",
         event: "gmail_imap_parallel_comparison",
         accountId: account.id,
-        imapDiscovered: poll.discoveredUids.length,
+        imapDiscovered: comparison.imapDiscovered,
         imapFetched: poll.messages.length,
-        imapCreated: summary.created,
-        imapDuplicate: summary.duplicate,
-        imapFailed: summary.failed,
-        apiDiscovered: apiMessages.messageIds.length,
-        mismatch: apiMessages.messageIds.length !== poll.discoveredUids.length
+        imapCreated: comparison.imapNotificationsCreated,
+        imapDuplicate: comparison.imapDuplicates,
+        imapFailed: comparison.imapFailures,
+        apiDiscovered: comparison.apiDiscovered,
+        mismatch: comparison.mismatch
       })
     );
+    return comparison;
   } catch (error) {
     console.error(
       JSON.stringify({
@@ -2021,6 +2194,7 @@ async function logGmailImapApiComparison(
         message: safeErrorMessage(error)
       })
     );
+    return null;
   }
 }
 
