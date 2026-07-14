@@ -225,7 +225,11 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       status: "connected",
       healthStatus: "healthy",
       syncStatus: "idle",
-      settings: { googleEmail: "gmail-refresh@example.invalid", gmailIngestionEngine: "gmail_api" },
+      settings: {
+        googleEmail: "gmail-refresh@example.invalid",
+        gmailIngestionEngine: "gmail_api",
+        gmailReadonlyGranted: true
+      },
       credentialRef: "credential_browser_refresh",
       credentialStatus: "configured",
       syncCursor: "history_100",
@@ -350,6 +354,18 @@ test.describe("Milestone 2.1 preview browser verification", () => {
           gmailActualNotifications: 130,
           gmailMissingMessageDifference: 12
         };
+        if (gmailAccount.settings.gmailImapComparisonMode === true) {
+          gmailAccount.settings = {
+            ...gmailAccount.settings,
+            gmailLastComparisonAt: syncedAt,
+            gmailLastComparisonApiDiscovered: 140,
+            gmailLastComparisonImapDiscovered: 142,
+            gmailLastComparisonNotificationsCreated: 118,
+            gmailLastComparisonDuplicates: 12,
+            gmailLastComparisonFailures: 2,
+            gmailLastComparisonMismatch: true
+          };
+        }
         gmailAccount.updatedAt = syncedAt;
         gmailAccount.version += 1;
         notifications = [
@@ -395,6 +411,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         gmailAccount.healthStatus = "degraded";
         gmailAccount.errorCode = "gmail_partial_sync_failed";
         gmailAccount.errorMessage = "2 Gmail messages failed processing";
+        await new Promise((resolve) => setTimeout(resolve, 150));
         await fulfillJson(route, {
           account: gmailAccount,
           processed: 1,
@@ -433,20 +450,34 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByText(user.email)).toBeVisible();
     await page.getByRole("button", { name: "Connectors" }).click();
     await expect(page.getByText(gmailAccount.displayName)).toBeVisible();
-    await expect(page.getByText("Last sync: Never")).toBeVisible();
+    await expect(page.getByText("Last Sync: Never")).toBeVisible();
     await expect(page.getByLabel("Gmail Ingestion Engine")).toHaveValue("gmail_api");
-    await expect(page.getByText("Active engine: Gmail API")).toBeVisible();
+    await expect(page.getByText("Requested Engine: Gmail API")).toBeVisible();
+    await expect(page.getByText("Active Engine: Gmail API")).toBeVisible();
+    await expect(page.getByText("Connection Status: connected")).toBeVisible();
+    await expect(page.getByText("Reconnect Required: No")).toBeVisible();
+    await expect(
+      page.getByText("Next Scheduled Sync: Within 5 minutes after activation")
+    ).toBeVisible();
     await page.getByLabel("Gmail Ingestion Engine").selectOption("gmail_imap");
     await expect(
-      page.getByText("Reconnect Required. Gmail IMAP requires full Gmail mailbox access")
+      page.getByText("Reconnect Required. IMAP requires Gmail mail access")
     ).toBeVisible();
     await expect(page.getByLabel("Enable preview comparison mode")).toBeVisible();
-    await expect(page.getByText("Active engine: Gmail API")).toBeVisible();
+    await expect(page.getByText("Requested Engine: Gmail IMAP (Preview)")).toBeVisible();
+    await expect(page.getByText("Active Engine: Gmail API")).toBeVisible();
+    await expect(page.getByText("Reason: Reconnect required")).toBeVisible();
+    await page.getByLabel("Enable preview comparison mode").click();
+    await expect(page.getByLabel("Enable preview comparison mode")).toBeChecked();
 
     await page.getByRole("button", { name: "Sync Now" }).click();
+    await expect(
+      page.getByRole("button", { name: /Searching|Fetching|Applying rules|Creating notifications/ })
+    ).toBeVisible();
     await expect(notificationCard(page, "Gmail synced message")).toBeVisible();
     await page.getByRole("button", { name: "Connectors" }).click();
-    await expect(page.getByText("Last sync: Never")).toHaveCount(0);
+    await expect(page.getByText("Finished.")).toBeVisible();
+    await expect(page.getByText("Last Sync: Never")).toHaveCount(0);
     await expect(page.getByText("142 messages examined")).toBeVisible();
     await expect(page.getByText("118 notifications created").first()).toBeVisible();
     await expect(page.getByText("7 updated")).toBeVisible();
@@ -456,12 +487,21 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByText("Gmail Sync Diagnostics")).toBeVisible();
     await expect(page.getByText("Engine: Gmail API", { exact: true })).toBeVisible();
     await expect(page.getByText("Duration: 612 ms")).toBeVisible();
+    await expect(page.getByText("Average Sync Time: 612 ms").first()).toBeVisible();
+    await expect(page.getByText("Latest Comparison Result: Mismatch")).toBeVisible();
     await expect(page.getByText("142 messages scanned")).toBeVisible();
     await expect(page.getByText("142 messages processed")).toBeVisible();
     await expect(page.getByText("Expected Messages: 142")).toBeVisible();
     await expect(page.getByText("Actual Notifications: 130")).toBeVisible();
     await expect(page.getByText("Difference: 12")).toBeVisible();
     await expect(page.getByText("Possible missed messages detected.")).toBeVisible();
+    await expect(page.getByText("Preview Comparison", { exact: true })).toBeVisible();
+    await expect(page.getByText("IMAP discovered: 142").first()).toBeVisible();
+    await expect(page.getByText("API discovered: 140").first()).toBeVisible();
+    await expect(page.getByText("Difference: 2").first()).toBeVisible();
+    await expect(
+      page.getByText("Potential missed messages detected. View comparison")
+    ).toBeVisible();
     await expect(
       page.getByText(
         "2 Gmail messages could not be processed. Successfully processed messages were still imported."
@@ -471,6 +511,10 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByText("gmail-message-failed")).toBeVisible();
     await expect(page.getByText("Gmail API request failed")).toBeVisible();
     await expect(page.getByText("IMAP-enabled accounts use a rolling recent scan")).toBeVisible();
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export Diagnostics Download JSON" }).click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toContain("dentlink-gmail-diagnostics");
     await expect(page.getByRole("button", { name: "Backfill 30 Days" })).toHaveCount(0);
     await expect(page.getByText("Last Incremental Sync")).toBeVisible();
     await expect(page.getByText("118 notifications created").first()).toBeVisible();
