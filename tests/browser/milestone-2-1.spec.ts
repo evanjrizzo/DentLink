@@ -363,6 +363,85 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         });
         return;
       }
+      if (method === "POST" && path === `/v1/connectors/gmail/${gmailAccount.id}/backfill`) {
+        const syncedAt = new Date().toISOString();
+        gmailAccount.lastSyncAt = syncedAt;
+        gmailAccount.lastHealthAt = syncedAt;
+        gmailAccount.updatedAt = syncedAt;
+        gmailAccount.version += 1;
+        notifications = [
+          ...notifications,
+          notificationFixture({
+            id: "notification_gmail_historical_1",
+            title: "Historical Gmail one",
+            summary: "Backfilled from Gmail",
+            createdAt: syncedAt,
+            updatedAt: syncedAt
+          }),
+          notificationFixture({
+            id: "notification_gmail_historical_2",
+            title: "Historical Gmail two",
+            summary: "Backfilled from Gmail",
+            createdAt: syncedAt,
+            updatedAt: syncedAt
+          })
+        ];
+        gmailDiagnostics = {
+          account: gmailAccount,
+          summary: {
+            discovered: 2,
+            examined: 2,
+            created: 2,
+            updated: 0,
+            duplicate: 0,
+            skipped: 0,
+            filtered: 0,
+            failed: 0
+          },
+          messages: [
+            {
+              messageId: "gmail-historical-1",
+              outcome: "notification_created",
+              reason: "Created a Gmail notification",
+              processedAt: syncedAt,
+              notificationId: "notification_gmail_historical_1",
+              sourceRecordId: "source_gmail_historical_1"
+            },
+            {
+              messageId: "gmail-historical-2",
+              outcome: "notification_created",
+              reason: "Created a Gmail notification",
+              processedAt: syncedAt,
+              notificationId: "notification_gmail_historical_2",
+              sourceRecordId: "source_gmail_historical_2"
+            }
+          ]
+        };
+        gmailAccount.healthStatus = "healthy";
+        gmailAccount.errorCode = null;
+        gmailAccount.errorMessage = null;
+        await fulfillJson(route, {
+          account: gmailAccount,
+          processed: 2,
+          createdNotifications: 2,
+          summary: gmailDiagnostics.summary,
+          outcomes: [
+            {
+              messageId: "gmail-historical-1",
+              status: "notification_created",
+              reason: "Created a Gmail notification",
+              recordId: "source_gmail_historical_1"
+            },
+            {
+              messageId: "gmail-historical-2",
+              status: "notification_created",
+              reason: "Created a Gmail notification",
+              recordId: "source_gmail_historical_2"
+            }
+          ]
+        });
+        return;
+      }
       await route.fulfill({
         status: 404,
         headers: corsHeaders(),
@@ -399,6 +478,16 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await page.getByText("Recent Gmail processing outcomes").click();
     await expect(page.getByText("gmail-message-failed")).toBeVisible();
     await expect(page.getByText("Gmail API request failed")).toBeVisible();
+    await expect(
+      page.getByText("Sync Now checks Gmail history since the last checkpoint.")
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: "Backfill 30 Days" }).click();
+    await expect(notificationCard(page, "Historical Gmail one")).toBeVisible();
+    await expect(notificationCard(page, "Historical Gmail two")).toBeVisible();
+    await page.getByRole("button", { name: "Connectors" }).click();
+    await expect(page.getByText("2 messages examined")).toBeVisible();
+    await expect(page.getByText("2 notifications created")).toBeVisible();
 
     notifications = [
       ...notifications,

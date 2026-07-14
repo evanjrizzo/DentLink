@@ -224,6 +224,11 @@ textarea {
   padding: 8px 10px;
 }
 
+.connector-help {
+  margin: 0;
+  color: #4b5563;
+}
+
 .diagnostics-table-wrap {
   overflow-x: auto;
 }

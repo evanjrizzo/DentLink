@@ -8,6 +8,7 @@ import {
 } from "./auth";
 import { MemoryDentLinkStore, StoreError, type DentLinkStore } from "./storage";
 import {
+  backfillGmailAccount,
   completeGmailOAuth,
   disconnectGmailAccount,
   getGmailDiagnostics,
@@ -370,6 +371,12 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     const gmailSyncMatch = path.match(/^\/v1\/connectors\/gmail\/([^/]+)\/sync$/);
     if (gmailSyncMatch && method === "POST") {
       return json(await syncGmailAccount(store, auth.user.id, gmailSyncMatch[1] ?? "", env, now));
+    }
+    const gmailBackfillMatch = path.match(/^\/v1\/connectors\/gmail\/([^/]+)\/backfill$/);
+    if (gmailBackfillMatch && method === "POST") {
+      return json(
+        await backfillGmailAccount(store, auth.user.id, gmailBackfillMatch[1] ?? "", env, now)
+      );
     }
     const gmailDiagnosticsMatch = path.match(/^\/v1\/connectors\/gmail\/([^/]+)\/diagnostics$/);
     if (gmailDiagnosticsMatch && method === "GET") {

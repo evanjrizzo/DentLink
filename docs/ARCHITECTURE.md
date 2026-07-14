@@ -77,6 +77,12 @@ diagnostics and retry analysis. The Gmail connector card reads provider-specific
 the API client and displays aggregate sync counts plus recent source-record outcomes; clients still
 do not poll Gmail directly or infer authoritative ingestion health locally.
 
+Milestone 7 Slice 2.1 adds Gmail backfill as a separate connector action from incremental sync.
+Backfill uses Gmail message-list pagination over a recent time window to recover historical
+messages, while incremental sync continues to use the history checkpoint. Source-record uniqueness
+keeps imported messages duplicate-safe across both modes, and the history checkpoint advances only
+after incremental processing completes without per-message failures.
+
 Milestone 4 adds Google Calendar using the same provider-neutral connector framework. Google
 Calendar OAuth links a calendar connector account, encrypted refresh tokens remain in connector
 credential storage, and synced event instances are normalized into `calendar_events` plus connector

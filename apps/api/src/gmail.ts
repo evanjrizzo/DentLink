@@ -36,7 +36,10 @@ export type GmailApiClient = {
   exchangeCode(code: string, redirectUri: string): Promise<GmailTokenResponse>;
   refreshAccessToken(refreshToken: string): Promise<GmailTokenResponse>;
   getProfile(accessToken: string): Promise<GmailProfile>;
-  listMessages(accessToken: string, pageToken?: string): Promise<GmailMessageList>;
+  listMessages(
+    accessToken: string,
+    options?: string | GmailListMessagesOptions
+  ): Promise<GmailMessageList>;
   listHistory(
     accessToken: string,
     startHistoryId: string,
@@ -55,6 +58,11 @@ export type GmailProfile = {
 export type GmailMessageList = {
   messages: Array<{ id: string; threadId?: string }>;
   nextPageToken?: string;
+};
+
+export type GmailListMessagesOptions = {
+  pageToken?: string;
+  query?: string;
 };
 
 export type GmailHistoryList = {
@@ -240,34 +248,23 @@ export async function syncGmailAccount(
     const gmail = gmailClient(env);
     const token = await gmail.refreshAccessToken(refreshToken);
     const messages = await messagesForSync(gmail, token.accessToken, syncing.syncCursor);
-    let createdNotifications = 0;
-    const outcomes: GmailSyncResult["outcomes"] = [];
-    let nextCursor = syncing.syncCursor;
-    for (const messageId of messages.messageIds) {
-      try {
-        const existingRecord = await store.findConnectorSourceRecord(userId, syncing.id, messageId);
-        if (existingRecord && !shouldRetryGmailSourceRecord(existingRecord.status)) {
-          outcomes.push(
-            await recordGmailMessageDuplicate(store, userId, syncing, existingRecord, now)
-          );
-          continue;
-        }
-        const message = await gmail.getMessage(token.accessToken, messageId);
-        nextCursor = maxHistoryId(nextCursor, message.historyId);
-        const outcome = await ingestGmailMessage(store, userId, syncing, message, now);
-        outcomes.push(outcome);
-        if (outcome.status === "notification_created") createdNotifications += 1;
-      } catch (error) {
-        outcomes.push(
-          await recordGmailMessageFailure(store, userId, syncing, messageId, error, now)
-        );
-      }
-    }
-    nextCursor = messages.historyId ?? nextCursor;
+    const result = await processGmailMessageIds(
+      store,
+      userId,
+      syncing,
+      gmail,
+      token.accessToken,
+      messages.messageIds,
+      now
+    );
     const latest = await store.getConnectorAccount(userId, account.id);
     if (!latest) throw new StoreError("not_found", "Gmail account not found");
-    const summary = summarizeGmailOutcomes(messages.messageIds.length, outcomes);
-    const failed = outcomes.filter((outcome) => outcome.status === "failed");
+    const summary = summarizeGmailOutcomes(messages.messageIds.length, result.outcomes);
+    const failed = result.outcomes.filter((outcome) => outcome.status === "failed");
+    const nextCursor =
+      failed.length === 0
+        ? (messages.historyId ?? result.nextCursor ?? syncing.syncCursor)
+        : syncing.syncCursor;
     const updated = await store.updateConnectorAccount(
       userId,
       latest.id,
@@ -291,9 +288,100 @@ export async function syncGmailAccount(
     return {
       account: updated,
       processed: summary.examined,
-      createdNotifications,
+      createdNotifications: result.createdNotifications,
       summary,
-      outcomes
+      outcomes: result.outcomes
+    };
+  } catch (error) {
+    const latest = await store.getConnectorAccount(userId, account.id);
+    if (latest) {
+      await store.updateConnectorAccount(
+        userId,
+        latest.id,
+        latest.version,
+        {
+          status: "error",
+          healthStatus: "error",
+          syncStatus: "error",
+          lastHealthAt: now,
+          errorCode: gmailErrorCode(error),
+          errorMessage: safeErrorMessage(error)
+        },
+        now
+      );
+    }
+    throw error;
+  }
+}
+
+export async function backfillGmailAccount(
+  store: DentLinkStore,
+  userId: EntityId,
+  accountId: EntityId,
+  env: GmailRuntimeEnv,
+  now: string,
+  days = 30
+): Promise<GmailSyncResult> {
+  const boundedDays = Math.min(Math.max(Math.floor(days), 1), 365);
+  const account = await requireGmailAccount(store, userId, accountId);
+  const syncing = await store.updateConnectorAccount(
+    userId,
+    account.id,
+    account.version,
+    { syncStatus: "syncing", errorCode: null, errorMessage: null },
+    now
+  );
+  if (!syncing) throw new StoreError("not_found", "Gmail account not found");
+
+  try {
+    const credential = await store.getConnectorCredential(
+      userId,
+      account.id,
+      "oauth_refresh_token"
+    );
+    if (!credential) throw new StoreError("missing_credentials", "Gmail must be reconnected");
+    const refreshToken = await decryptSecret(credential.encryptedValue, env);
+    const gmail = gmailClient(env);
+    const token = await gmail.refreshAccessToken(refreshToken);
+    const messages = await messagesForBackfill(gmail, token.accessToken, now, boundedDays);
+    const result = await processGmailMessageIds(
+      store,
+      userId,
+      syncing,
+      gmail,
+      token.accessToken,
+      messages.messageIds,
+      now
+    );
+    const latest = await store.getConnectorAccount(userId, account.id);
+    if (!latest) throw new StoreError("not_found", "Gmail account not found");
+    const summary = summarizeGmailOutcomes(messages.messageIds.length, result.outcomes);
+    const failed = result.outcomes.filter((outcome) => outcome.status === "failed");
+    const updated = await store.updateConnectorAccount(
+      userId,
+      latest.id,
+      latest.version,
+      {
+        status: "connected",
+        healthStatus: failed.length > 0 ? "degraded" : "healthy",
+        syncStatus: "idle",
+        lastSyncAt: now,
+        lastHealthAt: now,
+        errorCode: failed.length > 0 ? "gmail_partial_sync_failed" : null,
+        errorMessage:
+          failed.length > 0
+            ? `${failed.length} Gmail message${failed.length === 1 ? "" : "s"} failed processing`
+            : null
+      },
+      now
+    );
+    if (!updated) throw new StoreError("not_found", "Gmail account not found");
+    return {
+      account: updated,
+      processed: summary.examined,
+      createdNotifications: result.createdNotifications,
+      summary,
+      outcomes: result.outcomes
     };
   } catch (error) {
     const latest = await store.getConnectorAccount(userId, account.id);
@@ -368,11 +456,13 @@ export function createGoogleGmailClient(
       const response = await gmailRequest(fetchImpl, accessToken, "/users/me/profile");
       return response as GmailProfile;
     },
-    async listMessages(accessToken, pageToken) {
+    async listMessages(accessToken, options) {
+      const parsedOptions = typeof options === "string" ? { pageToken: options } : (options ?? {});
       const url = new URL(`${GMAIL_API_BASE_URL}/users/me/messages`);
       url.searchParams.set("maxResults", String(INITIAL_SYNC_PAGE_SIZE));
       url.searchParams.append("labelIds", "INBOX");
-      if (pageToken) url.searchParams.set("pageToken", pageToken);
+      if (parsedOptions.pageToken) url.searchParams.set("pageToken", parsedOptions.pageToken);
+      if (parsedOptions.query) url.searchParams.set("q", parsedOptions.query);
       return (await gmailRequest(fetchImpl, accessToken, url)) as GmailMessageList;
     },
     async listHistory(accessToken, startHistoryId, pageToken) {
@@ -466,6 +556,61 @@ async function messagesForSync(
     } while (pageToken);
   }
   return { messageIds: [...ids], historyId: latestHistoryId };
+}
+
+async function messagesForBackfill(
+  gmail: GmailApiClient,
+  accessToken: string,
+  now: string,
+  days: number
+): Promise<{ messageIds: string[] }> {
+  const ids = new Set<string>();
+  let pageToken: string | undefined;
+  const afterSeconds = Math.floor((Date.parse(now) - days * 24 * 60 * 60 * 1000) / 1000);
+  const query = `newer:${afterSeconds}`;
+  do {
+    const page = await gmail.listMessages(accessToken, { pageToken, query });
+    for (const message of page.messages ?? []) ids.add(message.id);
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+  return { messageIds: [...ids] };
+}
+
+async function processGmailMessageIds(
+  store: DentLinkStore,
+  userId: EntityId,
+  account: ConnectorAccount,
+  gmail: GmailApiClient,
+  accessToken: string,
+  messageIds: string[],
+  now: string
+): Promise<{
+  createdNotifications: number;
+  nextCursor: string | null;
+  outcomes: GmailSyncResult["outcomes"];
+}> {
+  let createdNotifications = 0;
+  let nextCursor = account.syncCursor;
+  const outcomes: GmailSyncResult["outcomes"] = [];
+  for (const messageId of messageIds) {
+    try {
+      const existingRecord = await store.findConnectorSourceRecord(userId, account.id, messageId);
+      if (existingRecord && !shouldRetryGmailSourceRecord(existingRecord.status)) {
+        outcomes.push(
+          await recordGmailMessageDuplicate(store, userId, account, existingRecord, now)
+        );
+        continue;
+      }
+      const message = await gmail.getMessage(accessToken, messageId);
+      nextCursor = maxHistoryId(nextCursor, message.historyId);
+      const outcome = await ingestGmailMessage(store, userId, account, message, now);
+      outcomes.push(outcome);
+      if (outcome.status === "notification_created") createdNotifications += 1;
+    } catch (error) {
+      outcomes.push(await recordGmailMessageFailure(store, userId, account, messageId, error, now));
+    }
+  }
+  return { createdNotifications, nextCursor, outcomes };
 }
 
 async function ingestGmailMessage(

@@ -189,7 +189,10 @@ Google Calendar or any other Google service.
   links or reconnects the Gmail account, stores the encrypted refresh token, and redirects to a safe
   `returnTo` URL when present. JSON clients may send `Accept: application/json`.
 - `POST /v1/connectors/gmail/:accountId/sync`: authenticated manual Gmail sync for an owned Gmail
-  connector account.
+  connector account. This is incremental and uses Gmail history IDs when a checkpoint exists.
+- `POST /v1/connectors/gmail/:accountId/backfill`: authenticated backfill for an owned Gmail
+  connector account. It scans at least the last 30 days through Gmail message-list pagination and
+  does not reset existing notifications or the incremental history checkpoint.
 - `GET /v1/connectors/gmail/:accountId/diagnostics`: authenticated diagnostics for an owned Gmail
   connector account. Returns aggregate processing counts and recent per-message outcomes without raw
   email bodies.
@@ -226,6 +229,11 @@ Outcome `status` values are `notification_created`, `notification_updated`, `ski
 failures returns `200` with connector `healthStatus = "degraded"` and a stable
 `errorCode = "gmail_partial_sync_failed"`; global provider, credential, or database failures still
 return normal API errors and set connector sync status to `error`.
+
+Incremental sync advances `syncCursor` only when all discovered message IDs finish without a
+per-message failure. Backfill is duplicate-safe through source-record identity and uses Gmail
+`messages.list` independently of history sync so it can recover missing recent messages without
+erasing or resetting existing notifications.
 
 The diagnostics endpoint returns:
 

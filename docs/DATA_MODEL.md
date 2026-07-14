@@ -239,3 +239,7 @@ Milestone 7 Slice 2 does not add another migration. Gmail sync summaries and the
 derived from the existing user-scoped connector account plus `connector_source_records` rows.
 Diagnostics expose normalized Gmail message IDs, processing outcomes, safe reasons, processed
 timestamps, linked notification IDs, and source record IDs only.
+
+Milestone 7 Slice 2.1 also uses the existing schema. Backfilled Gmail messages create the same
+source-record and notification shapes as incremental sync, so `(account_id, source_external_id)`
+continues to provide duplicate safety and existing notifications are not reset or replaced.

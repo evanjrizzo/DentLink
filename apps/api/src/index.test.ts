@@ -913,6 +913,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     });
     expect(sync.account.healthStatus).toBe("degraded");
     expect(sync.account.errorCode).toBe("gmail_partial_sync_failed");
+    expect(sync.account.syncCursor).toBe("100");
     expect(sync.outcomes.map((outcome) => outcome.status)).toEqual([
       "notification_created",
       "failed"
@@ -1022,6 +1023,106 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       "gmail-page-3"
     ]);
     expect(diagnostics.messages.every((message) => message.notificationId)).toBe(true);
+  });
+
+  it("backfills recent Gmail messages without resetting history checkpoints or duplicating notifications", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-backfill@example.com");
+    const gmailClient = fakeGmailClientForBackfill();
+    const env = gmailTestEnv(gmailClient);
+    const start = await requestJson<{ authorizationUrl: string; expiresAt: string }>(
+      store,
+      "POST",
+      "/v1/connectors/gmail/start",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const authorizationUrl = new URL(start.authorizationUrl);
+    const callback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${authorizationUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    const linked = (await callback.json()) as { account: ConnectorAccount };
+    expect(linked.account.syncCursor).toBe("history-checkpoint-500");
+
+    const firstBackfill = await requestJson<{
+      account: ConnectorAccount;
+      summary: {
+        discovered: number;
+        examined: number;
+        created: number;
+        updated: number;
+        duplicate: number;
+        skipped: number;
+        filtered: number;
+        failed: number;
+      };
+      outcomes: Array<{ messageId: string; status: string }>;
+    }>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/backfill`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+
+    expect(firstBackfill.account.syncCursor).toBe("history-checkpoint-500");
+    expect(firstBackfill.summary).toEqual({
+      discovered: 2,
+      examined: 2,
+      created: 2,
+      updated: 0,
+      duplicate: 0,
+      skipped: 0,
+      filtered: 0,
+      failed: 0
+    });
+    expect(firstBackfill.outcomes.map((outcome) => outcome.messageId).sort()).toEqual([
+      "gmail-backfill-1",
+      "gmail-backfill-2"
+    ]);
+
+    const afterCreate = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(afterCreate.notifications.map((notification) => notification.title).sort()).toEqual([
+      "Historical message 1",
+      "Historical message 2"
+    ]);
+
+    const secondBackfill = await requestJson<typeof firstBackfill>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/backfill`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(secondBackfill.account.syncCursor).toBe("history-checkpoint-500");
+    expect(secondBackfill.summary).toMatchObject({ examined: 2, created: 0, duplicate: 2 });
+
+    const afterDuplicate = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(afterDuplicate.notifications).toHaveLength(2);
   });
 
   it("links Google Calendar, syncs agenda events, supports dismissal, and isolates users", async () => {
@@ -2152,6 +2253,58 @@ function fakeGmailClientWithMultiPageMessages(): GmailApiClient {
             { name: "Subject", value: `Paged message ${sequence}` },
             { name: "Date", value: "Tue, 14 Jul 2026 10:00:00 -0400" },
             { name: "Message-ID", value: `<message-page-${sequence}@example.test>` }
+          ]
+        }
+      };
+    }
+  };
+}
+
+function fakeGmailClientForBackfill(): GmailApiClient {
+  return {
+    async exchangeCode(code) {
+      expect(code).toBe("valid-code");
+      return { accessToken: "access-token", refreshToken: "refresh-token-secret" };
+    },
+    async refreshAccessToken(refreshToken) {
+      expect(refreshToken).toBe("refresh-token-secret");
+      return { accessToken: "access-token-refreshed" };
+    },
+    async getProfile() {
+      return { emailAddress: "owner.gmail@example.test", historyId: "history-checkpoint-500" };
+    },
+    async listMessages(_accessToken, options) {
+      expect(typeof options).toBe("object");
+      const parsed = typeof options === "object" && options ? options : {};
+      expect(parsed.query).toMatch(/^newer:\d+$/);
+      if (!parsed.pageToken) {
+        return {
+          messages: [{ id: "gmail-backfill-1", threadId: "gmail-thread-backfill-1" }],
+          nextPageToken: "backfill-page-2"
+        };
+      }
+      expect(parsed.pageToken).toBe("backfill-page-2");
+      return {
+        messages: [{ id: "gmail-backfill-2", threadId: "gmail-thread-backfill-2" }]
+      };
+    },
+    async listHistory() {
+      throw new Error("Backfill must not use Gmail history sync");
+    },
+    async getMessage(_accessToken, messageId) {
+      const sequence = messageId.endsWith("2") ? "2" : "1";
+      return {
+        id: messageId,
+        threadId: `gmail-thread-backfill-${sequence}`,
+        historyId: `history-backfill-${sequence}`,
+        internalDate: "1783980000000",
+        labelIds: ["INBOX"],
+        payload: {
+          headers: [
+            { name: "From", value: "Archive <archive@example.test>" },
+            { name: "Subject", value: `Historical message ${sequence}` },
+            { name: "Date", value: "Tue, 14 Jul 2026 10:00:00 -0400" },
+            { name: "Message-ID", value: `<historical-${sequence}@example.test>` }
           ]
         }
       };

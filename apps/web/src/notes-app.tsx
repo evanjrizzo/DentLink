@@ -417,6 +417,20 @@ export function DentLinkNotesApp(): ReactElement {
     }
   }
 
+  async function backfillGmail(account: ConnectorAccount): Promise<void> {
+    try {
+      setError(null);
+      const result = await client.backfillGmailAccount(account.id);
+      const diagnostics = await client.getGmailDiagnostics(account.id);
+      setGmailDiagnostics((current) => ({ ...current, [account.id]: diagnostics }));
+      await refreshConnectorNotificationState();
+      if (result.createdNotifications > 0) setView("notifications");
+    } catch (caught) {
+      handleFailure(caught);
+      await loadConnectors().catch(() => undefined);
+    }
+  }
+
   async function disconnectGmail(account: ConnectorAccount): Promise<void> {
     try {
       setError(null);
@@ -767,6 +781,7 @@ export function DentLinkNotesApp(): ReactElement {
           onConnectGmail={connectGmail}
           onReconnectGmail={(account) => connectGmail(account.id)}
           onSyncGmail={syncGmail}
+          onBackfillGmail={backfillGmail}
           onDisconnectGmail={disconnectGmail}
           gmailDiagnostics={gmailDiagnostics}
           onConnectGoogleCalendar={connectGoogleCalendar}
@@ -2032,6 +2047,7 @@ function ConnectorsView(props: {
   onConnectGmail: () => Promise<void>;
   onReconnectGmail: (account: ConnectorAccount) => Promise<void>;
   onSyncGmail: (account: ConnectorAccount) => Promise<void>;
+  onBackfillGmail: (account: ConnectorAccount) => Promise<void>;
   onDisconnectGmail: (account: ConnectorAccount) => Promise<void>;
   onConnectGoogleCalendar: () => Promise<void>;
   onReconnectGoogleCalendar: (account: ConnectorAccount) => Promise<void>;
@@ -2066,6 +2082,10 @@ function ConnectorsView(props: {
               {account.lastSyncAt ? new Date(account.lastSyncAt).toLocaleString() : "Never"}
             </span>
             {account.errorMessage ? <p>{account.errorMessage}</p> : null}
+            <p className="connector-help">
+              Sync Now checks Gmail history since the last checkpoint. Backfill 30 Days scans recent
+              Gmail history without resetting existing notifications.
+            </p>
             <GmailDiagnosticsSummary
               diagnostics={props.gmailDiagnostics[account.id]}
               degraded={account.healthStatus === "degraded"}
@@ -2073,6 +2093,9 @@ function ConnectorsView(props: {
             <div className="note-order">
               <button type="button" onClick={() => void props.onSyncGmail(account)}>
                 Sync Now
+              </button>
+              <button type="button" onClick={() => void props.onBackfillGmail(account)}>
+                Backfill 30 Days
               </button>
               <button type="button" onClick={() => void props.onReconnectGmail(account)}>
                 Reconnect

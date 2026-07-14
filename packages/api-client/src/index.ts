@@ -248,6 +248,12 @@ export class DentLinkApiClient {
     });
   }
 
+  async backfillGmailAccount(accountId: EntityId): Promise<GmailSyncResult> {
+    return this.request<GmailSyncResult>(`/v1/connectors/gmail/${accountId}/backfill`, {
+      method: "POST"
+    });
+  }
+
   async getGmailDiagnostics(accountId: EntityId): Promise<GmailDiagnostics> {
     return this.request<GmailDiagnostics>(`/v1/connectors/gmail/${accountId}/diagnostics`);
   }
