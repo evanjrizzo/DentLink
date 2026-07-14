@@ -62,7 +62,15 @@ import {
 } from "./validation";
 
 import type { ConnectorDefinition } from "@dentlink/connector-sdk";
-import type { AuthSession, ConnectorAccount, GmailRule, NoteConflict } from "@dentlink/item-model";
+import type {
+  AuthSession,
+  ConnectorAccount,
+  ConnectorSyncAllResult,
+  DentLinkChangeEvent,
+  GmailRule,
+  NoteConflict,
+  SyncChange
+} from "@dentlink/item-model";
 
 export type ApiEnv = GmailRuntimeEnv & {
   googleCalendarClient?: GoogleCalendarApiClient;
@@ -308,6 +316,9 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     }
     if (method === "POST" && path === "/v1/connectors/google-calendar/start") {
       return json(await startGoogleCalendarOAuth(store, auth.user.id, env, url, now), 201);
+    }
+    if (method === "POST" && path === "/v1/connectors/sync-all") {
+      return json(await syncAllConnectors(store, auth.user.id, env, now));
     }
     if (method === "GET" && path === "/v1/connectors/accounts") {
       return json(await store.listConnectorAccounts(auth.user.id));
@@ -645,6 +656,14 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     if (method === "GET" && path === "/v1/sync") {
       return json(await store.sync(auth.user.id, parseCursor(url.searchParams.get("cursor"))));
     }
+    if (method === "GET" && path === "/v1/events") {
+      return eventStream(
+        store,
+        auth.user.id,
+        parseCursor(url.searchParams.get("cursor")),
+        request.signal
+      );
+    }
     const historyMatch = path.match(/^\/v1\/notes\/([^/]+)\/history$/);
     if (historyMatch && method === "GET") {
       return json({ history: await store.listHistory(auth.user.id, historyMatch[1] ?? "") });
@@ -722,6 +741,210 @@ export default {
     ctx.waitUntil(syncConnectedGmailAccounts(store, env, new Date().toISOString()));
   }
 };
+
+async function syncAllConnectors(
+  store: DentLinkStore,
+  userId: string,
+  env: ApiEnv,
+  now: string
+): Promise<ConnectorSyncAllResult> {
+  const startedAt = now;
+  const results: ConnectorSyncAllResult["connectors"] = [];
+  const accounts = (await store.listConnectorAccounts(userId)).accounts.filter(
+    (account) => account.status === "connected"
+  );
+  for (const account of accounts) {
+    if (account.connectorKey === "gmail") {
+      try {
+        const result = await syncGmailAccount(
+          store,
+          userId,
+          account.id,
+          env,
+          new Date().toISOString()
+        );
+        results.push({
+          accountId: account.id,
+          provider: account.connectorKey,
+          status: "success",
+          engine:
+            result.account.settings.gmailLastSyncEngine === "gmail_imap"
+              ? "gmail_imap"
+              : "gmail_api",
+          created: result.summary.created,
+          updated: result.summary.updated,
+          duplicate: result.summary.duplicate,
+          failed: result.summary.failed,
+          message: null
+        });
+      } catch (caught) {
+        results.push(failedSyncAllConnector(account, caught));
+      }
+      continue;
+    }
+    if (account.connectorKey === "google-calendar") {
+      try {
+        const result = await syncGoogleCalendarAccount(
+          store,
+          userId,
+          account.id,
+          env,
+          new Date().toISOString()
+        );
+        results.push({
+          accountId: account.id,
+          provider: account.connectorKey,
+          status: "success",
+          created: result.upsertedEvents,
+          updated: 0,
+          duplicate: Math.max(0, result.processed - result.upsertedEvents),
+          failed: 0,
+          message: null
+        });
+      } catch (caught) {
+        results.push(failedSyncAllConnector(account, caught));
+      }
+      continue;
+    }
+    results.push({
+      accountId: account.id,
+      provider: account.connectorKey,
+      status: "skipped",
+      created: 0,
+      updated: 0,
+      duplicate: 0,
+      failed: 0,
+      message: "Connector does not support manual sync yet"
+    });
+  }
+  const failures = results.filter((result) => result.status === "failed").length;
+  return {
+    startedAt,
+    completedAt: new Date().toISOString(),
+    status: failures === 0 ? "success" : failures === results.length ? "failed" : "partial",
+    connectors: results
+  };
+}
+
+function failedSyncAllConnector(
+  account: ConnectorAccount,
+  caught: unknown
+): ConnectorSyncAllResult["connectors"][number] {
+  return {
+    accountId: account.id,
+    provider: account.connectorKey,
+    status: "failed",
+    engine:
+      account.connectorKey === "gmail"
+        ? account.settings.gmailIngestionEngine === "gmail_imap"
+          ? "gmail_imap"
+          : "gmail_api"
+        : undefined,
+    created: 0,
+    updated: 0,
+    duplicate: 0,
+    failed: 1,
+    message: safeConnectorSyncMessage(account.connectorKey, caught)
+  };
+}
+
+function safeConnectorSyncMessage(provider: string, caught: unknown): string {
+  if (caught instanceof StoreError) {
+    if (provider === "gmail") return `Gmail sync failed: ${caught.message}`;
+    if (provider === "google-calendar") return `Google Calendar sync failed: ${caught.message}`;
+    return `${provider} sync failed: ${caught.message}`;
+  }
+  if (caught instanceof GmailConfigError) return `Gmail sync failed: ${caught.message}`;
+  if (caught instanceof Error && caught.message) {
+    if (provider === "google-calendar") return "Google Calendar sync failed";
+    if (provider === "gmail") return "Gmail sync failed";
+  }
+  return `${provider} sync failed`;
+}
+
+function eventStream(
+  store: DentLinkStore,
+  userId: string,
+  cursor: string,
+  signal: AbortSignal
+): Response {
+  const encoder = new TextEncoder();
+  let latestCursor = cursor;
+  let cancelled = false;
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: string, data: unknown) => {
+        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+      };
+      send("ready", { cursor: latestCursor });
+      while (!signal.aborted && !cancelled) {
+        const response = await store.sync(userId, latestCursor);
+        latestCursor = response.cursor;
+        const events = changeEventsForSyncChanges(response.changes);
+        for (const event of events) send("dentlink_change", event);
+        await sleep(5000, signal);
+      }
+      if (!cancelled) controller.close();
+    },
+    cancel() {
+      cancelled = true;
+    }
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-store",
+      Connection: "keep-alive"
+    }
+  });
+}
+
+function changeEventsForSyncChanges(changes: SyncChange[]): DentLinkChangeEvent[] {
+  const events = new Map<string, DentLinkChangeEvent>();
+  for (const change of changes) {
+    const revision = Number.parseInt(change.cursor, 10);
+    const event = changeEventForSyncChange(change, revision);
+    const existing = events.get(event.type);
+    if (!existing || existing.revision < event.revision) events.set(event.type, event);
+  }
+  return [...events.values()];
+}
+
+function changeEventForSyncChange(change: SyncChange, revision: number): DentLinkChangeEvent {
+  if (change.type === "notification") {
+    return { type: "notifications_updated", source: "dentlink", accountId: null, revision };
+  }
+  if (change.type === "calendar_event") {
+    return { type: "calendar_updated", source: "calendar", accountId: null, revision };
+  }
+  if (change.type === "connector_account") {
+    const accountId = change.op === "upsert" ? change.account.id : change.id;
+    const source = change.op === "upsert" ? change.account.connectorKey : "connector";
+    return { type: "connectors_updated", source, accountId, revision };
+  }
+  if (change.type === "note" || change.type === "folder" || change.type === "tag") {
+    return { type: "notes_updated", source: "dentlink", accountId: null, revision };
+  }
+  if (change.type === "webhook") {
+    return { type: "webhooks_updated", source: "webhook", accountId: null, revision };
+  }
+  return { type: "dentlink_updated", source: "dentlink", accountId: null, revision };
+}
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true }
+    );
+  });
+}
 
 function noteResult(value: unknown): Response {
   if (isConflict(value)) return json({ conflict: value }, 409);

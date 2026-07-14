@@ -8,6 +8,8 @@ import type {
   CalendarIcsImportResult,
   CalendarSourceFilter,
   ConnectorAccount,
+  ConnectorSyncAllResult,
+  DentLinkChangeEvent,
   EntityId,
   GmailDiagnostics,
   Notification,
@@ -47,11 +49,21 @@ type GmailEngineSaveState = {
   error: string | null;
 };
 
+type RefreshState = {
+  running: boolean;
+  message: string | null;
+  result: ConnectorSyncAllResult | null;
+  error: string | null;
+};
+
+const API_BASE_URL = import.meta.env.VITE_DENTLINK_API_BASE_URL ?? "";
+const UI_REFRESH_INTERVAL_MS = 45_000;
+
 export function DentLinkNotesApp(): ReactElement {
   const [client] = useState(
     () =>
       new DentLinkApiClient({
-        baseUrl: import.meta.env.VITE_DENTLINK_API_BASE_URL ?? "",
+        baseUrl: API_BASE_URL,
         token: storedSession()?.session.token ?? null
       })
   );
@@ -71,6 +83,12 @@ export function DentLinkNotesApp(): ReactElement {
   const [connectorAccounts, setConnectorAccounts] = useState<ConnectorAccount[]>([]);
   const [gmailDiagnostics, setGmailDiagnostics] = useState<Record<EntityId, GmailDiagnostics>>({});
   const [gmailSyncStates, setGmailSyncStates] = useState<Record<EntityId, GmailSyncUiState>>({});
+  const [refreshState, setRefreshState] = useState<RefreshState>({
+    running: false,
+    message: null,
+    result: null,
+    error: null
+  });
   const [gmailEngineSaveStates, setGmailEngineSaveStates] = useState<
     Record<EntityId, GmailEngineSaveState>
   >({});
@@ -91,6 +109,9 @@ export function DentLinkNotesApp(): ReactElement {
   const calendarRequest = useRef(0);
   const webhooksRequest = useRef(0);
   const connectorsRequest = useRef(0);
+  const refreshPromise = useRef<Promise<void> | null>(null);
+  const eventsAbort = useRef<AbortController | null>(null);
+  const syncCursor = useRef("0");
 
   const filteredNotes = useMemo(() => notesList.notes, [notesList.notes]);
 
@@ -105,11 +126,8 @@ export function DentLinkNotesApp(): ReactElement {
           user: current.user,
           session: { token: auth.session.token, expiresAt: current.session.expiresAt }
         });
-        await loadNotes("", null, []);
-        await loadNotifications();
-        await loadCalendarEvents();
-        await loadWebhooks();
-        await loadConnectors();
+        await refreshDentLinkData("session");
+        if (hasOAuthReturnFlag()) await refreshDentLinkData("oauth");
       })
       .catch((caught: unknown) => {
         if (cancelled) return;
@@ -121,6 +139,27 @@ export function DentLinkNotesApp(): ReactElement {
     };
     // Run once for the restored token. User-initiated auth paths load notes directly.
   }, []);
+
+  useEffect(() => {
+    if (!auth) return;
+    const token = auth.session.token;
+    let stopped = false;
+    const refreshIfVisible = () => {
+      if (!stopped && document.visibilityState === "visible") void refreshDentLinkData("visible");
+    };
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refreshDentLinkData("poll");
+    }, UI_REFRESH_INTERVAL_MS);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    startChangeStream(token);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+      eventsAbort.current?.abort();
+      eventsAbort.current = null;
+    };
+  }, [auth?.session.token]);
 
   async function loadNotes(
     nextSearch = search,
@@ -198,8 +237,81 @@ export function DentLinkNotesApp(): ReactElement {
     });
   }
 
+  async function refreshDentLinkData(reason: string): Promise<void> {
+    if (refreshPromise.current) return refreshPromise.current;
+    const work = (async () => {
+      try {
+        await Promise.all([
+          loadConnectors(),
+          loadNotifications(),
+          loadCalendarEvents(),
+          loadNotes(),
+          loadWebhooks()
+        ]);
+        if (reason !== "poll" && reason !== "push") setError(null);
+      } catch (caught) {
+        const message = refreshMessageFor(caught);
+        if (reason !== "poll" && reason !== "push") setError(message);
+      } finally {
+        refreshPromise.current = null;
+      }
+    })();
+    refreshPromise.current = work;
+    return work;
+  }
+
+  async function refreshAll(): Promise<void> {
+    if (refreshState.running) return;
+    setError(null);
+    setRefreshState({
+      running: true,
+      message: "Refreshing connected services...",
+      result: null,
+      error: null
+    });
+    try {
+      setRefreshState((current) => ({ ...current, message: "Refreshing Gmail..." }));
+      await refreshStepDelay();
+      const result = await client.syncAllConnectors();
+      setRefreshState((current) => ({ ...current, message: "Updating Notifications...", result }));
+      await refreshStepDelay();
+      await loadNotifications();
+      setRefreshState((current) => ({ ...current, message: "Updating Calendar...", result }));
+      await refreshStepDelay();
+      await Promise.all([loadConnectors(), loadCalendarEvents(), loadNotes(), loadWebhooks()]);
+      setRefreshState({
+        running: false,
+        message: refreshAllSummary(result),
+        result,
+        error: result.status === "failed" ? "Refresh All failed" : null
+      });
+      if (result.status === "partial") setError("Partial refresh completed");
+    } catch (caught) {
+      const message = refreshMessageFor(caught);
+      await refreshDentLinkData("refresh-all-failed");
+      setRefreshState({ running: false, message: null, result: null, error: message });
+      setError(message);
+    }
+  }
+
+  function startChangeStream(token: string): void {
+    eventsAbort.current?.abort();
+    const controller = new AbortController();
+    eventsAbort.current = controller;
+    void readDentLinkEvents(token, syncCursor.current, controller.signal, (event) => {
+      syncCursor.current = String(Math.max(Number(syncCursor.current), event.revision));
+      void refreshDentLinkData(`push:${event.type}`);
+    }).catch(() => {
+      if (!controller.signal.aborted) {
+        setRefreshState((current) =>
+          current.running ? current : { ...current, message: "Live updates reconnecting..." }
+        );
+      }
+    });
+  }
+
   async function refreshConnectorNotificationState(): Promise<void> {
-    await Promise.all([loadConnectors(), loadNotifications(), loadCalendarEvents()]);
+    await refreshDentLinkData("manual");
   }
 
   async function authenticate(mode: "login" | "register"): Promise<void> {
@@ -211,11 +323,7 @@ export function DentLinkNotesApp(): ReactElement {
           : await client.register(credentials.email, credentials.password);
       setAuth(session);
       storeSession(session);
-      await loadNotes("", null, []);
-      await loadNotifications();
-      await loadCalendarEvents();
-      await loadWebhooks();
-      await loadConnectors();
+      await refreshDentLinkData("auth");
     } catch (caught) {
       handleFailure(caught);
     }
@@ -672,12 +780,16 @@ export function DentLinkNotesApp(): ReactElement {
       client.setToken(null);
     } finally {
       clearStoredSession();
+      eventsAbort.current?.abort();
+      eventsAbort.current = null;
+      syncCursor.current = "0";
       setAuth(null);
       setNotesList(initialList);
       setNotifications([]);
       setCalendarEvents([]);
       setWebhooks([]);
       setConnectorAccounts([]);
+      setRefreshState({ running: false, message: null, result: null, error: null });
       setLastWebhookSecret(null);
       setSearch("");
       setFolderId(null);
@@ -787,9 +899,27 @@ export function DentLinkNotesApp(): ReactElement {
             Connectors
           </button>
         </nav>
+        <button type="button" onClick={() => void refreshAll()} disabled={refreshState.running}>
+          {refreshState.running ? "Refreshing..." : "Refresh All"}
+        </button>
         <span>{auth.user.email}</span>
         <button onClick={() => void logout()}>Log out</button>
       </header>
+      {refreshState.message || refreshState.error ? (
+        <section className="refresh-status" aria-live="polite">
+          <strong>{refreshState.error ?? refreshState.message}</strong>
+          {refreshState.result ? (
+            <div className="refresh-results">
+              {refreshState.result.connectors.map((connector) => (
+                <span key={connector.accountId}>
+                  {connectorLabel(connector.provider)}: {connector.status}
+                  {connector.message ? ` - ${connector.message}` : ""}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
       {error ? (
         <p className="app-error" role="alert">
           {error}
@@ -801,7 +931,7 @@ export function DentLinkNotesApp(): ReactElement {
           onCreateNotification={createNotification}
           onUpdateNotification={updateNotification}
           onDeleteNotification={deleteNotification}
-          onRefreshNotifications={loadNotifications}
+          onRefreshNotifications={() => refreshDentLinkData("notifications")}
           onReorderNotifications={reorderNotifications}
         />
       ) : null}
@@ -824,7 +954,7 @@ export function DentLinkNotesApp(): ReactElement {
           onAnnotateEvent={annotateCalendarEvent}
           onImportIcs={importIcs}
           onExportIcs={exportIcs}
-          onRefresh={loadCalendarEvents}
+          onRefresh={() => refreshDentLinkData("calendar")}
           onConnectGoogleCalendar={connectGoogleCalendar}
           onSyncGoogleCalendar={syncGoogleCalendar}
           onDismissEvent={dismissCalendarEvent}
@@ -871,7 +1001,7 @@ export function DentLinkNotesApp(): ReactElement {
           onCreateWebhook={createWebhook}
           onUpdateWebhook={updateWebhook}
           onDeleteWebhook={deleteWebhook}
-          onRefreshWebhooks={loadWebhooks}
+          onRefreshWebhooks={() => refreshDentLinkData("webhooks")}
         />
       ) : null}
       {view === "connectors" ? (
@@ -2144,6 +2274,84 @@ function downloadTextFile(filename: string, contents: string, type: string): voi
 
 function nextFrame(): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, 80));
+}
+
+function refreshStepDelay(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, 250));
+}
+
+async function readDentLinkEvents(
+  token: string,
+  cursor: string,
+  signal: AbortSignal,
+  onEvent: (event: DentLinkChangeEvent) => void
+): Promise<void> {
+  const params = new URLSearchParams({ cursor });
+  const response = await fetch(`${API_BASE_URL}/v1/events?${params.toString()}`, {
+    headers: {
+      Accept: "text/event-stream",
+      Authorization: `Bearer ${token}`
+    },
+    signal
+  });
+  if (!response.ok || !response.body) throw new Error("DentLink event stream unavailable");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (!signal.aborted) {
+    const { done, value } = await reader.read();
+    if (done) return;
+    buffer += decoder.decode(value, { stream: true });
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary !== -1) {
+      const chunk = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const event = parseDentLinkSseChunk(chunk);
+      if (event) onEvent(event);
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
+}
+
+function parseDentLinkSseChunk(chunk: string): DentLinkChangeEvent | null {
+  if (!chunk.includes("event: dentlink_change")) return null;
+  const dataLine = chunk
+    .split("\n")
+    .find((line) => line.startsWith("data: "))
+    ?.slice("data: ".length);
+  if (!dataLine) return null;
+  const parsed = JSON.parse(dataLine) as DentLinkChangeEvent;
+  return parsed;
+}
+
+function hasOAuthReturnFlag(): boolean {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("gmail") === "connected" || params.get("calendar") === "connected";
+}
+
+function refreshAllSummary(result: ConnectorSyncAllResult): string {
+  if (result.status === "success") return "Refresh All finished.";
+  if (result.status === "partial") return "Refresh completed with warnings.";
+  return "Refresh All failed.";
+}
+
+function refreshMessageFor(caught: unknown): string {
+  if (caught instanceof DentLinkApiError) {
+    if (caught.code === "network_unreachable") return "Could not reach DentLink API.";
+    if (caught.status === 401) return "Sign in again before refreshing DentLink.";
+    return caught.message;
+  }
+  if (caught instanceof Error && /fetch|network|cors/i.test(caught.message)) {
+    return "Could not reach DentLink API.";
+  }
+  if (caught instanceof Error) return caught.message;
+  return "DentLink refresh failed.";
+}
+
+function connectorLabel(provider: string): string {
+  if (provider === "gmail") return "Gmail";
+  if (provider === "google-calendar") return "Google Calendar";
+  return provider;
 }
 
 function mergeConnectorAccount(

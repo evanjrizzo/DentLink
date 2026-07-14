@@ -282,6 +282,12 @@ Phase 1: Notification Reliability
 
 Before introducing AI, ensure Gmail synchronization is complete, deterministic, and observable.
 
+Implemented slices now include Gmail API diagnostics, Gmail backfill as a low-priority maintenance
+tool, deterministic Gmail rules, preview Gmail IMAP engine selection, and live-dashboard refresh
+behavior. Slice 3.5 adds an authenticated metadata-only DentLink event stream, polling fallback,
+visibility refresh, and `Refresh All` orchestration across connected supported services without
+moving provider polling into the browser.
+
 Scope
 
 Implement:

@@ -100,6 +100,9 @@ Implemented in the Worker-style API handler:
 - `POST /v1/tags`: create a user-scoped tag.
 - `GET /v1/sync`: return cursor-based changes for the authenticated user. Empty cursor means `0`;
   invalid cursor values return `invalid_cursor`.
+- `GET /v1/events`: authenticated Server-Sent Events stream for DentLink-owned change metadata.
+  Events include only safe hints such as change type, source, account ID, and revision; clients
+  refresh normal API resources after receiving an event.
 - `GET /v1/conflicts`: list open conflicts for the authenticated user.
 - `POST /v1/conflicts/:id/resolve`: mark a conflict resolved with `expectedVersion`.
 
@@ -160,6 +163,9 @@ implement those connectors through the framework.
 - `GET /v1/connectors/catalog`: list safe connector definitions, auth type, capabilities, and
   settings schema. Requires authentication.
 - `GET /v1/connectors/accounts`: list the authenticated user's non-deleted connector accounts.
+- `POST /v1/connectors/sync-all`: run manual sync for connected supported connector accounts,
+  continue after per-connector failures, and return an aggregate `success`, `partial`, or `failed`
+  result with safe per-connector counts. Gmail and Google Calendar are currently supported.
 - `POST /v1/connectors/accounts`: create a connector account metadata record for a catalog key.
 - `PATCH /v1/connectors/accounts/:id`: update account metadata with `expectedVersion`.
 - `DELETE /v1/connectors/accounts/:id`: soft-delete an account with `expectedVersion`.

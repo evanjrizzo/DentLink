@@ -109,6 +109,29 @@ textarea {
   color: #b42318;
 }
 
+.refresh-status {
+  display: grid;
+  gap: 8px;
+  margin: 12px 20px 0;
+  border: 1px solid #d7dce5;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+}
+
+.refresh-results {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.refresh-results span {
+  border: 1px solid #e4e8ef;
+  border-radius: 6px;
+  background: #f8fafc;
+  padding: 6px 8px;
+}
+
 .notes-shell {
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);

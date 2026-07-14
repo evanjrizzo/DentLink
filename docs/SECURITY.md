@@ -103,6 +103,11 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   endpoint returns aggregate counts, provider message IDs, safe processing reasons, processed
   timestamps, source record IDs, and linked DentLink notification IDs only; it does not expose raw
   email bodies, MIME parts, attachments, OAuth tokens, or provider credentials.
+- The DentLink event stream is authenticated with the same bearer session model as the JSON API. It
+  emits only metadata about DentLink-owned changes, such as change type, source, account ID, and
+  revision. It never pushes email bodies, calendar descriptions, raw provider payloads, OAuth data,
+  credentials, or authorization headers. Browser clients fetch updated user-scoped data through the
+  normal API after receiving an event.
 - Gmail rules are stored in the owned connector account settings and are applied server-side before
   Notification creation. Rule evaluation uses normalized metadata only and does not download or
   expose raw message bodies. Scheduled Gmail sync runs under Worker cron with stored encrypted

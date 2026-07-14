@@ -104,6 +104,15 @@ does not silently switch ingestion away from Gmail API. Once reconnect succeeds,
 scheduled Worker cron use the active engine. IMAP comparison mode is diagnostic-only: it runs Gmail
 API discovery after IMAP and stores comparison metrics without creating duplicate Notifications.
 
+Milestone 7 Slice 3.5 makes the web app behave more like a live dashboard without moving provider
+polling into the browser. The backend exposes a provider-neutral `sync-all` action that runs
+supported connected connector syncs independently and returns aggregate success, partial, or failed
+results. The web app has one refresh coordinator for Refresh All, individual Sync Now completion,
+OAuth return, visibility changes, push events, and polling fallback. A metadata-only authenticated
+event stream watches DentLink sync changes and emits change hints such as `notifications_updated`,
+`calendar_updated`, and `connectors_updated`; clients then fetch normal API resources through the
+existing contracts.
+
 Milestone 4 adds Google Calendar using the same provider-neutral connector framework. Google
 Calendar OAuth links a calendar connector account, encrypted refresh tokens remain in connector
 credential storage, and synced event instances are normalized into `calendar_events` plus connector

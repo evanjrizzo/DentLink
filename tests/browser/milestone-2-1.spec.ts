@@ -143,10 +143,10 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         summary: "From browser test"
       })
     ).resolves.toBe(202);
-    await page.getByRole("button", { name: "Refresh" }).click();
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
     await expect(notificationWebhook.getByText(/Last triggered: (?!Never)/)).toBeVisible();
     await page.getByRole("button", { name: "Notifications" }).click();
-    await page.getByRole("button", { name: "Refresh" }).click();
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
     await expect(notificationCard(page, webhookNotification)).toBeVisible();
 
     await page.getByRole("button", { name: "Webhooks" }).click();
@@ -242,9 +242,33 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       updatedAt: now,
       version: 1
     };
+    const calendarAccount = {
+      id: "connector_calendar_browser_refresh_all",
+      userId: user.id,
+      connectorKey: "google-calendar",
+      displayName: "Google Calendar Primary calendar",
+      status: "connected",
+      healthStatus: "healthy",
+      syncStatus: "idle",
+      settings: {},
+      credentialRef: "credential_calendar_refresh_all",
+      credentialStatus: "configured",
+      syncCursor: "calendar_sync_1",
+      lastSyncAt: null as string | null,
+      nextSyncAt: null,
+      lastHealthAt: now,
+      errorCode: null,
+      errorMessage: null,
+      createdAt: now,
+      updatedAt: now,
+      version: 1
+    };
     let notifications: unknown[] = [];
+    let calendarEvents: unknown[] = [];
     let engineUpdateAttempts = 0;
     let serveStaleConnectorList = false;
+    let eventStreamOpened = false;
+    let syncAllRequests = 0;
     let gmailDiagnostics = {
       account: gmailAccount,
       summary: {
@@ -281,8 +305,30 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         await fulfillJson(route, { notifications });
         return;
       }
+      if (method === "GET" && path === "/v1/events") {
+        eventStreamOpened = true;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        notifications = [
+          ...notifications,
+          notificationFixture({
+            id: "notification_auto_sse",
+            title: "Gmail auto refresh message",
+            summary: "Loaded by backend change notification"
+          })
+        ];
+        await route.fulfill({
+          status: 200,
+          headers: { ...corsHeaders(), "Content-Type": "text/event-stream" },
+          body:
+            "event: dentlink_change\n" +
+            'data: {"type":"notifications_updated","source":"gmail","accountId":"' +
+            gmailAccount.id +
+            '","revision":184}\n\n'
+        });
+        return;
+      }
       if (method === "GET" && path === "/v1/calendar/events") {
-        await fulfillJson(route, { events: [] });
+        await fulfillJson(route, { events: calendarEvents });
         return;
       }
       if (method === "GET" && path === "/v1/webhooks") {
@@ -302,12 +348,13 @@ test.describe("Milestone 2.1 preview browser verification", () => {
                   gmailIngestionEngine: "gmail_api",
                   gmailReadonlyGranted: true
                 }
-              }
+              },
+              calendarAccount
             ]
           });
           return;
         }
-        await fulfillJson(route, { accounts: [gmailAccount] });
+        await fulfillJson(route, { accounts: [gmailAccount, calendarAccount] });
         return;
       }
       if (method === "GET" && path === `/v1/connectors/gmail/${gmailAccount.id}/diagnostics`) {
@@ -477,6 +524,63 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         });
         return;
       }
+      if (method === "POST" && path === "/v1/connectors/sync-all") {
+        syncAllRequests += 1;
+        const syncedAt = new Date().toISOString();
+        gmailAccount.lastSyncAt = syncedAt;
+        gmailAccount.updatedAt = syncedAt;
+        gmailAccount.version += 1;
+        calendarAccount.lastSyncAt = syncedAt;
+        calendarAccount.updatedAt = syncedAt;
+        calendarAccount.version += 1;
+        notifications = [
+          ...notifications,
+          notificationFixture({
+            id: "notification_refresh_all",
+            title: "Gmail Refresh All message",
+            summary: "Loaded after Refresh All"
+          })
+        ];
+        calendarEvents = [
+          calendarEventFixture({
+            id: "calendar_refresh_all",
+            title: "Refresh All calendar event",
+            allDay: false,
+            startAt: "2026-07-14T15:00:00.000Z",
+            endAt: "2026-07-14T15:30:00.000Z",
+            version: 1
+          })
+        ];
+        await fulfillJson(route, {
+          startedAt: syncedAt,
+          completedAt: syncedAt,
+          status: "success",
+          connectors: [
+            {
+              accountId: gmailAccount.id,
+              provider: "gmail",
+              status: "success",
+              engine: "gmail_api",
+              created: 1,
+              updated: 0,
+              duplicate: 0,
+              failed: 0,
+              message: null
+            },
+            {
+              accountId: calendarAccount.id,
+              provider: "google-calendar",
+              status: "success",
+              created: 1,
+              updated: 0,
+              duplicate: 0,
+              failed: 0,
+              message: null
+            }
+          ]
+        });
+        return;
+      }
       await route.fulfill({
         status: 404,
         headers: corsHeaders(),
@@ -491,9 +595,16 @@ test.describe("Milestone 2.1 preview browser verification", () => {
 
     await page.goto("/");
     await expect(page.getByText(user.email)).toBeVisible();
+    await expect(notificationCard(page, "Gmail auto refresh message")).toBeVisible();
+    expect(eventStreamOpened).toBe(true);
     await page.getByRole("button", { name: "Connectors" }).click();
     await expect(page.getByText(gmailAccount.displayName)).toBeVisible();
-    await expect(page.getByText("Last Sync: Never")).toBeVisible();
+    await expect(
+      page
+        .getByRole("article")
+        .filter({ hasText: gmailAccount.displayName })
+        .getByText("Last Sync: Never")
+    ).toBeVisible();
     await expect(page.getByLabel("Gmail Ingestion Engine")).toHaveValue("gmail_api");
     await expect(page.getByText("Requested Engine: Gmail API")).toBeVisible();
     await expect(page.getByText("Active Engine: Gmail API")).toBeVisible();
@@ -523,7 +634,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByText("Reconnect Required: Yes")).toBeVisible();
     await expect(page.getByText("Verified: No")).toBeVisible();
     expect(engineUpdateAttempts).toBe(2);
-    await page.getByRole("button", { name: "Refresh" }).click();
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
     await expect(page.getByLabel("Gmail Ingestion Engine")).toHaveValue("gmail_imap");
     await expect(page.getByText("Requested Engine: Gmail IMAP (Preview)")).toBeVisible();
     await page.reload();
@@ -534,14 +645,15 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await page.getByLabel("Enable preview comparison mode").click();
     await expect(page.getByLabel("Enable preview comparison mode")).toBeChecked();
 
-    await page.getByRole("button", { name: "Sync Now" }).click();
+    const gmailCard = page.getByRole("article").filter({ hasText: gmailAccount.displayName });
+    await gmailCard.getByRole("button", { name: "Sync Now" }).click();
     await expect(
       page.getByRole("button", { name: /Searching|Fetching|Applying rules|Creating notifications/ })
     ).toBeVisible();
     await expect(notificationCard(page, "Gmail synced message")).toBeVisible();
     await page.getByRole("button", { name: "Connectors" }).click();
     await expect(page.getByText("Finished.")).toBeVisible();
-    await expect(page.getByText("Last Sync: Never")).toHaveCount(0);
+    await expect(gmailCard.getByText("Last Sync: Never")).toHaveCount(0);
     await expect(page.getByText("142 messages examined")).toBeVisible();
     await expect(page.getByText("118 notifications created").first()).toBeVisible();
     await expect(page.getByText("7 updated")).toBeVisible();
@@ -583,17 +695,17 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByText("Last Incremental Sync")).toBeVisible();
     await expect(page.getByText("118 notifications created").first()).toBeVisible();
 
-    notifications = [
-      ...notifications,
-      notificationFixture({
-        id: "notification_gmail_refresh",
-        title: "Gmail refresh message",
-        summary: "Loaded by the normal Refresh control"
-      })
-    ];
+    await page.getByRole("button", { name: "Refresh All" }).click();
+    await expect(page.getByText("Refreshing Gmail...")).toBeVisible();
+    await expect(page.getByText("Updating Notifications...")).toBeVisible();
+    await expect(page.getByText("Refresh All finished.")).toBeVisible();
+    await expect(page.getByText("Gmail: success")).toBeVisible();
+    await expect(page.getByText("Google Calendar: success")).toBeVisible();
+    expect(syncAllRequests).toBe(1);
     await page.getByRole("button", { name: "Notifications" }).click();
-    await page.getByRole("button", { name: "Refresh" }).click();
-    await expect(notificationCard(page, "Gmail refresh message")).toBeVisible();
+    await expect(notificationCard(page, "Gmail Refresh All message")).toBeVisible();
+    await page.getByRole("button", { name: "Agenda" }).click();
+    await expect(page.getByText("Refresh All calendar event")).toBeVisible();
   });
 
   test("renders Google Calendar events after Sync Now without reloading", async ({ page }) => {
@@ -917,7 +1029,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         version: 1
       })
     ];
-    await page.getByRole("button", { name: "Refresh" }).click();
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
     await expect(calendarEventCard(page, "Calendar refresh event")).toBeVisible();
 
     await page.getByLabel("Calendar date").fill("2026-07-15");

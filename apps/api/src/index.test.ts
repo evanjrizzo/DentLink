@@ -17,6 +17,7 @@ import type {
   AuthSession,
   ConnectorAccount,
   ConnectorSourceRecord,
+  ConnectorSyncAllResult,
   ConflictResponse,
   Notification,
   GmailRule,
@@ -1594,6 +1595,180 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       gmailLastSyncEngine: "gmail_imap",
       gmailLastSyncCreated: 1
     });
+  });
+
+  it("syncs all connected services and streams DentLink change metadata", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "sync-all@example.com");
+    const env = {
+      ...gmailTestEnv(fakeGmailClient()),
+      ...googleCalendarTestEnv(fakeGoogleCalendarClient())
+    };
+
+    const gmailStart = await requestJson<{ authorizationUrl: string }>(
+      store,
+      "POST",
+      "/v1/connectors/gmail/start",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const gmailUrl = new URL(gmailStart.authorizationUrl);
+    await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${gmailUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+
+    const calendarStart = await requestJson<{ authorizationUrl: string }>(
+      store,
+      "POST",
+      "/v1/connectors/google-calendar/start",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const calendarUrl = new URL(calendarStart.authorizationUrl);
+    await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/google-calendar/callback?code=valid-code&state=${calendarUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+
+    const result = await requestJson<ConnectorSyncAllResult>(
+      store,
+      "POST",
+      "/v1/connectors/sync-all",
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(result.status).toBe("success");
+    expect(result.connectors.map((connector) => connector.provider).sort()).toEqual([
+      "gmail",
+      "google-calendar"
+    ]);
+    expect(result.connectors.find((connector) => connector.provider === "gmail")).toMatchObject({
+      status: "success",
+      engine: "gmail_api",
+      created: 1,
+      failed: 0
+    });
+    expect(
+      result.connectors.find((connector) => connector.provider === "google-calendar")
+    ).toMatchObject({
+      status: "success",
+      failed: 0
+    });
+    const streamedNotification = await requestJson<Notification>(
+      store,
+      "POST",
+      "/v1/notifications",
+      { title: "Streamed notification", summary: "SSE should report this change" },
+      owner.session.token,
+      201,
+      env
+    );
+    await requestJson<Notification>(
+      store,
+      "PATCH",
+      `/v1/notifications/${streamedNotification.id}`,
+      { expectedVersion: streamedNotification.version, patch: { pinned: true } },
+      owner.session.token,
+      200,
+      env
+    );
+
+    const stream = await handleApiRequest(
+      new Request("https://api.dentlink.test/v1/events?cursor=0", {
+        headers: { Authorization: `Bearer ${owner.session.token}` }
+      }),
+      { store, ...env }
+    );
+    expect(stream.status).toBe(200);
+    expect(stream.headers.get("Content-Type")).toContain("text/event-stream");
+    const reader = stream.body?.getReader();
+    expect(reader).toBeDefined();
+    let text = "";
+    for (
+      let index = 0;
+      index < 8 && (!text.includes("calendar_updated") || !text.includes("notifications_updated"));
+      index += 1
+    ) {
+      const chunk = await reader?.read();
+      text += new TextDecoder().decode(chunk?.value);
+    }
+    await reader?.cancel();
+    expect(text).toContain("event: dentlink_change");
+    expect(text).toContain("notifications_updated");
+    expect(text).toContain("calendar_updated");
+  });
+
+  it("returns partial Refresh All results when one connector fails", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "sync-all-partial@example.com");
+    const gmail = await store.createConnectorAccount(
+      owner.user.id,
+      {
+        connectorKey: "gmail",
+        displayName: "Gmail",
+        settings: {},
+        credentialRef: "missing",
+        credentialStatus: "configured"
+      },
+      "2026-07-14T20:20:00.000Z"
+    );
+    await store.updateConnectorAccount(
+      owner.user.id,
+      gmail.id,
+      gmail.version,
+      { status: "connected", healthStatus: "healthy", syncStatus: "idle" },
+      "2026-07-14T20:20:01.000Z"
+    );
+    const generic = await store.createConnectorAccount(
+      owner.user.id,
+      {
+        connectorKey: "generic-email",
+        displayName: "Generic",
+        settings: {},
+        credentialRef: null,
+        credentialStatus: "not_configured"
+      },
+      "2026-07-14T20:20:00.000Z"
+    );
+    await store.updateConnectorAccount(
+      owner.user.id,
+      generic.id,
+      generic.version,
+      { status: "connected", healthStatus: "healthy", syncStatus: "idle" },
+      "2026-07-14T20:20:01.000Z"
+    );
+
+    const result = await requestJson<ConnectorSyncAllResult>(
+      store,
+      "POST",
+      "/v1/connectors/sync-all",
+      undefined,
+      owner.session.token
+    );
+    expect(result.status).toBe("partial");
+    expect(result.connectors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ provider: "gmail", status: "failed", failed: 1 }),
+        expect.objectContaining({ provider: "generic-email", status: "skipped" })
+      ])
+    );
   });
 
   it("records Gmail per-message outcomes and keeps partial sync failures observable", async () => {

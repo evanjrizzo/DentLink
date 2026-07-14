@@ -523,6 +523,36 @@ export type GoogleCalendarSyncResult = {
   upsertedEvents: number;
 };
 
+export type ConnectorSyncAllResult = {
+  startedAt: IsoDateTime;
+  completedAt: IsoDateTime;
+  status: "success" | "partial" | "failed";
+  connectors: Array<{
+    accountId: EntityId;
+    provider: string;
+    status: "success" | "failed" | "skipped";
+    engine?: "gmail_api" | "gmail_imap";
+    created: number;
+    updated: number;
+    duplicate: number;
+    failed: number;
+    message: string | null;
+  }>;
+};
+
+export type DentLinkChangeEvent = {
+  type:
+    | "notifications_updated"
+    | "calendar_updated"
+    | "connectors_updated"
+    | "notes_updated"
+    | "webhooks_updated"
+    | "dentlink_updated";
+  source: string;
+  accountId: EntityId | null;
+  revision: number;
+};
+
 export type ConnectorAccountsList = {
   accounts: ConnectorAccount[];
 };

@@ -54,4 +54,27 @@ describe("@dentlink/api-client", () => {
       message: "DentLink could not reach the preview API. Your request was not saved."
     });
   });
+
+  it("posts Refresh All to the sync-all endpoint", async () => {
+    const client = new DentLinkApiClient({
+      baseUrl: "https://dentlink-api-preview.evanjrizzo.workers.dev",
+      fetchImpl: async (url, init) => {
+        expect(url).toBe(
+          "https://dentlink-api-preview.evanjrizzo.workers.dev/v1/connectors/sync-all"
+        );
+        expect(init?.method).toBe("POST");
+        return new Response(
+          JSON.stringify({
+            startedAt: "2026-07-14T20:00:00.000Z",
+            completedAt: "2026-07-14T20:00:01.000Z",
+            status: "success",
+            connectors: []
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    });
+
+    await expect(client.syncAllConnectors()).resolves.toMatchObject({ status: "success" });
+  });
 });

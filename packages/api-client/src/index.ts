@@ -15,6 +15,7 @@ import type {
   ConnectorAccountsList,
   ConnectorSourceRecord,
   ConnectorSourceRecordInput,
+  ConnectorSyncAllResult,
   CurrentSession,
   EntityId,
   Folder,
@@ -242,6 +243,10 @@ export class DentLinkApiClient {
     return this.request<{ records: ConnectorSourceRecord[] }>(
       `/v1/connectors/accounts/${accountId}/source-records`
     );
+  }
+
+  async syncAllConnectors(): Promise<ConnectorSyncAllResult> {
+    return this.request<ConnectorSyncAllResult>("/v1/connectors/sync-all", { method: "POST" });
   }
 
   async syncGmailAccount(accountId: EntityId): Promise<GmailSyncResult> {
@@ -533,7 +538,16 @@ export class DentLinkApiClient {
     const headers = new Headers();
     headers.set("Accept", "text/calendar");
     if (this.token) headers.set("Authorization", `Bearer ${this.token}`);
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, { headers });
+    const response = await this.fetchImpl(`${this.baseUrl}${path}`, { headers }).catch(
+      (caught: unknown) => {
+        throw new DentLinkApiError(
+          "DentLink could not reach the preview API. Your request was not saved.",
+          "network_unreachable",
+          0,
+          caught instanceof Error ? { cause: caught.message } : undefined
+        );
+      }
+    );
     const text = await response.text();
     if (!response.ok) {
       throw new DentLinkApiError(text || "Request failed", "request_failed", response.status);
