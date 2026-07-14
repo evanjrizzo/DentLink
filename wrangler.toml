@@ -28,7 +28,7 @@ DENTLINK_BUILD_ID = "preview"
 [[env.preview.d1_databases]]
 binding = "DB"
 database_name = "dentlink-preview"
-database_id = "REPLACE_WITH_PREVIEW_D1_DATABASE_ID"
+database_id = "fe80f59e-2cba-48ea-8c19-81afb39952a3"
 migrations_dir = "migrations"
 
 [env.production]

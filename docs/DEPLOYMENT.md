@@ -20,9 +20,9 @@ Use the project dependency rather than a global Wrangler installation.
 - Preview: `dentlink-api-preview`, D1 database `dentlink-preview`.
 - Production: `dentlink-api-production`, D1 database `dentlink-production`.
 
-Preview and production database IDs are placeholders and must be replaced before deployment:
+The preview database ID is configured after creating `dentlink-preview`. The production database ID
+is still a placeholder and must be replaced before production deployment:
 
-- `REPLACE_WITH_PREVIEW_D1_DATABASE_ID`
 - `REPLACE_WITH_PRODUCTION_D1_DATABASE_ID`
 
 Production routes are intentionally commented until the real zone and API hostname are known.
@@ -50,8 +50,8 @@ Use these steps for the first real preview deployment. Do not reuse production i
    pnpm exec wrangler d1 list
    ```
 
-4. Replace `REPLACE_WITH_PREVIEW_D1_DATABASE_ID` in `wrangler.toml`. Leave the production
-   placeholder unchanged until production is intentionally configured.
+4. Replace the preview `database_id` in `wrangler.toml` if the preview database is recreated. Leave
+   the production placeholder unchanged until production is intentionally configured.
 
 5. Replace `https://REPLACE_WITH_PREVIEW_WEB_ORIGIN` in `[env.preview.vars]` with the exact preview
    web origin that will call the API. Use a comma-separated list for multiple preview origins. Do not

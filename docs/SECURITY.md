@@ -19,8 +19,8 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
 
 ## Passwords
 
-- Milestone 1 hashes passwords with Web Crypto PBKDF2-SHA-256, per-password random salt, and 210,000
-  iterations.
+- Milestone 1 hashes passwords with Web Crypto PBKDF2-SHA-256, per-password random salt, and
+  100,000 iterations, the Cloudflare Workers Web Crypto maximum for PBKDF2.
 - Password hashes, salts, and iteration counts are stored separately from user-facing session
   payloads.
 - Plaintext passwords are accepted only at registration/login request boundaries and are never

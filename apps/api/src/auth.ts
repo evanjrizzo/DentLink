@@ -1,7 +1,7 @@
 import type { PasswordRecord } from "./storage";
 
 const HASH_ALGORITHM = "SHA-256";
-const ITERATIONS = 210_000;
+const ITERATIONS = 100_000;
 const KEY_BITS = 256;
 const TOKEN_BYTES = 32;
 
@@ -34,7 +34,7 @@ async function derive(password: string, salt: Uint8Array, iterations: number): P
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(password),
-    "PBKDF2",
+    { name: "PBKDF2" },
     false,
     ["deriveBits"]
   );
@@ -43,7 +43,7 @@ async function derive(password: string, salt: Uint8Array, iterations: number): P
     salt.byteOffset + salt.byteLength
   ) as ArrayBuffer;
   const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", hash: HASH_ALGORITHM, salt: saltBuffer, iterations },
+    { name: "PBKDF2", hash: { name: HASH_ALGORITHM }, salt: saltBuffer, iterations },
     key,
     KEY_BITS
   );

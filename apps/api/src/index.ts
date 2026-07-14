@@ -191,7 +191,9 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
         caught.code === "not_found" ? 404 : caught.code === "invalid_cursor" ? 400 : 409;
       return error(caught.code, caught.message, status);
     }
-    return error("internal_error", "Unexpected server error", 500);
+    const requestId = crypto.randomUUID();
+    logUnexpectedError(caught, { method, path, requestId });
+    return error("internal_error", "Unexpected server error", 500, requestId);
   }
 }
 
@@ -243,16 +245,41 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-function error(code: string, message: string, status: number): Response {
+function error(
+  code: string,
+  message: string,
+  status: number,
+  requestId = crypto.randomUUID()
+): Response {
   return json(
     {
       error: {
         code,
         message,
-        requestId: crypto.randomUUID()
+        requestId
       }
     },
     status
+  );
+}
+
+function logUnexpectedError(
+  caught: unknown,
+  context: { method: string; path: string; requestId: string }
+): void {
+  const details =
+    caught instanceof Error
+      ? { name: caught.name, message: caught.message }
+      : { name: typeof caught, message: "Non-Error thrown" };
+  console.error(
+    JSON.stringify({
+      level: "error",
+      event: "api_unexpected_error",
+      requestId: context.requestId,
+      method: context.method,
+      path: context.path,
+      error: details
+    })
   );
 }
 
