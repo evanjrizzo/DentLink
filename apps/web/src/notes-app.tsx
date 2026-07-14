@@ -113,6 +113,10 @@ export function DentLinkNotesApp(): ReactElement {
     if (requestId === connectorsRequest.current) setConnectorAccounts(response.accounts);
   }
 
+  async function refreshConnectorNotificationState(): Promise<void> {
+    await Promise.all([loadConnectors(), loadNotifications()]);
+  }
+
   async function authenticate(mode: "login" | "register"): Promise<void> {
     try {
       setError(null);
@@ -334,9 +338,9 @@ export function DentLinkNotesApp(): ReactElement {
   async function syncGmail(account: ConnectorAccount): Promise<void> {
     try {
       setError(null);
-      await client.syncGmailAccount(account.id);
-      await loadConnectors();
-      await loadNotifications();
+      const result = await client.syncGmailAccount(account.id);
+      await refreshConnectorNotificationState();
+      if (result.createdNotifications > 0) setView("notifications");
     } catch (caught) {
       handleFailure(caught);
       await loadConnectors().catch(() => undefined);
@@ -540,7 +544,7 @@ export function DentLinkNotesApp(): ReactElement {
           onReconnectGmail={(account) => connectGmail(account.id)}
           onSyncGmail={syncGmail}
           onDisconnectGmail={disconnectGmail}
-          onRefreshConnectors={loadConnectors}
+          onRefreshConnectors={refreshConnectorNotificationState}
         />
       ) : null}
     </>

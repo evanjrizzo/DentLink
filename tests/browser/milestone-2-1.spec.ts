@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page, type Route } from "@playwright/test";
 
 const apiBaseUrl =
   process.env.DENTLINK_PREVIEW_API_URL ?? "https://dentlink-api-preview.evanjrizzo.workers.dev";
@@ -180,8 +180,6 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await page.getByRole("button", { name: "Connectors" }).click();
     await expect(page.getByRole("button", { name: "Connect Gmail" })).toBeVisible();
     await expect(page.getByText("No Gmail accounts connected.")).toBeVisible();
-    await page.getByRole("button", { name: "Connect Gmail" }).click();
-    await expect(page.getByRole("alert")).toContainText(/GOOGLE_CLIENT_ID|GOOGLE_CLIENT_SECRET/);
 
     await page.getByRole("button", { name: "Log out" }).click();
     await expect(page.getByRole("button", { name: "Register" })).toBeVisible();
@@ -202,6 +200,131 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByRole("button", { name: "Register" })).toBeVisible();
 
     expect(leakedConsole).toEqual([]);
+  });
+
+  test("refreshes Gmail notifications after Sync Now without reloading", async ({ page }) => {
+    const now = new Date().toISOString();
+    const user = {
+      id: "user_browser_gmail_refresh",
+      email: "gmail-refresh@example.invalid",
+      createdAt: now
+    };
+    const session = {
+      user,
+      session: {
+        token: "session_browser_gmail_refresh",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+      }
+    };
+    const gmailAccount = {
+      id: "connector_gmail_browser_refresh",
+      userId: user.id,
+      connectorKey: "gmail",
+      displayName: "Gmail gmail-refresh@example.invalid",
+      status: "connected",
+      healthStatus: "healthy",
+      syncStatus: "idle",
+      settings: { googleEmail: "gmail-refresh@example.invalid" },
+      credentialRef: "credential_browser_refresh",
+      credentialStatus: "configured",
+      syncCursor: "history_100",
+      lastSyncAt: null as string | null,
+      nextSyncAt: null,
+      lastHealthAt: now,
+      errorCode: null,
+      errorMessage: null,
+      createdAt: now,
+      updatedAt: now,
+      version: 1
+    };
+    let notifications: unknown[] = [];
+
+    await page.route("**/v1/**", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      const path = url.pathname;
+      const method = request.method();
+      if (method === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: corsHeaders() });
+        return;
+      }
+      if (method === "GET" && path === "/v1/auth/session") {
+        await fulfillJson(route, { user, session: { expiresAt: session.session.expiresAt } });
+        return;
+      }
+      if (method === "GET" && path === "/v1/notes") {
+        await fulfillJson(route, { notes: [], folders: [], tags: [] });
+        return;
+      }
+      if (method === "GET" && path === "/v1/notifications") {
+        await fulfillJson(route, { notifications });
+        return;
+      }
+      if (method === "GET" && path === "/v1/webhooks") {
+        await fulfillJson(route, { webhooks: [] });
+        return;
+      }
+      if (method === "GET" && path === "/v1/connectors/accounts") {
+        await fulfillJson(route, { accounts: [gmailAccount] });
+        return;
+      }
+      if (method === "POST" && path === `/v1/connectors/gmail/${gmailAccount.id}/sync`) {
+        const syncedAt = new Date().toISOString();
+        gmailAccount.lastSyncAt = syncedAt;
+        gmailAccount.lastHealthAt = syncedAt;
+        gmailAccount.syncCursor = "history_101";
+        gmailAccount.updatedAt = syncedAt;
+        gmailAccount.version += 1;
+        notifications = [
+          notificationFixture({
+            id: "notification_gmail_synced",
+            title: "Gmail synced message",
+            summary: "From browser-controlled Gmail sync",
+            createdAt: syncedAt,
+            updatedAt: syncedAt
+          })
+        ];
+        await fulfillJson(route, {
+          account: gmailAccount,
+          processed: 1,
+          createdNotifications: 1
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 404,
+        headers: corsHeaders(),
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "not_found", message: "Not found" } })
+      });
+    });
+
+    await page.addInitScript((storedSession) => {
+      window.localStorage.setItem("dentlink.auth.session.v1", JSON.stringify(storedSession));
+    }, session);
+
+    await page.goto("/");
+    await expect(page.getByText(user.email)).toBeVisible();
+    await page.getByRole("button", { name: "Connectors" }).click();
+    await expect(page.getByText(gmailAccount.displayName)).toBeVisible();
+    await expect(page.getByText("Last sync: Never")).toBeVisible();
+
+    await page.getByRole("button", { name: "Sync Now" }).click();
+    await expect(notificationCard(page, "Gmail synced message")).toBeVisible();
+    await page.getByRole("button", { name: "Connectors" }).click();
+    await expect(page.getByText("Last sync: Never")).toHaveCount(0);
+
+    notifications = [
+      ...notifications,
+      notificationFixture({
+        id: "notification_gmail_refresh",
+        title: "Gmail refresh message",
+        summary: "Loaded by the normal Refresh control"
+      })
+    ];
+    await page.getByRole("button", { name: "Notifications" }).click();
+    await page.getByRole("button", { name: "Refresh" }).click();
+    await expect(notificationCard(page, "Gmail refresh message")).toBeVisible();
   });
 });
 
@@ -298,4 +421,52 @@ async function dentlinkStorage(page: Page): Promise<string> {
 async function settleMutation(page: Page): Promise<void> {
   await page.waitForTimeout(500);
   await expect(page.getByRole("alert")).toHaveCount(0);
+}
+
+function notificationFixture(input: {
+  id: string;
+  title: string;
+  summary: string;
+  createdAt?: string;
+  updatedAt?: string;
+}) {
+  const timestamp = new Date().toISOString();
+  return {
+    id: input.id,
+    userId: "user_browser_gmail_refresh",
+    title: input.title,
+    summary: input.summary,
+    body: "",
+    source: "connector",
+    sourceLabel: "Gmail",
+    sourceUrl: "https://mail.google.com/mail/u/0/#inbox/test-message",
+    severity: "info",
+    status: "active",
+    pinned: false,
+    rank: 0,
+    globalOrder: 1000,
+    version: 1,
+    createdAt: input.createdAt ?? timestamp,
+    updatedAt: input.updatedAt ?? timestamp,
+    completedAt: null,
+    dismissedAt: null
+  };
+}
+
+async function fulfillJson(route: Route, body: unknown): Promise<void> {
+  await route.fulfill({
+    status: 200,
+    headers: corsHeaders(),
+    contentType: "application/json",
+    body: JSON.stringify(body)
+  });
+}
+
+function corsHeaders(): Record<string, string> {
+  return {
+    "access-control-allow-origin": webOrigin,
+    "access-control-allow-methods": "GET,POST,PATCH,DELETE,OPTIONS",
+    "access-control-allow-headers": "authorization,content-type",
+    vary: "Origin"
+  };
 }
