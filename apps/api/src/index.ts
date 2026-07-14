@@ -19,11 +19,27 @@ import type { AuthSession, NoteConflict } from "@dentlink/item-model";
 export type ApiEnv = {
   store?: DentLinkStore;
   DB?: D1DatabaseLike;
+  DENTLINK_ENV?: string;
+  ALLOWED_ORIGINS?: string;
+  DENTLINK_BUILD_ID?: string;
 };
 
 const defaultStore = new MemoryDentLinkStore();
 
 export async function handleApiRequest(request: Request, env: ApiEnv = {}): Promise<Response> {
+  const cors = corsForRequest(request, env);
+  if (request.method.toUpperCase() === "OPTIONS") {
+    return withRuntimeHeaders(
+      cors.allowed
+        ? new Response(null, { status: 204 })
+        : error("origin_not_allowed", "Origin is not allowed", 403),
+      cors
+    );
+  }
+  return withRuntimeHeaders(await handleApiRoute(request, env), cors);
+}
+
+async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Response> {
   const store = env.store ?? (env.DB ? new D1DentLinkStore(env.DB) : defaultStore);
   const url = new URL(request.url);
   const path = url.pathname;
@@ -31,6 +47,15 @@ export async function handleApiRequest(request: Request, env: ApiEnv = {}): Prom
   const now = new Date().toISOString();
 
   try {
+    if (method === "GET" && path === "/v1/health") {
+      return json({
+        status: "ok",
+        environment: env.DENTLINK_ENV ?? "local",
+        build: env.DENTLINK_BUILD_ID ?? "local",
+        database: await databaseHealth(env)
+      });
+    }
+
     if (method === "POST" && path === "/v1/auth/register") {
       const credentials = parseCredentials(await readJson(request));
       const password = await hashPassword(credentials.password);
@@ -229,6 +254,66 @@ function error(code: string, message: string, status: number): Response {
     },
     status
   );
+}
+
+async function databaseHealth(
+  env: ApiEnv
+): Promise<{ reachable: boolean; adapter: "d1" | "memory" }> {
+  if (!env.DB) return { reachable: true, adapter: "memory" };
+  try {
+    await env.DB.prepare("SELECT 1 AS ok").first();
+    return { reachable: true, adapter: "d1" };
+  } catch {
+    return { reachable: false, adapter: "d1" };
+  }
+}
+
+type CorsDecision = {
+  allowed: boolean;
+  origin: string | null;
+};
+
+function corsForRequest(request: Request, env: ApiEnv): CorsDecision {
+  const origin = request.headers.get("Origin");
+  if (!origin) return { allowed: true, origin: null };
+  const allowedOrigins = configuredOrigins(env);
+  return { allowed: allowedOrigins.has(origin), origin };
+}
+
+function configuredOrigins(env: ApiEnv): Set<string> {
+  const configured = env.ALLOWED_ORIGINS?.split(",").map((origin) => origin.trim()) ?? [];
+  return new Set(
+    configured.filter(Boolean).length > 0
+      ? configured.filter(Boolean)
+      : [
+          "http://localhost:5173",
+          "http://127.0.0.1:5173",
+          "http://localhost:5174",
+          "http://127.0.0.1:5174",
+          "http://localhost:8787",
+          "http://127.0.0.1:8787"
+        ]
+  );
+}
+
+function withRuntimeHeaders(response: Response, cors: CorsDecision): Response {
+  const headers = new Headers(response.headers);
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("Referrer-Policy", "no-referrer");
+  headers.set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");
+  headers.set("Cache-Control", "no-store");
+  headers.append("Vary", "Origin");
+  if (cors.allowed && cors.origin) {
+    headers.set("Access-Control-Allow-Origin", cors.origin);
+    headers.set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+    headers.set("Access-Control-Allow-Headers", "Authorization,Content-Type,Accept");
+    headers.set("Access-Control-Max-Age", "600");
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
 }
 
 export type { AuthSession };

@@ -1,0 +1,58 @@
+name: Deploy Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_environment:
+        description: Type production to confirm this deployment.
+        required: true
+
+jobs:
+  deploy-production:
+    if: ${{ github.event.inputs.confirm_environment == 'production' }}
+    runs-on: ubuntu-latest
+    environment: production
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate
+        run: pnpm validate
+
+      - name: Check diff whitespace
+        run: git diff --check
+
+      - name: Apply production D1 migrations
+        run: pnpm db:migrate:production
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Deploy production Worker
+        run: pnpm deploy:production
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Smoke test production API
+        run: pnpm smoke:api
+        env:
+          DENTLINK_SMOKE_BASE_URL: ${{ secrets.DENTLINK_PRODUCTION_API_BASE_URL }}

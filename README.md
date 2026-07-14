@@ -1,17 +1,21 @@
 # DentLink
 
-DentLink is a unified personal information hub that aggregates, organizes, ranks, and presents information from independent systems without replacing them.
+DentLink is a unified personal information hub that aggregates, organizes, ranks, and presents
+information from independent systems without replacing them.
 
 It answers one product question: what do I need to know, do, or review right now?
 
-DentLink is a new, independent platform. It must not depend on Odysseus, the previous desktop dashboard, the previous cloud dashboard, or the Android widget projects. Those systems may be inspected only as behavioral references.
+DentLink is a new, independent platform. It must not depend on Odysseus, the previous desktop
+dashboard, the previous cloud dashboard, or the Android widget projects. Those systems may be
+inspected only as behavioral references.
 
 ## Current status
 
-Milestone 1.1: authentication and manual Notes vertical slice with D1 persistence validation.
+Milestone 1.2: authentication and manual Notes vertical slice with Cloudflare runtime and deployment
+baseline.
 
-This repository contains the pnpm TypeScript workspace, shared package boundaries, a Worker-style API
-handler, Cloudflare D1 storage adapter, D1 migration for auth and notes, shared
+This repository contains the pnpm TypeScript workspace, shared package boundaries, a Worker-style
+API handler, Cloudflare D1 storage adapter, D1 migration for auth and notes, shared
 auth/note/sync/conflict types, a typed API client, a small sync helper, and a responsive Notes UI
 shell. It does not yet contain email connectors, calendar providers, named webhooks, Tauri, Android,
 or AI calls.
@@ -20,13 +24,17 @@ or AI calls.
 
 DentLink has three primary user-facing sections:
 
-- Notifications: ranked externally sourced information, such as email summaries, webhook alerts, connector alerts, reminders, and future phone notifications.
-- Notes: manual or captured tasks and reference notes, with folders, tags, due dates, priorities, source links, and completion history.
-- Calendar: unified events from providers, ICS feeds, and DentLink-local entries, with agenda and grid views.
+- Notifications: ranked externally sourced information, such as email summaries, webhook alerts,
+  connector alerts, reminders, and future phone notifications.
+- Notes: manual or captured tasks and reference notes, with folders, tags, due dates, priorities,
+  source links, and completion history.
+- Calendar: unified events from providers, ICS feeds, and DentLink-local entries, with agenda and
+  grid views.
 
 ## Planned sources
 
-Gmail, Microsoft 365 Mail, IMAP, Google Calendar, Microsoft 365 Calendar, ICS, named webhooks, manual entries, and future local/device agents.
+Gmail, Microsoft 365 Mail, IMAP, Google Calendar, Microsoft 365 Calendar, ICS, named webhooks,
+manual entries, and future local/device agents.
 
 ## Planned clients
 
@@ -51,12 +59,14 @@ packages/
 
 ## Architectural boundaries
 
-- The backend is the source of truth for normalized state, ranking, ordering, sync, history, and conflict records.
+- The backend is the source of truth for normalized state, ranking, ordering, sync, history, and
+  conflict records.
 - Every user-owned record is scoped by authenticated server-side identity.
 - Clients never authorize themselves with a client-supplied user ID.
 - Clients do not calculate authoritative rank.
 - Connector-specific provider payloads do not leak into generic UI components.
-- Platform-specific capabilities live behind web, desktop, Android, or local-agent capability layers.
+- Platform-specific capabilities live behind web, desktop, Android, or local-agent capability
+  layers.
 - AI is optional and provider-neutral.
 
 ## Documentation
@@ -83,14 +93,15 @@ Install dependencies with `pnpm install`, then run:
 pnpm validate
 ```
 
-The validation command checks formatting, linting, TypeScript, and tests across the workspace.
-The API test suite runs the same storage contract tests against the in-memory adapter and the
+The validation command checks formatting, linting, TypeScript, and tests across the workspace. The
+API test suite runs the same storage contract tests against the in-memory adapter and the
 D1-compatible adapter.
 
-Run the API locally against Wrangler's local D1 binding with:
+Use Node.js `22.13.1` and pnpm `9.15.4`. Run the API locally against Wrangler's local D1 binding
+with:
 
 ```bash
-pnpm d1:migrate:local
+pnpm db:migrate:local
 pnpm dev
 ```
 
@@ -107,3 +118,5 @@ sqlite3 /tmp/dentlink_m1_migration_check.db < migrations/0001_auth_notes.sql
 sqlite3 /tmp/dentlink_m1_migration_check.db "PRAGMA foreign_key_check;"
 sqlite3 /tmp/dentlink_m1_migration_check.db "PRAGMA integrity_check;"
 ```
+
+Deployment, preview, production, smoke-test, and rollback instructions live in `docs/DEPLOYMENT.md`.

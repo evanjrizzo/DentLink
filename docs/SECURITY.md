@@ -1,6 +1,7 @@
 # Security
 
-Priorities: cross-user exposure, stolen credentials, session theft, webhook abuse, malicious payloads, secret leakage, unauthorized local commands, injection, and prompt injection.
+Priorities: cross-user exposure, stolen credentials, session theft, webhook abuse, malicious
+payloads, secret leakage, unauthorized local commands, injection, and prompt injection.
 
 ## Identity and authorization
 
@@ -9,15 +10,21 @@ Priorities: cross-user exposure, stolen credentials, session theft, webhook abus
 - Do not authorize based on client-supplied user IDs.
 - Use revocable sessions and device/session management.
 - Apply authorization checks before loading or mutating user-owned records.
-- Milestone 1 uses bearer session tokens resolved server-side before Notes, folder, tag, sync, or conflict access.
-- Raw session tokens are returned only at registration/login. Server storage keeps a SHA-256 token hash.
-- Milestone 1.1 validates the same identity and user-isolation rules against the Cloudflare D1 storage adapter.
+- Milestone 1 uses bearer session tokens resolved server-side before Notes, folder, tag, sync, or
+  conflict access.
+- Raw session tokens are returned only at registration/login. Server storage keeps a SHA-256 token
+  hash.
+- Milestone 1.1 validates the same identity and user-isolation rules against the Cloudflare D1
+  storage adapter.
 
 ## Passwords
 
-- Milestone 1 hashes passwords with Web Crypto PBKDF2-SHA-256, per-password random salt, and 210,000 iterations.
-- Password hashes, salts, and iteration counts are stored separately from user-facing session payloads.
-- Plaintext passwords are accepted only at registration/login request boundaries and are never returned.
+- Milestone 1 hashes passwords with Web Crypto PBKDF2-SHA-256, per-password random salt, and 210,000
+  iterations.
+- Password hashes, salts, and iteration counts are stored separately from user-facing session
+  payloads.
+- Plaintext passwords are accepted only at registration/login request boundaries and are never
+  returned.
 
 ## Sessions
 
@@ -25,7 +32,12 @@ Priorities: cross-user exposure, stolen credentials, session theft, webhook abus
 - Session tokens expire after 30 days in Milestone 1.
 - Logout removes the server-side session hash, so the prior bearer token cannot be reused.
 - `GET /v1/auth/session` confirms identity without echoing the raw bearer token.
-- The D1 adapter stores only token hashes in `sessions.token_hash`; raw bearer tokens are not persisted.
+- The D1 adapter stores only token hashes in `sessions.token_hash`; raw bearer tokens are not
+  persisted.
+- Deployment configuration keeps secrets out of `wrangler.toml`; local `.dev.vars` and Wrangler
+  secrets are ignored or stored outside Git.
+- CORS is origin allowlist based. Production must set `ALLOWED_ORIGINS` to the real web origin
+  rather than a wildcard.
 
 ## Credentials and secrets
 
@@ -53,8 +65,10 @@ Priorities: cross-user exposure, stolen credentials, session theft, webhook abus
 ## AI safety
 
 - Use structured AI outputs and require approval for sensitive actions.
-- AI must not delete source content, dismiss items autonomously, send email, modify provider events, override explicit user rules, or produce unbounded ranking changes.
-- Record provider, model, prompt or rule version, timestamp, confidence where available, source item, and usage metadata.
+- AI must not delete source content, dismiss items autonomously, send email, modify provider events,
+  override explicit user rules, or produce unbounded ranking changes.
+- Record provider, model, prompt or rule version, timestamp, confidence where available, source
+  item, and usage metadata.
 
 ## Data minimization
 
@@ -71,3 +85,4 @@ Priorities: cross-user exposure, stolen credentials, session theft, webhook abus
 - Prompt injection through email, webhooks, or calendar content
 - Local-agent command abuse
 - Accidental logging of credentials or private content
+- Misconfigured preview or production Cloudflare secrets and origins

@@ -14,7 +14,9 @@ import { NotesWorkspace } from "@dentlink/ui";
 const initialList: NotesList = { notes: [], folders: [], tags: [] };
 
 export function DentLinkNotesApp(): ReactElement {
-  const [client] = useState(() => new DentLinkApiClient({ baseUrl: "" }));
+  const [client] = useState(
+    () => new DentLinkApiClient({ baseUrl: import.meta.env.VITE_DENTLINK_API_BASE_URL ?? "" })
+  );
   const [auth, setAuth] = useState<AuthSession | null>(null);
   const [credentials, setCredentials] = useState({ email: "", password: "" });
   const [notesList, setNotesList] = useState<NotesList>(initialList);

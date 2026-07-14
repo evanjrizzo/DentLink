@@ -4,10 +4,19 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=22 <23",
+    "pnpm": "9.15.4"
+  },
   "scripts": {
     "build": "turbo run build",
     "dev": "wrangler dev --local",
-    "d1:migrate:local": "wrangler d1 migrations apply dentlink --local",
+    "db:migrate:local": "wrangler d1 migrations apply dentlink --local",
+    "db:migrate:preview": "wrangler d1 migrations apply dentlink-preview --env preview --remote",
+    "db:migrate:production": "wrangler d1 migrations apply dentlink-production --env production --remote",
+    "deploy:preview": "wrangler deploy --env preview",
+    "deploy:production": "wrangler deploy --env production",
+    "smoke:api": "node scripts/smoke-api.mjs",
     "format": "prettier --write \"**/*.{css,html,json,yaml,yml,js,mjs,ts,tsx}\"",
     "format:check": "prettier --check \"**/*.{css,html,json,yaml,yml,js,mjs,ts,tsx}\"",
     "lint": "eslint .",
@@ -28,6 +37,6 @@
     "typescript-eslint": "^8.20.0",
     "vite": "^5.4.11",
     "vitest": "^2.1.8",
-    "wrangler": "^3.114.17"
+    "wrangler": "^4.110.0"
   }
 }

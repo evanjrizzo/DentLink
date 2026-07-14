@@ -1,0 +1,173 @@
+# Deployment
+
+DentLink targets Cloudflare Workers with D1. Milestone 1.2 establishes the runtime baseline only; it
+does not add product features.
+
+## Runtime
+
+- Node.js: `22.13.1`, declared in `.nvmrc`, `.node-version`, and `package.json`.
+- pnpm: `9.15.4`, declared in `packageManager` and `engines`.
+- Wrangler: project-local dependency from `package.json`; use `pnpm exec wrangler` or package
+  scripts.
+
+Use the project dependency rather than a global Wrangler installation.
+
+## Environments
+
+`wrangler.toml` defines three environments using the same `DB` binding name:
+
+- Local: `dentlink`, local D1 through `wrangler dev --local`.
+- Preview: `dentlink-api-preview`, D1 database `dentlink-preview`.
+- Production: `dentlink-api-production`, D1 database `dentlink-production`.
+
+Preview and production database IDs are placeholders and must be replaced before deployment:
+
+- `REPLACE_WITH_PREVIEW_D1_DATABASE_ID`
+- `REPLACE_WITH_PRODUCTION_D1_DATABASE_ID`
+
+Production routes are intentionally commented until the real zone and API hostname are known.
+
+## First Preview Deployment
+
+Use these steps for the first real preview deployment. Do not reuse production identifiers.
+
+1. Authenticate Wrangler locally, or configure equivalent GitHub secrets for the preview workflow:
+
+   ```bash
+   pnpm exec wrangler login
+   pnpm exec wrangler whoami
+   ```
+
+2. Create the preview D1 database:
+
+   ```bash
+   pnpm exec wrangler d1 create dentlink-preview
+   ```
+
+3. Copy the `database_id` from the creation output. If needed, list databases again:
+
+   ```bash
+   pnpm exec wrangler d1 list
+   ```
+
+4. Replace `REPLACE_WITH_PREVIEW_D1_DATABASE_ID` in `wrangler.toml`. Leave the production
+   placeholder unchanged until production is intentionally configured.
+
+5. Replace `https://REPLACE_WITH_PREVIEW_WEB_ORIGIN` in `[env.preview.vars]` with the exact preview
+   web origin that will call the API. Use a comma-separated list for multiple preview origins. Do not
+   use `*` for preview or production.
+
+6. Apply remote preview migrations:
+
+   ```bash
+   pnpm db:migrate:preview
+   ```
+
+7. Deploy the preview Worker:
+
+   ```bash
+   pnpm deploy:preview
+   ```
+
+8. Configure the web client to use the deployed preview API origin:
+
+   ```bash
+   VITE_DENTLINK_API_BASE_URL=https://REPLACE_WITH_PREVIEW_WORKER_URL pnpm --filter @dentlink/web build
+   ```
+
+   For hosted web deployments, set `VITE_DENTLINK_API_BASE_URL` in the web hosting environment
+   instead of committing it.
+
+9. Run the remote smoke test against the actual preview API URL:
+
+   ```bash
+   DENTLINK_SMOKE_BASE_URL=https://REPLACE_WITH_PREVIEW_WORKER_URL pnpm smoke:api
+   ```
+
+10. If validation fails, redeploy the last known-good Worker version or disable the preview Worker
+    route. Do not run destructive database rollback automation.
+
+## Configuration
+
+Non-secret Worker variables:
+
+- `DENTLINK_ENV`: `local`, `preview`, or `production`.
+- `ALLOWED_ORIGINS`: comma-separated web origins allowed to call the API.
+- `DENTLINK_BUILD_ID`: safe build identifier.
+
+Client-side Vite variable:
+
+- `VITE_DENTLINK_API_BASE_URL`: API origin for preview or production web builds.
+
+Current Milestone 1.2 runtime does not require committed secrets. Use `.dev.vars` for local
+non-committed Worker values and Wrangler secrets for future secret values. `.dev.vars` and
+`.dev.vars.*` are ignored by Git.
+
+## Local Development
+
+```bash
+pnpm install --frozen-lockfile
+pnpm db:migrate:local
+pnpm dev
+```
+
+The Vite web shell can still run separately:
+
+```bash
+pnpm --filter @dentlink/web dev
+```
+
+## Migrations
+
+```bash
+pnpm db:migrate:local
+pnpm db:migrate:preview
+pnpm db:migrate:production
+```
+
+Production migrations are explicit and manual. Do not add destructive production reset scripts.
+
+## Workflows
+
+CI validates pull requests and `development` pushes without Cloudflare secrets. It installs Node 22,
+runs `pnpm validate`, checks whitespace, applies local D1 migrations, and performs a Wrangler
+dry-run Worker build.
+
+Preview deployment is manual through the `Deploy Preview` workflow. Required GitHub secrets:
+
+- `CLOUDFLARE_ACCOUNT_ID`
+- `CLOUDFLARE_API_TOKEN`
+- `DENTLINK_PREVIEW_API_BASE_URL`
+
+`DENTLINK_PREVIEW_API_BASE_URL` must be the deployed preview API origin used by the smoke test. The
+preview workflow assumes `wrangler.toml` already contains the real preview D1 `database_id` and
+allowed web origin.
+
+Production deployment is manual through the `Deploy Production` workflow and requires typing
+`production`. Configure a protected GitHub `production` environment with required reviewers before
+using it. Required GitHub secrets:
+
+- `CLOUDFLARE_ACCOUNT_ID`
+- `CLOUDFLARE_API_TOKEN`
+- `DENTLINK_PRODUCTION_API_BASE_URL`
+
+## Smoke Tests
+
+Run against any deployed or local API:
+
+```bash
+DENTLINK_SMOKE_BASE_URL=http://127.0.0.1:8787 pnpm smoke:api
+```
+
+The script creates temporary users and notes through the public API. It does not print bearer tokens
+or passwords.
+
+## Rollback
+
+- Redeploy a known-good Worker version through Cloudflare or the deployment workflow.
+- Do not run destructive down migrations automatically.
+- Treat code rollback and database rollback separately.
+- If a migration fails, stop deployment, inspect D1 migration state, and preserve existing user
+  data.
+- Disable or replace a broken preview deployment before promoting changes.
+- Confirm the active deployment with Wrangler or the Cloudflare dashboard before and after rollback.

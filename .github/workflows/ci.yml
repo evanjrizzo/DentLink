@@ -22,7 +22,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
 
       - name: Install dependencies
@@ -30,3 +30,12 @@ jobs:
 
       - name: Validate
         run: pnpm validate
+
+      - name: Check diff whitespace
+        run: git diff --check
+
+      - name: Validate local D1 migrations
+        run: pnpm db:migrate:local
+
+      - name: Validate Worker build
+        run: pnpm exec wrangler deploy --dry-run --env="" --outdir /tmp/dentlink-worker

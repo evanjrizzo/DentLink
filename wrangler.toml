@@ -1,9 +1,51 @@
 name = "dentlink-api"
 main = "apps/api/src/index.ts"
-compatibility_date = "2025-01-01"
+compatibility_date = "2026-07-14"
+workers_dev = true
+preview_urls = true
+
+[vars]
+DENTLINK_ENV = "local"
+ALLOWED_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,http://localhost:8787,http://127.0.0.1:8787"
+DENTLINK_BUILD_ID = "local"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "dentlink"
 database_id = "local-dentlink-dev"
+migrations_dir = "migrations"
+
+[env.preview]
+name = "dentlink-api-preview"
+workers_dev = true
+preview_urls = true
+
+[env.preview.vars]
+DENTLINK_ENV = "preview"
+ALLOWED_ORIGINS = "https://REPLACE_WITH_PREVIEW_WEB_ORIGIN"
+DENTLINK_BUILD_ID = "preview"
+
+[[env.preview.d1_databases]]
+binding = "DB"
+database_name = "dentlink-preview"
+database_id = "REPLACE_WITH_PREVIEW_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[env.production]
+name = "dentlink-api-production"
+workers_dev = false
+preview_urls = false
+
+# Add production routes only after replacing these placeholders with real Cloudflare values:
+# routes = [{ pattern = "api.example.com/*", zone_name = "example.com" }]
+
+[env.production.vars]
+DENTLINK_ENV = "production"
+ALLOWED_ORIGINS = "https://REPLACE_WITH_PRODUCTION_WEB_ORIGIN"
+DENTLINK_BUILD_ID = "production"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "dentlink-production"
+database_id = "REPLACE_WITH_PRODUCTION_D1_DATABASE_ID"
 migrations_dir = "migrations"

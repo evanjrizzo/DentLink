@@ -10,4 +10,9 @@ The Vite dev server mounts the Worker-style API handler at `/v1` with an in-memo
 manual testing. Local development data is nonpersistent and resets when the dev server process
 restarts. Production deployment must use the real API app and durable D1 storage.
 
-It does not implement Notifications, Calendar, Ranking Mode, connectors, Tauri, Android, or AI calls.
+It does not implement Notifications, Calendar, Ranking Mode, connectors, Tauri, Android, or AI
+calls.
+
+Preview and production builds use `VITE_DENTLINK_API_BASE_URL` to select the deployed API origin.
+This value is public client configuration, not a secret. Local Vite development can continue using
+the middleware-mounted `/v1` API when the variable is unset.

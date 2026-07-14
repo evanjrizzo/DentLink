@@ -67,6 +67,54 @@ const fixtures: StoreFixture[] = [
 ];
 
 describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({ createStore }) => {
+  it("serves deployment health without exposing secrets", async () => {
+    const { store } = createStore();
+    const response = await handleApiRequest(new Request("https://api.dentlink.test/v1/health"), {
+      store,
+      DENTLINK_ENV: "test",
+      DENTLINK_BUILD_ID: "test-build"
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    const body = (await response.json()) as {
+      status: string;
+      environment: string;
+      build: string;
+      database: { reachable: boolean };
+    };
+    expect(body).toEqual({
+      status: "ok",
+      environment: "test",
+      build: "test-build",
+      database: { reachable: true, adapter: "memory" }
+    });
+    expect(JSON.stringify(body)).not.toMatch(/token|secret|password/i);
+  });
+
+  it("handles CORS preflight for configured origins", async () => {
+    const { store } = createStore();
+    const allowed = await handleApiRequest(
+      new Request("https://api.dentlink.test/v1/notes", {
+        method: "OPTIONS",
+        headers: { Origin: "https://preview.example.test" }
+      }),
+      { store, ALLOWED_ORIGINS: "https://preview.example.test" }
+    );
+    expect(allowed.status).toBe(204);
+    expect(allowed.headers.get("Access-Control-Allow-Origin")).toBe("https://preview.example.test");
+    expect(allowed.headers.get("Access-Control-Allow-Headers")).toContain("Authorization");
+
+    const denied = await handleApiRequest(
+      new Request("https://api.dentlink.test/v1/notes", {
+        method: "OPTIONS",
+        headers: { Origin: "https://not-allowed.example.test" }
+      }),
+      { store, ALLOWED_ORIGINS: "https://preview.example.test" }
+    );
+    expect(denied.status).toBe(403);
+    expect(denied.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+
   it("registers, logs in, and returns a session without accepting client user identity", async () => {
     const { store } = createStore();
     const registered = await requestJson<AuthSession>(
