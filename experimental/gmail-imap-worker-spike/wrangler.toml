@@ -1,0 +1,14 @@
+name = "dentlink-gmail-imap-spike-preview"
+main = "worker.ts"
+compatibility_date = "2026-07-14"
+
+[vars]
+GMAIL_IMAP_HOST = "imap.gmail.com"
+GMAIL_IMAP_PORT = "993"
+
+[[kv_namespaces]]
+binding = "TOKEN_KV"
+id = "ce86bd37cf9b44608888e13dbd6d7334"
+
+[triggers]
+crons = ["17 9 * * *"]

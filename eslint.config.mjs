@@ -15,7 +15,7 @@ export default [
   },
   js.configs.recommended,
   {
-    files: ["scripts/**/*.mjs"],
+    files: ["scripts/**/*.mjs", "experimental/**/*.mjs"],
     languageOptions: {
       globals: {
         console: "readonly",
