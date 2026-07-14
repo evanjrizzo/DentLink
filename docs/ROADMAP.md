@@ -257,15 +257,237 @@ Timezone handling
 
 Recurring events
 
-## Milestone 6: Microsoft and IMAP
+## Milestone 6 (DEFER UNTIL LATER): Microsoft and IMAP
 
 Add Microsoft 365 Mail, Microsoft 365 Calendar, and IMAP connectors with provider-specific
 capability handling behind the connector abstraction.
 
-## Milestone 7: Ranking and optional AI
+## Milestone 7: Unified Dashboard, Ranking, and AI Assistance
 
-Implement richer explainable ranking, feedback loops, ranking explanations, optional OpenAI provider
-integration, usage accounting, provider-neutral AI interface, and approved task suggestions.
+Status: planned (after Milestone 6 is deferred).
+
+Objective
+
+Transform DentLink from a collection of independent Notes, Notifications, Gmail, and Calendar views into a unified, prioritized personal dashboard.
+
+Milestone 7 focuses on three areas:
+
+reliable notification ingestion
+unified ranking across all sources
+optional AI-powered summarization and classification
+
+Microsoft 365, Outlook, and IMAP remain deferred under Milestone 6.
+
+Phase 1: Notification Reliability
+
+Before introducing AI, ensure Gmail synchronization is complete, deterministic, and observable.
+
+Scope
+
+Implement:
+
+complete Gmail pagination
+incremental history synchronization validation
+duplicate prevention
+idempotent notification creation
+robust HTML and multipart email parsing
+retry handling for partial sync failures
+sync diagnostics
+per-message processing status
+browser regression coverage for large mailboxes
+
+Each processed Gmail message must end with one of:
+
+notification created
+notification updated
+skipped
+duplicate
+filtered
+failed
+
+with an associated reason.
+
+Healthy connector status alone must never imply successful ingestion.
+
+Phase 2: Unified Notification Model
+
+Refine Notifications into DentLink's primary information stream.
+
+Supported sources:
+
+Gmail
+Webhooks
+Google Calendar
+Local Calendar
+Future providers
+
+Every notification should share a common model regardless of origin.
+
+Common fields include:
+
+title
+summary
+source
+source identifier
+timestamp
+priority
+tags
+pinned
+completed
+hidden
+dismissed
+ranking score
+explanation
+AI metadata
+
+Notifications become the central object presented to the user.
+
+Phase 3: User Filtering Rules
+
+Implement deterministic filtering before AI.
+
+Supported rule types:
+
+sender
+sender domain
+recipient
+subject contains
+Gmail labels
+attachment presence
+mailing list detection
+automated sender detection
+keyword matching
+include rules
+exclude rules
+always notify
+never notify
+
+Rules execute before AI.
+
+Every notification should expose why it was shown or hidden.
+
+Phase 4: Optional AI Processing
+
+Introduce an optional provider-neutral AI layer.
+
+Requirements:
+
+disabled by default
+OpenAI API key stored server-side
+provider-neutral AI interface
+configurable model selection
+graceful degradation if unavailable
+AI failure never blocks synchronization
+
+Initial capabilities:
+
+Email summarization
+
+Produce concise summaries suitable for dashboard display.
+
+Classification
+
+Predict:
+
+importance
+category
+requires action
+deadline detected
+newsletter
+receipt
+personal
+work
+Suggested action
+
+Examples:
+
+Reply
+Review
+Schedule
+Ignore
+Archive
+Explainability
+
+Every AI result should include a brief explanation.
+
+Example:
+
+High priority because your manager requested a response before Friday.
+
+Phase 5: Unified Ranking
+
+Replace chronological ordering with explainable ranking.
+
+Ranking inputs include:
+
+due dates
+deadlines
+sender importance
+pinned state
+user feedback
+completion state
+calendar proximity
+AI importance
+deterministic rules
+recency
+
+Every ranked item should expose:
+
+overall score
+contributing factors
+ranking explanation
+
+Example:
+
+Ranked #2 because it contains a deadline tomorrow, is from a starred sender, and requires action.
+
+Phase 6: Unified Dashboard
+
+Create DentLink's primary landing page.
+
+Sections:
+
+Today's schedule
+High-priority notifications
+Upcoming calendar events
+Overdue tasks
+Pinned notes
+Recently completed items
+
+Support:
+
+cross-source search
+source filters
+quick complete
+quick dismiss
+quick pin
+quick open
+
+The dashboard becomes the default home screen.
+
+Phase 7: AI Usage and Settings
+
+Add configuration for:
+
+AI enable/disable
+selected provider
+selected model
+monthly usage
+estimated token cost
+processing status
+privacy controls
+resend for AI processing
+Exit Criteria
+Gmail sync reliably processes every eligible message.
+Large mailboxes synchronize without duplicates or missing messages.
+Every notification has a recorded processing outcome.
+Deterministic filtering works before AI.
+AI summaries and classifications are optional.
+AI failures never interrupt synchronization.
+Users can explain why every notification was shown or hidden.
+Notifications from Notes, Gmail, Webhooks, and Calendar participate in the same ranking system.
+The Dashboard becomes the default landing page.
+Existing authentication, Notes, Calendar, connector, and synchronization tests continue to pass.
 
 ## Milestone 8: Tauri desktop and local agent
 
