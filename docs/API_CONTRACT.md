@@ -196,6 +196,10 @@ Google Calendar or any other Google service.
 - `GET /v1/connectors/gmail/:accountId/diagnostics`: authenticated diagnostics for an owned Gmail
   connector account. Returns aggregate processing counts and recent per-message outcomes without raw
   email bodies.
+- `GET /v1/connectors/gmail/:accountId/rules`: authenticated read of deterministic Gmail rules for
+  an owned Gmail connector account.
+- `PUT /v1/connectors/gmail/:accountId/rules`: authenticated replacement of deterministic Gmail
+  rules. Rules are evaluated before Notification creation.
 - `POST /v1/connectors/gmail/:accountId/disconnect`: authenticated disconnect. Removes stored
   connector credentials and leaves the metadata account paused.
 
@@ -228,12 +232,24 @@ the same endpoint:
   `skipped`, `filtered`, and `failed`.
 - `outcomes`: ordered entries containing `messageId`, `status`, `reason`, and `recordId`.
 
-Outcome `status` values are `notification_created`, `notification_updated`, `skipped`, `duplicate`,
-`filtered`, and `failed`. Source records expose the same final processing status plus
-`processingReason`, `processedAt`, and `errorMessage` for failures. A sync with partial message
-failures returns `200` with connector `healthStatus = "degraded"` and a stable
-`errorCode = "gmail_partial_sync_failed"`; global provider, credential, or database failures still
-return normal API errors and set connector sync status to `error`.
+Outcome `status` values are `notification_created`, `notification_updated`,
+`notification_suppressed`, `notification_grouped`, `skipped`, `duplicate`, `filtered`, and `failed`.
+Source records expose the same final processing status plus `processingReason`, `processedAt`, and
+`errorMessage` for failures. A sync with partial message failures returns `200` with connector
+`healthStatus = "degraded"` and a stable `errorCode = "gmail_partial_sync_failed"`; global provider,
+credential, or database failures still return normal API errors and set connector sync status to
+`error`.
+
+Deterministic Gmail rules support sender address, sender domain, subject contains, Gmail label,
+recipient, attachment presence, unread state, automated sender detection, mailing-list detection,
+always-notify, and never-notify predicates. Actions are `notify`, `suppress`, `low_priority`,
+`high_priority`, and `assign_category`. Suppressed messages create source records with
+`notification_suppressed` and no DentLink Notification; created Notifications copy matched rule
+metadata into the source record.
+
+The Worker also runs scheduled incremental Gmail synchronization every five minutes for connected,
+idle Gmail accounts. Scheduled sync uses the same history-checkpoint path as `Sync Now`; it does not
+run historical backfill.
 
 Incremental sync advances `syncCursor` only when all discovered message IDs finish without a
 per-message failure. Backfill is duplicate-safe through source-record identity and uses Gmail

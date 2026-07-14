@@ -12,10 +12,13 @@ import {
   completeGmailOAuth,
   disconnectGmailAccount,
   getGmailDiagnostics,
+  getGmailRules,
   GmailConfigError,
   gmailConnectorDefinition,
   startGmailOAuth,
+  syncConnectedGmailAccounts,
   syncGmailAccount,
+  updateGmailRules,
   type GmailApiClient,
   type GmailRuntimeEnv
 } from "./gmail";
@@ -57,7 +60,7 @@ import {
 } from "./validation";
 
 import type { ConnectorDefinition } from "@dentlink/connector-sdk";
-import type { AuthSession, NoteConflict } from "@dentlink/item-model";
+import type { AuthSession, GmailRule, NoteConflict } from "@dentlink/item-model";
 
 export type ApiEnv = GmailRuntimeEnv & {
   googleCalendarClient?: GoogleCalendarApiClient;
@@ -382,6 +385,21 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     if (gmailDiagnosticsMatch && method === "GET") {
       return json(await getGmailDiagnostics(store, auth.user.id, gmailDiagnosticsMatch[1] ?? ""));
     }
+    const gmailRulesMatch = path.match(/^\/v1\/connectors\/gmail\/([^/]+)\/rules$/);
+    if (gmailRulesMatch && method === "GET") {
+      return json(await getGmailRules(store, auth.user.id, gmailRulesMatch[1] ?? ""));
+    }
+    if (gmailRulesMatch && method === "PUT") {
+      return json(
+        await updateGmailRules(
+          store,
+          auth.user.id,
+          gmailRulesMatch[1] ?? "",
+          parseGmailRulesBody(await readJson(request)),
+          now
+        )
+      );
+    }
     const gmailDisconnectMatch = path.match(/^\/v1\/connectors\/gmail\/([^/]+)\/disconnect$/);
     if (gmailDisconnectMatch && method === "POST") {
       return json(
@@ -678,12 +696,34 @@ export const apiAppBoundary = {
 export default {
   fetch(request: Request, env: ApiEnv): Promise<Response> {
     return handleApiRequest(request, env);
+  },
+  scheduled(
+    _controller: { scheduledTime: number; cron: string },
+    env: ApiEnv,
+    ctx: { waitUntil(promise: Promise<unknown>): void }
+  ): void {
+    const store = env.store ?? (env.DB ? new D1DentLinkStore(env.DB) : defaultStore);
+    ctx.waitUntil(syncConnectedGmailAccounts(store, env, new Date().toISOString()));
   }
 };
 
 function noteResult(value: unknown): Response {
   if (isConflict(value)) return json({ conflict: value }, 409);
   return json(value);
+}
+
+function parseGmailRulesBody(value: unknown): GmailRule[] {
+  if (!value || typeof value !== "object") {
+    throw new ValidationError("invalid_gmail_rules", "Gmail rules payload is invalid");
+  }
+  const rules = (value as { rules?: unknown }).rules;
+  if (!Array.isArray(rules)) {
+    throw new ValidationError("invalid_gmail_rules", "Gmail rules must be an array");
+  }
+  if (rules.length > 50) {
+    throw new ValidationError("too_many_gmail_rules", "Too many Gmail rules");
+  }
+  return rules as GmailRule[];
 }
 
 function isConflict(value: unknown): value is NoteConflict {

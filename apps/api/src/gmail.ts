@@ -19,6 +19,8 @@ import type {
   ConnectorSourceRecord,
   EntityId,
   GmailDiagnostics,
+  GmailRule,
+  GmailRulesResponse,
   GmailSyncResult
 } from "@dentlink/item-model";
 import type { ConnectorDefinition } from "@dentlink/connector-sdk";
@@ -31,6 +33,7 @@ const INITIAL_SYNC_PAGE_SIZE = 25;
 const HISTORY_PAGE_SIZE = 100;
 const GMAIL_READONLY_RECONNECT_MESSAGE =
   "Reconnect Gmail to grant read-only mailbox access required for backfill.";
+const GMAIL_RULES_SETTING_KEY = "gmailRulesJson";
 
 type GmailOperation =
   | "gmail_token_refresh"
@@ -517,6 +520,75 @@ export async function getGmailDiagnostics(
   };
 }
 
+export async function getGmailRules(
+  store: DentLinkStore,
+  userId: EntityId,
+  accountId: EntityId
+): Promise<GmailRulesResponse> {
+  const account = await requireGmailAccount(store, userId, accountId);
+  return { account, rules: gmailRulesFromSettings(account.settings) };
+}
+
+export async function updateGmailRules(
+  store: DentLinkStore,
+  userId: EntityId,
+  accountId: EntityId,
+  rules: GmailRule[],
+  now: string
+): Promise<GmailRulesResponse> {
+  const account = await requireGmailAccount(store, userId, accountId);
+  const normalized = normalizeGmailRules(rules);
+  const updated = await store.updateConnectorAccount(
+    userId,
+    account.id,
+    account.version,
+    {
+      settings: {
+        ...account.settings,
+        [GMAIL_RULES_SETTING_KEY]: JSON.stringify(normalized)
+      }
+    },
+    now
+  );
+  if (!updated) throw new StoreError("not_found", "Gmail account not found");
+  return { account: updated, rules: normalized };
+}
+
+export async function syncConnectedGmailAccounts(
+  store: DentLinkStore,
+  env: GmailRuntimeEnv,
+  now: string
+): Promise<{ attempted: number; succeeded: number; failed: number; skipped: number }> {
+  const accounts = await store.listConnectorAccountsByKey(GMAIL_CONNECTOR_KEY);
+  let attempted = 0;
+  let succeeded = 0;
+  let failed = 0;
+  let skipped = 0;
+  for (const account of accounts) {
+    if (account.status !== "connected" || account.syncStatus === "syncing") {
+      skipped += 1;
+      continue;
+    }
+    attempted += 1;
+    try {
+      await syncGmailAccount(store, account.userId, account.id, env, now);
+      succeeded += 1;
+    } catch (error) {
+      failed += 1;
+      console.error(
+        JSON.stringify({
+          level: "error",
+          event: "gmail_scheduled_sync_failed",
+          accountId: account.id,
+          errorCode: gmailErrorCode(error),
+          message: safeErrorMessage(error)
+        })
+      );
+    }
+  }
+  return { attempted, succeeded, failed, skipped };
+}
+
 export { GoogleConfigError as GmailConfigError };
 
 export function createGoogleGmailClient(
@@ -735,11 +807,29 @@ async function ingestGmailMessage(
   const headers = headersByName(message);
   const subject = headers.get("subject") ?? "(no subject)";
   const sender = headers.get("from") ?? "Unknown sender";
+  const senderAddress = emailAddressFromHeader(sender);
   const messageId = headers.get("message-id") ?? null;
+  const recipients = [
+    ...(headers.get("to") ? [headers.get("to") ?? ""] : []),
+    ...(headers.get("cc") ? [headers.get("cc") ?? ""] : [])
+  ];
   const receivedAt = message.internalDate
     ? new Date(Number(message.internalDate)).toISOString()
     : now;
   const unread = message.labelIds?.includes("UNREAD") ?? false;
+  const context: GmailRuleContext = {
+    sender,
+    senderAddress,
+    senderDomain: senderAddress.includes("@") ? (senderAddress.split("@").pop() ?? "") : "",
+    subject,
+    labels: message.labelIds ?? [],
+    recipients,
+    hasAttachment: gmailMessageHasAttachment(message),
+    unread,
+    automatedSender: isAutomatedSender(headers),
+    mailingList: isMailingList(headers)
+  };
+  const ruleDecision = evaluateGmailRules(gmailRulesFromSettings(account.settings), context);
   const normalizedPayload = {
     provider: "gmail",
     provider_item_id: message.id,
@@ -751,7 +841,16 @@ async function ingestGmailMessage(
     labels: message.labelIds ?? [],
     unread,
     sender,
+    sender_address: senderAddress,
     subject,
+    recipients,
+    has_attachment: context.hasAttachment,
+    automated_sender: context.automatedSender,
+    mailing_list: context.mailingList,
+    matched_rule_id: ruleDecision.rule?.id ?? null,
+    matched_rule_name: ruleDecision.rule?.name ?? null,
+    matched_rule_action: ruleDecision.action,
+    assigned_category: ruleDecision.category ?? null,
     permalink: gmailPermalink(message.threadId),
     connector_account: account.id
   };
@@ -770,16 +869,39 @@ async function ingestGmailMessage(
   if (!created && record.status !== "failed") {
     return recordGmailMessageDuplicate(store, userId, account, record, now);
   }
+  if (ruleDecision.action === "suppress") {
+    const updatedRecord = await store.updateConnectorSourceRecordProcessing(
+      userId,
+      account.id,
+      message.id,
+      {
+        status: "notification_suppressed",
+        processingReason: ruleDecision.rule
+          ? `Suppressed by Gmail rule: ${ruleDecision.rule.name}`
+          : "Suppressed by Gmail rule",
+        normalizedPayload,
+        payloadHash
+      },
+      now
+    );
+    return {
+      messageId: message.id,
+      status: "notification_suppressed",
+      reason: updatedRecord.processingReason ?? "Suppressed by Gmail rule",
+      recordId: updatedRecord.id
+    };
+  }
+  const severity = gmailNotificationSeverity(ruleDecision.action, unread);
   const notification = await store.createNotification(
     userId,
     {
       title: subject,
-      summary: `${sender}${unread ? " · unread" : ""}`,
-      body: "",
+      summary: `${sender}${unread ? " · unread" : ""}${ruleDecision.category ? ` · ${ruleDecision.category}` : ""}`,
+      body: ruleDecision.rule ? `Matched Gmail rule: ${ruleDecision.rule.name}` : "",
       source: "connector",
       sourceLabel: "Gmail",
       sourceUrl: gmailPermalink(message.threadId),
-      severity: unread ? "medium" : "info"
+      severity
     },
     now
   );
@@ -897,6 +1019,8 @@ function summarizeGmailOutcomes(
   for (const outcome of outcomes) {
     if (outcome.status === "notification_created") summary.created += 1;
     if (outcome.status === "notification_updated") summary.updated += 1;
+    if (outcome.status === "notification_suppressed") summary.filtered += 1;
+    if (outcome.status === "notification_grouped") summary.skipped += 1;
     if (outcome.status === "duplicate") summary.duplicate += 1;
     if (outcome.status === "skipped") summary.skipped += 1;
     if (outcome.status === "filtered") summary.filtered += 1;
@@ -912,6 +1036,8 @@ function summarizeGmailDiagnostics(
   for (const message of messages) {
     if (message.outcome === "notification_created") summary.created += 1;
     if (message.outcome === "notification_updated") summary.updated += 1;
+    if (message.outcome === "notification_suppressed") summary.filtered += 1;
+    if (message.outcome === "notification_grouped") summary.skipped += 1;
     if (message.outcome === "duplicate") summary.duplicate += 1;
     if (message.outcome === "skipped") summary.skipped += 1;
     if (message.outcome === "filtered") summary.filtered += 1;
@@ -963,11 +1089,176 @@ function isDiagnosticOutcome(
   return (
     status === "notification_created" ||
     status === "notification_updated" ||
+    status === "notification_suppressed" ||
+    status === "notification_grouped" ||
     status === "skipped" ||
     status === "duplicate" ||
     status === "filtered" ||
     status === "failed"
   );
+}
+
+type GmailRuleContext = {
+  sender: string;
+  senderAddress: string;
+  senderDomain: string;
+  subject: string;
+  labels: string[];
+  recipients: string[];
+  hasAttachment: boolean;
+  unread: boolean;
+  automatedSender: boolean;
+  mailingList: boolean;
+};
+
+type GmailRuleDecision = {
+  action: GmailRule["action"];
+  rule: GmailRule | null;
+  category?: string;
+};
+
+function gmailRulesFromSettings(settings: ConnectorAccount["settings"]): GmailRule[] {
+  const raw = settings[GMAIL_RULES_SETTING_KEY];
+  if (typeof raw !== "string" || raw.trim().length === 0) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return normalizeGmailRules(Array.isArray(parsed) ? parsed : []);
+  } catch {
+    return [];
+  }
+}
+
+function normalizeGmailRules(rules: unknown[]): GmailRule[] {
+  return rules.slice(0, 50).map((rule, index) => {
+    const object = rule && typeof rule === "object" ? (rule as Record<string, unknown>) : {};
+    const action = gmailRuleAction(object.action);
+    return {
+      id: stringValue(object.id) ?? `gmail-rule-${index + 1}`,
+      name: stringValue(object.name) ?? `Gmail rule ${index + 1}`,
+      enabled: object.enabled === undefined ? true : object.enabled === true,
+      senderAddress: stringValue(object.senderAddress),
+      senderDomain: stringValue(object.senderDomain),
+      subjectContains: stringValue(object.subjectContains),
+      gmailLabel: stringValue(object.gmailLabel),
+      recipient: stringValue(object.recipient),
+      hasAttachment: booleanValue(object.hasAttachment),
+      unread: booleanValue(object.unread),
+      automatedSender: booleanValue(object.automatedSender),
+      mailingList: booleanValue(object.mailingList),
+      alwaysNotify: booleanValue(object.alwaysNotify),
+      neverNotify: booleanValue(object.neverNotify),
+      action,
+      category: stringValue(object.category)
+    };
+  });
+}
+
+function gmailRuleAction(value: unknown): GmailRule["action"] {
+  if (
+    value === "notify" ||
+    value === "suppress" ||
+    value === "low_priority" ||
+    value === "high_priority" ||
+    value === "assign_category"
+  ) {
+    return value;
+  }
+  return "notify";
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim().slice(0, 200)
+    : undefined;
+}
+
+function booleanValue(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function evaluateGmailRules(rules: GmailRule[], context: GmailRuleContext): GmailRuleDecision {
+  const rule = rules.find((candidate) => candidate.enabled && gmailRuleMatches(candidate, context));
+  if (!rule) return { action: "notify", rule: null };
+  if (rule.neverNotify) return { action: "suppress", rule, category: rule.category };
+  if (rule.alwaysNotify) return { action: "notify", rule, category: rule.category };
+  return { action: rule.action, rule, category: rule.category };
+}
+
+function gmailRuleMatches(rule: GmailRule, context: GmailRuleContext): boolean {
+  if (rule.alwaysNotify || rule.neverNotify) return true;
+  if (rule.senderAddress && !equalsIgnoreCase(context.senderAddress, rule.senderAddress))
+    return false;
+  if (rule.senderDomain && !equalsIgnoreCase(context.senderDomain, rule.senderDomain)) return false;
+  if (rule.subjectContains && !includesIgnoreCase(context.subject, rule.subjectContains))
+    return false;
+  if (rule.gmailLabel) {
+    const gmailLabel = rule.gmailLabel;
+    if (!context.labels.some((label) => equalsIgnoreCase(label, gmailLabel))) return false;
+  }
+  if (rule.recipient) {
+    const recipientRule = rule.recipient;
+    if (!context.recipients.some((recipient) => includesIgnoreCase(recipient, recipientRule))) {
+      return false;
+    }
+  }
+  if (rule.hasAttachment !== undefined && context.hasAttachment !== rule.hasAttachment)
+    return false;
+  if (rule.unread !== undefined && context.unread !== rule.unread) return false;
+  if (rule.automatedSender !== undefined && context.automatedSender !== rule.automatedSender)
+    return false;
+  if (rule.mailingList !== undefined && context.mailingList !== rule.mailingList) return false;
+  return true;
+}
+
+function gmailNotificationSeverity(
+  action: GmailRule["action"],
+  unread: boolean
+): "info" | "low" | "medium" | "high" {
+  if (action === "low_priority") return "low";
+  if (action === "high_priority") return "high";
+  return unread ? "medium" : "info";
+}
+
+function emailAddressFromHeader(value: string): string {
+  const match = value.match(/<([^<>@\s]+@[^<>\s]+)>/);
+  const address = match?.[1] ?? value.match(/[^\s<>;,]+@[^\s<>;,]+/)?.[0] ?? value;
+  return address.trim().toLowerCase();
+}
+
+function isAutomatedSender(headers: Map<string, string>): boolean {
+  const autoSubmitted = headers.get("auto-submitted");
+  const precedence = headers.get("precedence");
+  return (
+    Boolean(autoSubmitted && !equalsIgnoreCase(autoSubmitted, "no")) ||
+    equalsIgnoreCase(precedence ?? "", "bulk") ||
+    equalsIgnoreCase(precedence ?? "", "list") ||
+    Boolean(headers.get("x-auto-response-suppress"))
+  );
+}
+
+function isMailingList(headers: Map<string, string>): boolean {
+  return Boolean(
+    headers.get("list-id") || headers.get("list-unsubscribe") || headers.get("mailing-list")
+  );
+}
+
+function gmailMessageHasAttachment(message: GmailMessage): boolean {
+  const visit = (part: unknown): boolean => {
+    if (!part || typeof part !== "object") return false;
+    const object = part as Record<string, unknown>;
+    if (typeof object.filename === "string" && object.filename.length > 0) return true;
+    const parts = object.parts;
+    return Array.isArray(parts) && parts.some(visit);
+  };
+  return visit(message.payload);
+}
+
+function equalsIgnoreCase(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}
+
+function includesIgnoreCase(left: string, right: string): boolean {
+  return left.toLowerCase().includes(right.toLowerCase());
 }
 
 async function gmailRequest(

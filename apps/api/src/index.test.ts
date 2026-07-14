@@ -8,7 +8,7 @@ import { hashPassword, hashSessionToken } from "./auth";
 import { D1DentLinkStore } from "./d1-storage";
 import type { GoogleCalendarApiClient } from "./google-calendar";
 import { createGoogleGmailClient, type GmailApiClient } from "./gmail";
-import { handleApiRequest, type ApiEnv } from "./index";
+import apiDefaultForTest, { handleApiRequest, type ApiEnv } from "./index";
 import { SqliteD1TestDatabase } from "./sqlite-d1-test";
 import { MemoryDentLinkStore, StoreError, type DentLinkStore } from "./storage";
 
@@ -19,6 +19,7 @@ import type {
   ConnectorSourceRecord,
   ConflictResponse,
   Notification,
+  GmailRule,
   CalendarEvent,
   Note,
   NoteHistoryEvent,
@@ -61,6 +62,10 @@ const milestone7SchemaPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../migrations/0007_gmail_ingestion_outcomes.sql"
 );
+const milestone7RulesSchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0008_gmail_rules.sql"
+);
 
 type StoreFixture = {
   name: string;
@@ -90,7 +95,8 @@ const fixtures: StoreFixture[] = [
         milestone31SchemaPath,
         milestone4SchemaPath,
         milestone5SchemaPath,
-        milestone7SchemaPath
+        milestone7SchemaPath,
+        milestone7RulesSchemaPath
       ]);
       return {
         store: new D1DentLinkStore(db),
@@ -904,6 +910,153 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       409,
       env
     );
+  });
+
+  it("applies deterministic Gmail rules before notification creation", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-rules@example.com");
+    const gmailClient = fakeGmailClient();
+    const env = gmailTestEnv(gmailClient);
+    const start = await requestJson<{ authorizationUrl: string }>(
+      store,
+      "POST",
+      "/v1/connectors/gmail/start",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const authorizationUrl = new URL(start.authorizationUrl);
+    const callback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${authorizationUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    const linked = (await callback.json()) as { account: ConnectorAccount };
+    const suppressRule: GmailRule = {
+      id: "rule-suppress-front-desk",
+      name: "Suppress front desk",
+      enabled: true,
+      senderDomain: "example.test",
+      action: "suppress"
+    };
+    const rules = await requestJson<{ account: ConnectorAccount; rules: GmailRule[] }>(
+      store,
+      "PUT",
+      `/v1/connectors/gmail/${linked.account.id}/rules`,
+      { rules: [suppressRule] },
+      owner.session.token,
+      200,
+      env
+    );
+    expect(rules.rules).toEqual([suppressRule]);
+
+    const sync = await requestJson<{
+      summary: { examined: number; created: number; filtered: number };
+      outcomes: Array<{ messageId: string; status: string; reason: string; recordId: string }>;
+    }>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.account.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(sync.summary).toMatchObject({ examined: 1, created: 0, filtered: 1 });
+    expect(sync.outcomes).toEqual([
+      {
+        messageId: "gmail-message-1",
+        status: "notification_suppressed",
+        reason: "Suppressed by Gmail rule: Suppress front desk",
+        recordId: expect.any(String) as string
+      }
+    ]);
+    const notifications = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(notifications.notifications).toHaveLength(0);
+    const records = await requestJson<{ records: ConnectorSourceRecord[] }>(
+      store,
+      "GET",
+      `/v1/connectors/accounts/${linked.account.id}/source-records`,
+      undefined,
+      owner.session.token
+    );
+    expect(records.records[0]).toMatchObject({
+      status: "notification_suppressed",
+      normalizedPayload: {
+        matched_rule_id: "rule-suppress-front-desk",
+        matched_rule_name: "Suppress front desk",
+        matched_rule_action: "suppress"
+      }
+    });
+  });
+
+  it("runs scheduled incremental Gmail sync for connected accounts", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-scheduled@example.com");
+    const gmailClient = fakeGmailClient();
+    const env = gmailTestEnv(gmailClient);
+    const start = await requestJson<{ authorizationUrl: string }>(
+      store,
+      "POST",
+      "/v1/connectors/gmail/start",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const authorizationUrl = new URL(start.authorizationUrl);
+    await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${authorizationUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+
+    const pending: Array<Promise<unknown>> = [];
+    apiDefaultForTest.scheduled(
+      { scheduledTime: Date.parse("2026-07-14T20:00:00.000Z"), cron: "*/5 * * * *" },
+      { store, ...env },
+      { waitUntil: (promise) => pending.push(promise) }
+    );
+    await Promise.all(pending);
+
+    const notifications = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(notifications.notifications).toHaveLength(1);
+    const secondPending: Array<Promise<unknown>> = [];
+    apiDefaultForTest.scheduled(
+      { scheduledTime: Date.parse("2026-07-14T20:05:00.000Z"), cron: "*/5 * * * *" },
+      { store, ...env },
+      { waitUntil: (promise) => secondPending.push(promise) }
+    );
+    await Promise.all(secondPending);
+    const afterDuplicate = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(afterDuplicate.notifications).toHaveLength(1);
   });
 
   it("records Gmail per-message outcomes and keeps partial sync failures observable", async () => {

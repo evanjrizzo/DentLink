@@ -83,6 +83,14 @@ messages, while incremental sync continues to use the history checkpoint. Source
 keeps imported messages duplicate-safe across both modes, and the history checkpoint advances only
 after incremental processing completes without per-message failures.
 
+Milestone 7 Slice 3 starts deterministic Gmail handling before any AI or ranking work. A Worker cron
+trigger runs incremental Gmail sync every five minutes for connected, idle Gmail accounts. Gmail
+rules are evaluated in the backend before Notification creation and can notify, suppress, change
+priority, or assign a category using normalized sender, subject, label, recipient, unread,
+attachment, automated-sender, and mailing-list metadata. Every fetched message still resolves to a
+source-record outcome, including `notification_suppressed` when a rule intentionally prevents a
+Notification.
+
 Milestone 4 adds Google Calendar using the same provider-neutral connector framework. Google
 Calendar OAuth links a calendar connector account, encrypted refresh tokens remain in connector
 credential storage, and synced event instances are normalized into `calendar_events` plus connector

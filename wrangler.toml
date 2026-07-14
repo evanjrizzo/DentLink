@@ -18,6 +18,9 @@ database_name = "dentlink"
 database_id = "local-dentlink-dev"
 migrations_dir = "migrations"
 
+[triggers]
+crons = ["*/5 * * * *"]
+
 [env.preview]
 name = "dentlink-api-preview"
 workers_dev = true
@@ -36,6 +39,9 @@ binding = "DB"
 database_name = "dentlink-preview"
 database_id = "fe80f59e-2cba-48ea-8c19-81afb39952a3"
 migrations_dir = "migrations"
+
+[env.preview.triggers]
+crons = ["*/5 * * * *"]
 
 [env.production]
 name = "dentlink-api-production"
@@ -58,3 +64,6 @@ binding = "DB"
 database_name = "dentlink-production"
 database_id = "REPLACE_WITH_PRODUCTION_D1_DATABASE_ID"
 migrations_dir = "migrations"
+
+[env.production.triggers]
+crons = ["*/5 * * * *"]

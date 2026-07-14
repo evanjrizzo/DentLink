@@ -88,6 +88,7 @@ export interface DentLinkStore {
   createFolder(userId: EntityId, name: string, now: string): Promise<Folder>;
   createTag(userId: EntityId, name: string, now: string): Promise<Tag>;
   listConnectorAccounts(userId: EntityId): Promise<{ accounts: ConnectorAccount[] }>;
+  listConnectorAccountsByKey(connectorKey: string): Promise<ConnectorAccount[]>;
   createConnectorAccount(
     userId: EntityId,
     input: ConnectorAccountInput,
@@ -530,6 +531,13 @@ export class MemoryDentLinkStore implements DentLinkStore {
         .sort(compareConnectorAccounts)
         .map((account) => ({ ...account, settings: { ...account.settings } }))
     };
+  }
+
+  async listConnectorAccountsByKey(connectorKey: string): Promise<ConnectorAccount[]> {
+    return [...this.connectorAccounts.values()]
+      .filter((account) => account.connectorKey === connectorKey && account.status !== "deleted")
+      .sort(compareConnectorAccounts)
+      .map((account) => ({ ...account, settings: { ...account.settings } }));
   }
 
   async createConnectorAccount(

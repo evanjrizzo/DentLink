@@ -225,8 +225,8 @@ the imported UID as external import metadata for duplicate-safe retries.
 ingestion diagnostics without changing provider credentials or notification ownership.
 
 - Source-record `status` now accepts explicit Gmail processing outcomes: `notification_created`,
-  `notification_updated`, `skipped`, `duplicate`, `filtered`, and `failed`, while preserving earlier
-  `pending` and `processed` values.
+  `notification_updated`, `notification_suppressed`, `notification_grouped`, `skipped`, `duplicate`,
+  `filtered`, and `failed`, while preserving earlier `pending` and `processed` values.
 - `processing_reason` stores the safe reason for the final per-message outcome. `error_message`
   remains reserved for failed processing.
 - Existing source records are preserved during migration replay and preview upgrades.
@@ -243,3 +243,9 @@ timestamps, linked notification IDs, and source record IDs only.
 Milestone 7 Slice 2.1 also uses the existing schema. Backfilled Gmail messages create the same
 source-record and notification shapes as incremental sync, so `(account_id, source_external_id)`
 continues to provide duplicate safety and existing notifications are not reset or replaced.
+
+`migrations/0008_gmail_rules.sql` widens the source-record status constraint for deterministic Gmail
+rule outcomes. Gmail rules are stored as validated JSON in the owned Gmail connector account
+settings under `gmailRulesJson`; provider credentials remain in `connector_credentials`. Matched
+rule ID, name, action, and category are copied into normalized Gmail source-record metadata so a
+created or suppressed notification can be audited without storing raw email bodies.

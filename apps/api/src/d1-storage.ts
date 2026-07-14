@@ -712,6 +712,16 @@ export class D1DentLinkStore implements DentLinkStore {
     return { accounts: rows.map(connectorAccountFromRow) };
   }
 
+  async listConnectorAccountsByKey(connectorKey: string): Promise<ConnectorAccount[]> {
+    const rows = await this.all<ConnectorAccountRow>(
+      `SELECT * FROM connector_accounts
+       WHERE connector_key = ? AND status != 'deleted'
+       ORDER BY display_name ASC`,
+      [connectorKey]
+    );
+    return rows.map(connectorAccountFromRow);
+  }
+
   async createConnectorAccount(
     userId: EntityId,
     input: ConnectorAccountInput,

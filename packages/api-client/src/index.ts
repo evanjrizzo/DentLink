@@ -19,6 +19,8 @@ import type {
   EntityId,
   Folder,
   GmailDiagnostics,
+  GmailRule,
+  GmailRulesResponse,
   GmailSyncResult,
   GoogleCalendarSyncResult,
   Notification,
@@ -256,6 +258,17 @@ export class DentLinkApiClient {
 
   async getGmailDiagnostics(accountId: EntityId): Promise<GmailDiagnostics> {
     return this.request<GmailDiagnostics>(`/v1/connectors/gmail/${accountId}/diagnostics`);
+  }
+
+  async getGmailRules(accountId: EntityId): Promise<GmailRulesResponse> {
+    return this.request<GmailRulesResponse>(`/v1/connectors/gmail/${accountId}/rules`);
+  }
+
+  async updateGmailRules(accountId: EntityId, rules: GmailRule[]): Promise<GmailRulesResponse> {
+    return this.request<GmailRulesResponse>(`/v1/connectors/gmail/${accountId}/rules`, {
+      method: "PUT",
+      body: { rules }
+    });
   }
 
   async disconnectGmailAccount(accountId: EntityId): Promise<ConnectorAccount> {

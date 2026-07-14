@@ -100,6 +100,10 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   endpoint returns aggregate counts, provider message IDs, safe processing reasons, processed
   timestamps, source record IDs, and linked DentLink notification IDs only; it does not expose raw
   email bodies, MIME parts, attachments, OAuth tokens, or provider credentials.
+- Gmail rules are stored in the owned connector account settings and are applied server-side before
+  Notification creation. Rule evaluation uses normalized metadata only and does not download or
+  expose raw message bodies. Scheduled Gmail sync runs under Worker cron with stored encrypted
+  credentials and the same user-scoped connector account checks as manual Sync Now.
 - Milestone 4 Google Calendar synchronization uses the read-only Calendar scope, stores normalized
   event metadata and provider identifiers, and does not create, edit, delete, RSVP to, or manage
   attendees on Google Calendar events. Calendar refresh tokens use the same AES-GCM encrypted

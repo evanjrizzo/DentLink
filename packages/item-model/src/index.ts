@@ -50,6 +50,8 @@ export type ConnectorSourceRecordStatus =
   | "processed"
   | "notification_created"
   | "notification_updated"
+  | "notification_suppressed"
+  | "notification_grouped"
   | "skipped"
   | "duplicate"
   | "filtered"
@@ -381,6 +383,33 @@ export type ConnectorAccountPatch = Partial<
   >
 >;
 
+export type GmailRuleAction =
+  "notify" | "suppress" | "low_priority" | "high_priority" | "assign_category";
+
+export type GmailRule = {
+  id: EntityId;
+  name: string;
+  enabled: boolean;
+  senderAddress?: string;
+  senderDomain?: string;
+  subjectContains?: string;
+  gmailLabel?: string;
+  recipient?: string;
+  hasAttachment?: boolean;
+  unread?: boolean;
+  automatedSender?: boolean;
+  mailingList?: boolean;
+  alwaysNotify?: boolean;
+  neverNotify?: boolean;
+  action: GmailRuleAction;
+  category?: string;
+};
+
+export type GmailRulesResponse = {
+  account: ConnectorAccount;
+  rules: GmailRule[];
+};
+
 export type ConnectorSourceRecord = {
   id: EntityId;
   userId: EntityId;
@@ -440,6 +469,8 @@ export type GmailSyncResult = {
       ConnectorSourceRecordStatus,
       | "notification_created"
       | "notification_updated"
+      | "notification_suppressed"
+      | "notification_grouped"
       | "skipped"
       | "duplicate"
       | "filtered"
@@ -467,6 +498,8 @@ export type GmailDiagnosticMessage = {
     ConnectorSourceRecordStatus,
     | "notification_created"
     | "notification_updated"
+    | "notification_suppressed"
+    | "notification_grouped"
     | "skipped"
     | "duplicate"
     | "filtered"
