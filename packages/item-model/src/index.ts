@@ -33,6 +33,7 @@ export type NoteKind = "task" | "reference";
 export type NoteStatus = "active" | "done" | "deleted";
 export type NotePriority = "none" | "low" | "medium" | "high";
 export type NotificationStatus = "active" | "done" | "dismissed" | "deleted";
+export type CalendarEventStatus = "active" | "cancelled" | "dismissed" | "deleted";
 export type NotificationSeverity = "info" | "low" | "medium" | "high";
 export type ConflictStatus = "open" | "resolved";
 export type ConflictResolution = "keep_mine" | "keep_theirs" | "merge" | "keep_both";
@@ -225,6 +226,39 @@ export type NotificationsList = {
   notifications: Notification[];
 };
 
+export type CalendarEvent = {
+  id: EntityId;
+  userId: EntityId;
+  connectorAccountId: EntityId;
+  provider: "google-calendar";
+  providerEventId: string;
+  calendarId: string;
+  calendarSummary: string;
+  title: string;
+  description: string;
+  location: string | null;
+  sourceUrl: string | null;
+  startAt: IsoDateTime;
+  endAt: IsoDateTime;
+  startDate: string | null;
+  endDate: string | null;
+  timezone: string | null;
+  allDay: boolean;
+  status: CalendarEventStatus;
+  version: number;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  dismissedAt: IsoDateTime | null;
+};
+
+export type CalendarEventsList = {
+  events: CalendarEvent[];
+};
+
+export type CalendarEventPatch = {
+  status?: Extract<CalendarEventStatus, "active" | "dismissed">;
+};
+
 export type WebhooksList = {
   webhooks: Array<WebhookEndpoint & { ingestUrl: string }>;
 };
@@ -331,6 +365,12 @@ export type GmailSyncResult = {
   createdNotifications: number;
 };
 
+export type GoogleCalendarSyncResult = {
+  account: ConnectorAccount;
+  processed: number;
+  upsertedEvents: number;
+};
+
 export type ConnectorAccountsList = {
   accounts: ConnectorAccount[];
 };
@@ -344,6 +384,8 @@ export type SyncChange =
   | { type: "tag"; op: "upsert"; tag: Tag; cursor: SyncCursor }
   | { type: "notification"; op: "upsert"; notification: Notification; cursor: SyncCursor }
   | { type: "notification"; op: "delete"; id: EntityId; userId: EntityId; cursor: SyncCursor }
+  | { type: "calendar_event"; op: "upsert"; event: CalendarEvent; cursor: SyncCursor }
+  | { type: "calendar_event"; op: "delete"; id: EntityId; userId: EntityId; cursor: SyncCursor }
   | { type: "webhook"; op: "upsert"; webhook: WebhookEndpoint; cursor: SyncCursor }
   | { type: "webhook"; op: "delete"; id: EntityId; userId: EntityId; cursor: SyncCursor }
   | { type: "connector_account"; op: "upsert"; account: ConnectorAccount; cursor: SyncCursor }

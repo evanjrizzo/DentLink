@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { hashPassword, hashSessionToken } from "./auth";
 import { D1DentLinkStore } from "./d1-storage";
+import type { GoogleCalendarApiClient } from "./google-calendar";
 import type { GmailApiClient } from "./gmail";
 import { handleApiRequest, type ApiEnv } from "./index";
 import { SqliteD1TestDatabase } from "./sqlite-d1-test";
@@ -18,6 +19,7 @@ import type {
   ConnectorSourceRecord,
   ConflictResponse,
   Notification,
+  CalendarEvent,
   Note,
   NoteHistoryEvent,
   NotesList,
@@ -46,6 +48,10 @@ const milestone31SchemaPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../migrations/0004_gmail_connector.sql"
 );
+const milestone4SchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0005_google_calendar_connector.sql"
+);
 
 type StoreFixture = {
   name: string;
@@ -72,7 +78,8 @@ const fixtures: StoreFixture[] = [
         schemaPath,
         milestone2SchemaPath,
         milestone3SchemaPath,
-        milestone31SchemaPath
+        milestone31SchemaPath,
+        milestone4SchemaPath
       ]);
       return {
         store: new D1DentLinkStore(db),
@@ -428,10 +435,11 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     );
     expect(catalog.connectors.map((connector) => connector.key)).toEqual([
       "gmail",
+      "google-calendar",
       "generic-email",
       "generic-calendar"
     ]);
-    expect(JSON.stringify(catalog)).not.toMatch(/outlook|imap|graph|calendar api/i);
+    expect(JSON.stringify(catalog)).not.toMatch(/outlook|imap|graph|microsoft/i);
 
     const rejected = await requestJson<ApiErrorBody>(
       store,
@@ -741,6 +749,284 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       409,
       env
     );
+  });
+
+  it("links Google Calendar, syncs agenda events, supports dismissal, and isolates users", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "calendar-owner@example.com");
+    const other = await register(store, "calendar-other@example.com");
+    const googleCalendarClient = fakeGoogleCalendarClient();
+    const env = googleCalendarTestEnv(googleCalendarClient);
+
+    const start = await requestJson<{ authorizationUrl: string; expiresAt: string }>(
+      store,
+      "POST",
+      "/v1/connectors/google-calendar/start?returnTo=https%3A%2F%2Fweb.example.test%2Fagenda",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const authorizationUrl = new URL(start.authorizationUrl);
+    expect(authorizationUrl.origin).toBe("https://accounts.google.com");
+    expect(authorizationUrl.searchParams.get("scope")).toBe(
+      "https://www.googleapis.com/auth/calendar.readonly"
+    );
+    expect(authorizationUrl.searchParams.get("state")).toMatch(/^google_calendar_oauth_/);
+
+    const bypass = await requestJson<ApiErrorBody>(
+      store,
+      "POST",
+      "/v1/connectors/accounts",
+      {
+        connectorKey: "google-calendar",
+        displayName: "Bypass"
+      },
+      owner.session.token,
+      400
+    );
+    expect(bypass.error.code).toBe("google_calendar_oauth_required");
+
+    const callback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/google-calendar/callback?code=valid-code&state=${authorizationUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    expect(callback.status).toBe(200);
+    const linked = (await callback.json()) as {
+      account: ConnectorAccount;
+      initialSync: {
+        account: ConnectorAccount;
+        processed: number;
+        upsertedEvents: number;
+      };
+    };
+    expect(linked.account.connectorKey).toBe("google-calendar");
+    expect(linked.account.status).toBe("connected");
+    expect(linked.initialSync.processed).toBe(3);
+    expect(linked.initialSync.upsertedEvents).toBe(3);
+    expect(linked.initialSync.account.syncCursor).toBe("calendar-sync-1");
+    expect(linked.account.settings).toMatchObject({
+      googleCalendarId: "primary",
+      googleCalendarSummary: "Primary calendar"
+    });
+    expect(JSON.stringify(linked)).not.toContain("calendar-refresh-token");
+
+    const agenda = await requestJson<{ events: CalendarEvent[] }>(
+      store,
+      "GET",
+      "/v1/calendar/events",
+      undefined,
+      owner.session.token
+    );
+    expect(agenda.events.map((event) => event.title)).toEqual([
+      "All-day planning",
+      "Patient consult",
+      "Cancelled review"
+    ]);
+    expect(agenda.events[0]).toMatchObject({
+      allDay: true,
+      startDate: "2026-07-15",
+      endDate: "2026-07-16",
+      sourceUrl: "https://calendar.google.com/event?eid=all-day"
+    });
+    expect(agenda.events[1]).toMatchObject({
+      allDay: false,
+      location: "Operatory 2"
+    });
+    expect(agenda.events[2]?.status).toBe("cancelled");
+
+    const repeatSync = await requestJson<{
+      account: ConnectorAccount;
+      processed: number;
+      upsertedEvents: number;
+    }>(
+      store,
+      "POST",
+      `/v1/connectors/google-calendar/${linked.account.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(repeatSync.processed).toBe(0);
+    expect(repeatSync.upsertedEvents).toBe(0);
+    expect(repeatSync.account.syncCursor).toBe("calendar-sync-2");
+
+    const records = await requestJson<{ records: ConnectorSourceRecord[] }>(
+      store,
+      "GET",
+      `/v1/connectors/accounts/${linked.account.id}/source-records`,
+      undefined,
+      owner.session.token
+    );
+    expect(records.records).toHaveLength(3);
+    expect(records.records[0]?.sourceType).toBe("calendar_event");
+    expect(JSON.stringify(records)).not.toContain("calendar-refresh-token");
+
+    const dismissed = await requestJson<CalendarEvent>(
+      store,
+      "PATCH",
+      `/v1/calendar/events/${agenda.events[1]?.id}`,
+      { expectedVersion: agenda.events[1]?.version, patch: { status: "dismissed" } },
+      owner.session.token
+    );
+    expect(dismissed.status).toBe("dismissed");
+    expect(dismissed.dismissedAt).toBeTruthy();
+    const afterDismiss = await requestJson<{ events: CalendarEvent[] }>(
+      store,
+      "GET",
+      "/v1/calendar/events",
+      undefined,
+      owner.session.token
+    );
+    expect(afterDismiss.events.map((event) => event.title)).not.toContain("Patient consult");
+
+    const secondSync = await requestJson<typeof repeatSync>(
+      store,
+      "POST",
+      `/v1/connectors/google-calendar/${linked.account.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(secondSync.account.syncCursor).toBe("calendar-sync-2");
+
+    const otherAgenda = await requestJson<{ events: CalendarEvent[] }>(
+      store,
+      "GET",
+      "/v1/calendar/events",
+      undefined,
+      other.session.token
+    );
+    expect(otherAgenda.events).toEqual([]);
+    await requestJson<ApiErrorBody>(
+      store,
+      "POST",
+      `/v1/connectors/google-calendar/${linked.account.id}/sync`,
+      undefined,
+      other.session.token,
+      404,
+      env
+    );
+    await requestJson<ApiErrorBody>(
+      store,
+      "PATCH",
+      `/v1/calendar/events/${agenda.events[0]?.id}`,
+      { expectedVersion: agenda.events[0]?.version, patch: { status: "dismissed" } },
+      other.session.token,
+      404
+    );
+
+    const syncChanges = await requestJson<SyncResponse>(
+      store,
+      "GET",
+      "/v1/sync?cursor=0",
+      undefined,
+      owner.session.token
+    );
+    expect(syncChanges.changes.some((change) => change.type === "calendar_event")).toBe(true);
+
+    const disconnected = await requestJson<ConnectorAccount>(
+      store,
+      "POST",
+      `/v1/connectors/google-calendar/${linked.account.id}/disconnect`,
+      undefined,
+      owner.session.token
+    );
+    expect(disconnected.credentialStatus).toBe("not_configured");
+    expect(disconnected.credentialRef).toBeNull();
+  });
+
+  it("redirects cleanly after Google Calendar OAuth success and keeps repeats safe", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "calendar-redirect@example.com");
+    const googleCalendarClient = fakeGoogleCalendarClient();
+    const env = googleCalendarTestEnv(googleCalendarClient);
+
+    const start = await requestJson<{ authorizationUrl: string; expiresAt: string }>(
+      store,
+      "POST",
+      "/v1/connectors/google-calendar/start?returnTo=https%3A%2F%2Fweb.example.test%2Fagenda",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const state = new URL(start.authorizationUrl).searchParams.get("state");
+
+    const callback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/google-calendar/callback?code=valid-code&state=${state}`
+      ),
+      { store, ...env }
+    );
+    expect(callback.status).toBe(303);
+    expect(callback.headers.get("Location")).toBe(
+      "https://web.example.test/agenda?calendar=connected"
+    );
+    expect(await callback.text()).toBe("");
+
+    const accounts = await requestJson<{ accounts: ConnectorAccount[] }>(
+      store,
+      "GET",
+      "/v1/connectors/accounts",
+      undefined,
+      owner.session.token
+    );
+    expect(accounts.accounts).toHaveLength(1);
+    expect(accounts.accounts[0]).toMatchObject({
+      connectorKey: "google-calendar",
+      status: "connected",
+      syncStatus: "idle",
+      syncCursor: "calendar-sync-1"
+    });
+
+    const agenda = await requestJson<{ events: CalendarEvent[] }>(
+      store,
+      "GET",
+      "/v1/calendar/events",
+      undefined,
+      owner.session.token
+    );
+    expect(agenda.events.map((event) => event.title)).toEqual([
+      "All-day planning",
+      "Patient consult",
+      "Cancelled review"
+    ]);
+
+    const repeatedCallback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/google-calendar/callback?code=valid-code&state=${state}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    expect(repeatedCallback.status).toBe(400);
+    const repeatedBody = (await repeatedCallback.json()) as ApiErrorBody;
+    expect(repeatedBody.error.code).toBe("invalid_oauth_state");
+
+    const afterRepeatAccounts = await requestJson<{ accounts: ConnectorAccount[] }>(
+      store,
+      "GET",
+      "/v1/connectors/accounts",
+      undefined,
+      owner.session.token
+    );
+    expect(afterRepeatAccounts.accounts).toHaveLength(1);
+    const afterRepeatAgenda = await requestJson<{ events: CalendarEvent[] }>(
+      store,
+      "GET",
+      "/v1/calendar/events",
+      undefined,
+      owner.session.token
+    );
+    expect(afterRepeatAgenda.events).toHaveLength(3);
   });
 
   it("persists and resolves conflicts with version checks and history", async () => {
@@ -1195,6 +1481,18 @@ function gmailTestEnv(gmailClient: GmailApiClient): Partial<ApiEnv> {
   };
 }
 
+function googleCalendarTestEnv(googleCalendarClient: GoogleCalendarApiClient): Partial<ApiEnv> {
+  return {
+    GOOGLE_CLIENT_ID: "test-client-id",
+    GOOGLE_CLIENT_SECRET: "test-client-secret",
+    GOOGLE_CALENDAR_REDIRECT_URI:
+      "https://api.dentlink.test/v1/connectors/google-calendar/callback",
+    GMAIL_CREDENTIAL_ENCRYPTION_KEY: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+    DENTLINK_WEB_ORIGIN: "https://web.example.test",
+    googleCalendarClient
+  };
+}
+
 function fakeGmailClient(): GmailApiClient {
   return {
     async exchangeCode(code) {
@@ -1241,6 +1539,76 @@ function fakeGmailClient(): GmailApiClient {
             { name: "Message-ID", value: "<message-1@example.test>" }
           ]
         }
+      };
+    }
+  };
+}
+
+function fakeGoogleCalendarClient(): GoogleCalendarApiClient {
+  return {
+    async exchangeCode(code) {
+      expect(code).toBe("valid-code");
+      return { accessToken: "calendar-access-token", refreshToken: "calendar-refresh-token" };
+    },
+    async refreshAccessToken(refreshToken) {
+      expect(refreshToken).toBe("calendar-refresh-token");
+      return { accessToken: "calendar-access-token-refreshed" };
+    },
+    async listCalendars() {
+      return {
+        items: [{ id: "primary", summary: "Primary calendar", primary: true }]
+      };
+    },
+    async listEvents(_accessToken, calendarId, options) {
+      expect(calendarId).toBe("primary");
+      if (options.syncToken) {
+        return {
+          items: [],
+          nextSyncToken:
+            options.syncToken === "calendar-sync-1" ? "calendar-sync-2" : options.syncToken
+        };
+      }
+      return {
+        nextSyncToken: "calendar-sync-1",
+        items: [
+          {
+            id: "calendar-event-all-day",
+            status: "confirmed",
+            summary: "All-day planning",
+            htmlLink: "https://calendar.google.com/event?eid=all-day",
+            start: { date: "2026-07-15" },
+            end: { date: "2026-07-16" }
+          },
+          {
+            id: "calendar-event-timed",
+            status: "confirmed",
+            summary: "Patient consult",
+            location: "Operatory 2",
+            htmlLink: "https://calendar.google.com/event?eid=timed",
+            start: {
+              dateTime: "2026-07-15T14:00:00-04:00",
+              timeZone: "America/New_York"
+            },
+            end: {
+              dateTime: "2026-07-15T14:30:00-04:00",
+              timeZone: "America/New_York"
+            }
+          },
+          {
+            id: "calendar-event-cancelled",
+            status: "cancelled",
+            summary: "Cancelled review",
+            htmlLink: "https://calendar.google.com/event?eid=cancelled",
+            start: {
+              dateTime: "2026-07-15T16:00:00-04:00",
+              timeZone: "America/New_York"
+            },
+            end: {
+              dateTime: "2026-07-15T16:30:00-04:00",
+              timeZone: "America/New_York"
+            }
+          }
+        ]
       };
     }
   };

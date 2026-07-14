@@ -1,4 +1,16 @@
-import { generateSessionToken, hashSessionToken } from "./auth";
+import { hashSessionToken } from "./auth";
+import {
+  createGoogleOAuthState,
+  decryptSecret,
+  encryptSecret,
+  GOOGLE_CREDENTIAL_ENCRYPTION_VERSION,
+  GOOGLE_OAUTH_AUTHORIZE_URL,
+  googleOAuthConfig,
+  GoogleConfigError,
+  tokenRequest,
+  type GoogleRuntimeEnv,
+  type GoogleTokenResponse
+} from "./google";
 import { StoreError, type DentLinkStore } from "./storage";
 
 import type { ConnectorAccount, EntityId, GmailSyncResult } from "@dentlink/item-model";
@@ -6,20 +18,11 @@ import type { ConnectorDefinition } from "@dentlink/connector-sdk";
 
 const GMAIL_CONNECTOR_KEY = "gmail";
 const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.metadata";
-const OAUTH_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
-const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1";
-const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
-const ENCRYPTION_VERSION = 1;
 const INITIAL_SYNC_PAGE_SIZE = 25;
 const HISTORY_PAGE_SIZE = 100;
 
-export type GmailRuntimeEnv = {
-  GOOGLE_CLIENT_ID?: string;
-  GOOGLE_CLIENT_SECRET?: string;
-  GOOGLE_REDIRECT_URI?: string;
-  GMAIL_CREDENTIAL_ENCRYPTION_KEY?: string;
-  DENTLINK_WEB_ORIGIN?: string;
+export type GmailRuntimeEnv = GoogleRuntimeEnv & {
   gmailClient?: GmailApiClient;
 };
 
@@ -36,11 +39,7 @@ export type GmailApiClient = {
   getMessage(accessToken: string, messageId: string): Promise<GmailMessage>;
 };
 
-export type GmailTokenResponse = {
-  accessToken: string;
-  refreshToken?: string;
-  expiresIn?: number;
-};
+export type GmailTokenResponse = GoogleTokenResponse;
 
 export type GmailProfile = {
   emailAddress: string;
@@ -92,24 +91,17 @@ export async function startGmailOAuth(
   url: URL,
   now: string
 ): Promise<{ authorizationUrl: string; expiresAt: string }> {
-  const config = gmailOAuthConfig(env, url);
-  const state = generateSessionToken().replace("session_", "gmail_oauth_");
-  const stateHash = await hashSessionToken(state);
-  const reconnectAccountId = url.searchParams.get("accountId");
-  const returnTo = safeReturnTo(url.searchParams.get("returnTo"), env);
-  const expiresAt = new Date(new Date(now).getTime() + OAUTH_STATE_TTL_MS).toISOString();
-  await store.createConnectorOAuthState(
+  const config = googleOAuthConfig(env, url, "/v1/connectors/gmail/callback");
+  const { state, expiresAt } = await createGoogleOAuthState(
+    store,
     userId,
-    {
-      stateHash,
-      connectorKey: GMAIL_CONNECTOR_KEY,
-      reconnectAccountId,
-      returnTo,
-      expiresAt
-    },
-    now
+    GMAIL_CONNECTOR_KEY,
+    url,
+    env,
+    now,
+    "gmail_oauth_"
   );
-  const authorizationUrl = new URL(OAUTH_AUTHORIZE_URL);
+  const authorizationUrl = new URL(GOOGLE_OAUTH_AUTHORIZE_URL);
   authorizationUrl.searchParams.set("client_id", config.clientId);
   authorizationUrl.searchParams.set("redirect_uri", config.redirectUri);
   authorizationUrl.searchParams.set("response_type", "code");
@@ -160,7 +152,7 @@ export async function completeGmailOAuth(
     {
       kind: "oauth_refresh_token",
       encryptedValue: encrypted,
-      encryptionVersion: ENCRYPTION_VERSION
+      encryptionVersion: GOOGLE_CREDENTIAL_ENCRYPTION_VERSION
     },
     now
   );
@@ -295,12 +287,7 @@ export async function syncGmailAccount(
   }
 }
 
-export class GmailConfigError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "GmailConfigError";
-  }
-}
+export { GoogleConfigError as GmailConfigError };
 
 export function createGoogleGmailClient(
   clientId: string,
@@ -487,31 +474,6 @@ async function ingestGmailMessage(
   return true;
 }
 
-async function tokenRequest(
-  fetchImpl: typeof fetch,
-  fields: Record<string, string>
-): Promise<GmailTokenResponse> {
-  const body = new URLSearchParams(fields);
-  const response = await fetchImpl(OAUTH_TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body
-  });
-  const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-  if (!response.ok || !json) {
-    throw new StoreError("gmail_token_error", "Gmail token exchange failed");
-  }
-  const accessToken = json.access_token;
-  if (typeof accessToken !== "string") {
-    throw new StoreError("gmail_token_error", "Gmail token response was invalid");
-  }
-  return {
-    accessToken,
-    refreshToken: typeof json.refresh_token === "string" ? json.refresh_token : undefined,
-    expiresIn: typeof json.expires_in === "number" ? json.expires_in : undefined
-  };
-}
-
 async function gmailRequest(
   fetchImpl: typeof fetch,
   accessToken: string,
@@ -530,70 +492,15 @@ function gmailOAuthConfig(
   env: GmailRuntimeEnv,
   url: URL
 ): { clientId: string; redirectUri: string } {
-  if (!env.GOOGLE_CLIENT_ID) throw new GmailConfigError("GOOGLE_CLIENT_ID is required");
-  if (!env.GOOGLE_CLIENT_SECRET) throw new GmailConfigError("GOOGLE_CLIENT_SECRET is required");
-  return {
-    clientId: env.GOOGLE_CLIENT_ID,
-    redirectUri: env.GOOGLE_REDIRECT_URI ?? `${url.origin}/v1/connectors/gmail/callback`
-  };
+  const config = googleOAuthConfig(env, url, "/v1/connectors/gmail/callback");
+  return { clientId: config.clientId, redirectUri: config.redirectUri };
 }
 
 function gmailClient(env: GmailRuntimeEnv): GmailApiClient {
   if (env.gmailClient) return env.gmailClient;
-  if (!env.GOOGLE_CLIENT_ID) throw new GmailConfigError("GOOGLE_CLIENT_ID is required");
-  if (!env.GOOGLE_CLIENT_SECRET) throw new GmailConfigError("GOOGLE_CLIENT_SECRET is required");
+  if (!env.GOOGLE_CLIENT_ID) throw new GoogleConfigError("GOOGLE_CLIENT_ID is required");
+  if (!env.GOOGLE_CLIENT_SECRET) throw new GoogleConfigError("GOOGLE_CLIENT_SECRET is required");
   return createGoogleGmailClient(env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET);
-}
-
-async function encryptSecret(secret: string, env: GmailRuntimeEnv): Promise<string> {
-  const key = await importAesKey(env);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const encrypted = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv: asBufferSource(iv) },
-    key,
-    new TextEncoder().encode(secret)
-  );
-  return `v${ENCRYPTION_VERSION}.${toBase64Url(iv)}.${toBase64Url(new Uint8Array(encrypted))}`;
-}
-
-async function decryptSecret(value: string, env: GmailRuntimeEnv): Promise<string> {
-  const [version, ivValue, encryptedValue] = value.split(".");
-  if (version !== `v${ENCRYPTION_VERSION}` || !ivValue || !encryptedValue) {
-    throw new StoreError("invalid_credentials", "Stored Gmail credentials are invalid");
-  }
-  const key = await importAesKey(env);
-  const decrypted = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: asBufferSource(fromBase64Url(ivValue)) },
-    key,
-    asBufferSource(fromBase64Url(encryptedValue))
-  );
-  return new TextDecoder().decode(decrypted);
-}
-
-async function importAesKey(env: GmailRuntimeEnv): Promise<CryptoKey> {
-  if (!env.GMAIL_CREDENTIAL_ENCRYPTION_KEY) {
-    throw new GmailConfigError("GMAIL_CREDENTIAL_ENCRYPTION_KEY is required");
-  }
-  const raw = fromBase64Flexible(env.GMAIL_CREDENTIAL_ENCRYPTION_KEY);
-  if (raw.byteLength !== 32) {
-    throw new GmailConfigError("GMAIL_CREDENTIAL_ENCRYPTION_KEY must decode to 32 bytes");
-  }
-  return crypto.subtle.importKey("raw", asBufferSource(raw), { name: "AES-GCM" }, false, [
-    "encrypt",
-    "decrypt"
-  ]);
-}
-
-function safeReturnTo(value: string | null, env: GmailRuntimeEnv): string | null {
-  if (!value) return null;
-  const allowedOrigin = env.DENTLINK_WEB_ORIGIN;
-  try {
-    const url = new URL(value);
-    if (allowedOrigin && url.origin !== allowedOrigin) return null;
-    return url.toString();
-  } catch {
-    return null;
-  }
 }
 
 function headersByName(message: GmailMessage): Map<string, string> {
@@ -619,41 +526,14 @@ function maxHistoryId(left: string | null, right?: string): string | null {
 }
 
 function gmailErrorCode(error: unknown): string {
-  if (error instanceof GmailConfigError) return "gmail_config_error";
+  if (error instanceof GoogleConfigError) return "gmail_config_error";
   if (error instanceof StoreError) return error.code;
   return "gmail_sync_error";
 }
 
 function safeErrorMessage(error: unknown): string {
-  if (error instanceof GmailConfigError) return error.message;
+  if (error instanceof GoogleConfigError) return error.message;
   if (error instanceof StoreError) return error.message;
   if (error instanceof Error) return error.message;
   return "Gmail sync failed";
-}
-
-function toBase64Url(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes))
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replaceAll("=", "");
-}
-
-function fromBase64Url(value: string): Uint8Array {
-  const padded = value
-    .replaceAll("-", "+")
-    .replaceAll("_", "/")
-    .padEnd(Math.ceil(value.length / 4) * 4, "=");
-  return Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
-}
-
-function fromBase64Flexible(value: string): Uint8Array {
-  return /[-_]/.test(value)
-    ? fromBase64Url(value)
-    : Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
-}
-
-function asBufferSource(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  return copy;
 }

@@ -1,5 +1,8 @@
 import type {
   AuthSession,
+  CalendarEvent,
+  CalendarEventPatch,
+  CalendarEventsList,
   ConflictResponse,
   ConnectorAccount,
   ConnectorAccountInput,
@@ -11,6 +14,7 @@ import type {
   EntityId,
   Folder,
   GmailSyncResult,
+  GoogleCalendarSyncResult,
   Notification,
   NotificationInput,
   NotificationPatch,
@@ -167,6 +171,22 @@ export class DentLinkApiClient {
     );
   }
 
+  async startGoogleCalendarOAuth(
+    options: {
+      returnTo?: string;
+      accountId?: EntityId;
+    } = {}
+  ): Promise<{ authorizationUrl: string; expiresAt: string }> {
+    const params = new URLSearchParams();
+    if (options.returnTo) params.set("returnTo", options.returnTo);
+    if (options.accountId) params.set("accountId", options.accountId);
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    return this.request<{ authorizationUrl: string; expiresAt: string }>(
+      `/v1/connectors/google-calendar/start${suffix}`,
+      { method: "POST" }
+    );
+  }
+
   async listConnectorAccounts(): Promise<ConnectorAccountsList> {
     return this.request<ConnectorAccountsList>("/v1/connectors/accounts");
   }
@@ -225,6 +245,39 @@ export class DentLinkApiClient {
   async disconnectGmailAccount(accountId: EntityId): Promise<ConnectorAccount> {
     return this.request<ConnectorAccount>(`/v1/connectors/gmail/${accountId}/disconnect`, {
       method: "POST"
+    });
+  }
+
+  async syncGoogleCalendarAccount(accountId: EntityId): Promise<GoogleCalendarSyncResult> {
+    return this.request<GoogleCalendarSyncResult>(
+      `/v1/connectors/google-calendar/${accountId}/sync`,
+      {
+        method: "POST"
+      }
+    );
+  }
+
+  async disconnectGoogleCalendarAccount(accountId: EntityId): Promise<ConnectorAccount> {
+    return this.request<ConnectorAccount>(
+      `/v1/connectors/google-calendar/${accountId}/disconnect`,
+      {
+        method: "POST"
+      }
+    );
+  }
+
+  async listCalendarEvents(): Promise<CalendarEventsList> {
+    return this.request<CalendarEventsList>("/v1/calendar/events");
+  }
+
+  async updateCalendarEvent(
+    eventId: EntityId,
+    expectedVersion: number,
+    patch: CalendarEventPatch
+  ): Promise<CalendarEvent> {
+    return this.request<CalendarEvent>(`/v1/calendar/events/${eventId}`, {
+      method: "PATCH",
+      body: { expectedVersion, patch }
     });
   }
 

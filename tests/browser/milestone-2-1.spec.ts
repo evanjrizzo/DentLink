@@ -179,7 +179,9 @@ test.describe("Milestone 2.1 preview browser verification", () => {
 
     await page.getByRole("button", { name: "Connectors" }).click();
     await expect(page.getByRole("button", { name: "Connect Gmail" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Connect Google Calendar" })).toBeVisible();
     await expect(page.getByText("No Gmail accounts connected.")).toBeVisible();
+    await expect(page.getByText("No Google Calendar accounts connected.")).toBeVisible();
 
     await page.getByRole("button", { name: "Log out" }).click();
     await expect(page.getByRole("button", { name: "Register" })).toBeVisible();
@@ -260,6 +262,10 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         await fulfillJson(route, { notifications });
         return;
       }
+      if (method === "GET" && path === "/v1/calendar/events") {
+        await fulfillJson(route, { events: [] });
+        return;
+      }
       if (method === "GET" && path === "/v1/webhooks") {
         await fulfillJson(route, { webhooks: [] });
         return;
@@ -325,6 +331,189 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await page.getByRole("button", { name: "Notifications" }).click();
     await page.getByRole("button", { name: "Refresh" }).click();
     await expect(notificationCard(page, "Gmail refresh message")).toBeVisible();
+  });
+
+  test("renders Google Calendar events after Sync Now without reloading", async ({ page }) => {
+    const now = new Date().toISOString();
+    const user = {
+      id: "user_browser_calendar_refresh",
+      email: "calendar-refresh@example.invalid",
+      createdAt: now
+    };
+    const session = {
+      user,
+      session: {
+        token: "session_browser_calendar_refresh",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+      }
+    };
+    const calendarAccount = {
+      id: "connector_calendar_browser_refresh",
+      userId: user.id,
+      connectorKey: "google-calendar",
+      displayName: "Google Calendar Primary calendar",
+      status: "connected",
+      healthStatus: "healthy",
+      syncStatus: "idle",
+      settings: { googleCalendarId: "primary", googleCalendarSummary: "Primary calendar" },
+      credentialRef: "credential_calendar_refresh",
+      credentialStatus: "configured",
+      syncCursor: "calendar-sync-100",
+      lastSyncAt: null as string | null,
+      nextSyncAt: null,
+      lastHealthAt: now,
+      errorCode: null,
+      errorMessage: null,
+      createdAt: now,
+      updatedAt: now,
+      version: 1
+    };
+    let events: unknown[] = [];
+
+    await page.route("**/v1/**", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      const path = url.pathname;
+      const method = request.method();
+      if (method === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: corsHeaders() });
+        return;
+      }
+      if (method === "GET" && path === "/v1/auth/session") {
+        await fulfillJson(route, { user, session: { expiresAt: session.session.expiresAt } });
+        return;
+      }
+      if (method === "GET" && path === "/v1/notes") {
+        await fulfillJson(route, { notes: [], folders: [], tags: [] });
+        return;
+      }
+      if (method === "GET" && path === "/v1/notifications") {
+        await fulfillJson(route, { notifications: [] });
+        return;
+      }
+      if (method === "GET" && path === "/v1/calendar/events") {
+        await fulfillJson(route, { events });
+        return;
+      }
+      if (method === "GET" && path === "/v1/webhooks") {
+        await fulfillJson(route, { webhooks: [] });
+        return;
+      }
+      if (method === "GET" && path === "/v1/connectors/accounts") {
+        await fulfillJson(route, { accounts: [calendarAccount] });
+        return;
+      }
+      if (
+        method === "POST" &&
+        path === `/v1/connectors/google-calendar/${calendarAccount.id}/sync`
+      ) {
+        const syncedAt = new Date().toISOString();
+        calendarAccount.lastSyncAt = syncedAt;
+        calendarAccount.lastHealthAt = syncedAt;
+        calendarAccount.syncCursor = "calendar-sync-101";
+        calendarAccount.updatedAt = syncedAt;
+        calendarAccount.version += 1;
+        events = [
+          calendarEventFixture({
+            id: "calendar_event_all_day",
+            title: "Calendar all-day planning",
+            allDay: true,
+            startAt: "2026-07-15T00:00:00.000Z",
+            endAt: "2026-07-16T00:00:00.000Z",
+            startDate: "2026-07-15",
+            endDate: "2026-07-16",
+            version: 1
+          }),
+          calendarEventFixture({
+            id: "calendar_event_timed",
+            title: "Calendar timed consult",
+            allDay: false,
+            location: "Operatory 2",
+            startAt: "2026-07-15T18:00:00.000Z",
+            endAt: "2026-07-15T18:30:00.000Z",
+            version: 1
+          })
+        ];
+        await fulfillJson(route, {
+          account: calendarAccount,
+          processed: 2,
+          upsertedEvents: 2
+        });
+        return;
+      }
+      if (method === "PATCH" && path === "/v1/calendar/events/calendar_event_timed") {
+        events = events.filter(
+          (event) =>
+            !(
+              typeof event === "object" &&
+              event !== null &&
+              "id" in event &&
+              event.id === "calendar_event_timed"
+            )
+        );
+        await fulfillJson(route, {
+          ...calendarEventFixture({
+            id: "calendar_event_timed",
+            title: "Calendar timed consult",
+            allDay: false,
+            location: "Operatory 2",
+            startAt: "2026-07-15T18:00:00.000Z",
+            endAt: "2026-07-15T18:30:00.000Z",
+            version: 2
+          }),
+          status: "dismissed",
+          dismissedAt: new Date().toISOString()
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 404,
+        headers: corsHeaders(),
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "not_found", message: "Not found" } })
+      });
+    });
+
+    await page.addInitScript((storedSession) => {
+      window.localStorage.setItem("dentlink.auth.session.v1", JSON.stringify(storedSession));
+    }, session);
+
+    await page.goto("/");
+    await expect(page.getByText(user.email)).toBeVisible();
+    await page.getByRole("button", { name: "Agenda" }).click();
+    await expect(page.getByText("No upcoming events.")).toBeVisible();
+    await page.getByRole("button", { name: "Sync Now" }).click();
+    await expect(notificationCard(page, "Calendar all-day planning")).toBeVisible();
+    await expect(
+      notificationCard(page, "Calendar all-day planning").getByText("All day")
+    ).toBeVisible();
+    await expect(notificationCard(page, "Calendar timed consult")).toBeVisible();
+    await expect(
+      notificationCard(page, "Calendar timed consult").getByText("Operatory 2")
+    ).toBeVisible();
+    await expect(
+      notificationCard(page, "Calendar all-day planning").getByRole("link", {
+        name: "Open in Google Calendar"
+      })
+    ).toHaveAttribute("href", /calendar\.google\.com/);
+
+    events = [
+      ...events,
+      calendarEventFixture({
+        id: "calendar_event_refresh",
+        title: "Calendar refresh event",
+        allDay: false,
+        startAt: "2026-07-16T15:00:00.000Z",
+        endAt: "2026-07-16T15:30:00.000Z",
+        version: 1
+      })
+    ];
+    await page.getByRole("button", { name: "Refresh" }).click();
+    await expect(notificationCard(page, "Calendar refresh event")).toBeVisible();
+    await notificationCard(page, "Calendar timed consult")
+      .getByRole("button", { name: "Dismiss" })
+      .click();
+    await expect(notificationCard(page, "Calendar timed consult")).toHaveCount(0);
   });
 });
 
@@ -449,6 +638,44 @@ function notificationFixture(input: {
     createdAt: input.createdAt ?? timestamp,
     updatedAt: input.updatedAt ?? timestamp,
     completedAt: null,
+    dismissedAt: null
+  };
+}
+
+function calendarEventFixture(input: {
+  id: string;
+  title: string;
+  allDay: boolean;
+  startAt: string;
+  endAt: string;
+  startDate?: string;
+  endDate?: string;
+  location?: string;
+  version: number;
+}) {
+  const timestamp = new Date().toISOString();
+  return {
+    id: input.id,
+    userId: "user_browser_calendar_refresh",
+    connectorAccountId: "connector_calendar_browser_refresh",
+    provider: "google-calendar",
+    providerEventId: input.id.replace("calendar_event_", "provider_event_"),
+    calendarId: "primary",
+    calendarSummary: "Primary calendar",
+    title: input.title,
+    description: "",
+    location: input.location ?? null,
+    sourceUrl: `https://calendar.google.com/event?eid=${input.id}`,
+    startAt: input.startAt,
+    endAt: input.endAt,
+    startDate: input.startDate ?? null,
+    endDate: input.endDate ?? null,
+    timezone: "America/New_York",
+    allDay: input.allDay,
+    status: "active",
+    version: input.version,
+    createdAt: timestamp,
+    updatedAt: timestamp,
     dismissedAt: null
   };
 }

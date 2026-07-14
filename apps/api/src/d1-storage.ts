@@ -7,6 +7,8 @@ import {
 
 import type {
   ConflictResolution,
+  CalendarEvent,
+  CalendarEventPatch,
   ConnectorAccount,
   ConnectorAccountInput,
   ConnectorAccountPatch,
@@ -44,6 +46,8 @@ type SyncPayload =
   | Omit<Extract<SyncChange, { type: "tag" }>, "cursor">
   | Omit<Extract<SyncChange, { type: "notification"; op: "upsert" }>, "cursor">
   | Omit<Extract<SyncChange, { type: "notification"; op: "delete" }>, "cursor">
+  | Omit<Extract<SyncChange, { type: "calendar_event"; op: "upsert" }>, "cursor">
+  | Omit<Extract<SyncChange, { type: "calendar_event"; op: "delete" }>, "cursor">
   | Omit<Extract<SyncChange, { type: "webhook"; op: "upsert" }>, "cursor">
   | Omit<Extract<SyncChange, { type: "webhook"; op: "delete" }>, "cursor">
   | Omit<Extract<SyncChange, { type: "connector_account"; op: "upsert" }>, "cursor">
@@ -239,6 +243,31 @@ type ConnectorCredentialRow = {
   encryption_version: number;
   created_at: string;
   updated_at: string;
+};
+
+type CalendarEventRow = {
+  id: string;
+  user_id: string;
+  connector_account_id: string;
+  provider: "google-calendar";
+  provider_event_id: string;
+  calendar_id: string;
+  calendar_summary: string;
+  title: string;
+  description: string;
+  location: string | null;
+  source_url: string | null;
+  start_at: string;
+  end_at: string;
+  start_date: string | null;
+  end_date: string | null;
+  timezone: string | null;
+  all_day: number;
+  status: CalendarEvent["status"];
+  version: number;
+  created_at: string;
+  updated_at: string;
+  dismissed_at: string | null;
 };
 
 export class D1DentLinkStore implements DentLinkStore {
@@ -1081,6 +1110,171 @@ export class D1DentLinkStore implements DentLinkStore {
       .run();
   }
 
+  async listCalendarEvents(userId: EntityId, now: string): Promise<{ events: CalendarEvent[] }> {
+    const rows = await this.all<CalendarEventRow>(
+      `SELECT * FROM calendar_events
+       WHERE user_id = ?
+         AND status NOT IN ('deleted', 'dismissed')
+         AND end_at >= ?
+       ORDER BY start_at ASC, title ASC`,
+      [userId, now]
+    );
+    return { events: rows.map(calendarEventFromRow) };
+  }
+
+  async upsertCalendarEvent(
+    userId: EntityId,
+    input: Omit<
+      CalendarEvent,
+      "id" | "userId" | "version" | "createdAt" | "updatedAt" | "dismissedAt"
+    >,
+    now: string
+  ): Promise<{ event: CalendarEvent; created: boolean }> {
+    const account = await this.getConnectorAccount(userId, input.connectorAccountId);
+    if (!account) throw new StoreError("not_found", "Connector account not found");
+    const existing = await this.db
+      .prepare(
+        `SELECT * FROM calendar_events
+         WHERE user_id = ? AND connector_account_id = ? AND provider_event_id = ?`
+      )
+      .bind(userId, input.connectorAccountId, input.providerEventId)
+      .first<CalendarEventRow>();
+    const event: CalendarEvent = {
+      ...(existing
+        ? calendarEventFromRow(existing)
+        : {
+            id: nextId("calendar"),
+            userId,
+            createdAt: now,
+            version: 0,
+            dismissedAt: null
+          }),
+      ...input,
+      status:
+        input.status === "cancelled" || !existing || existing.status !== "dismissed"
+          ? input.status
+          : "dismissed",
+      version: existing ? existing.version + 1 : 1,
+      updatedAt: now
+    };
+    await this.batch([
+      this.db
+        .prepare(
+          `INSERT INTO calendar_events
+           (id, user_id, connector_account_id, provider, provider_event_id, calendar_id,
+            calendar_summary, title, description, location, source_url, start_at, end_at,
+            start_date, end_date, timezone, all_day, status, version, created_at, updated_at,
+            dismissed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(connector_account_id, provider_event_id) DO UPDATE SET
+             calendar_id = excluded.calendar_id,
+             calendar_summary = excluded.calendar_summary,
+             title = excluded.title,
+             description = excluded.description,
+             location = excluded.location,
+             source_url = excluded.source_url,
+             start_at = excluded.start_at,
+             end_at = excluded.end_at,
+             start_date = excluded.start_date,
+             end_date = excluded.end_date,
+             timezone = excluded.timezone,
+             all_day = excluded.all_day,
+             status = excluded.status,
+             version = excluded.version,
+             updated_at = excluded.updated_at,
+             dismissed_at = excluded.dismissed_at`
+        )
+        .bind(
+          event.id,
+          userId,
+          event.connectorAccountId,
+          event.provider,
+          event.providerEventId,
+          event.calendarId,
+          event.calendarSummary,
+          event.title,
+          event.description,
+          event.location,
+          event.sourceUrl,
+          event.startAt,
+          event.endAt,
+          event.startDate,
+          event.endDate,
+          event.timezone,
+          bool(event.allDay),
+          event.status,
+          event.version,
+          event.createdAt,
+          event.updatedAt,
+          event.dismissedAt
+        ),
+      this.changeStatement(
+        userId,
+        "calendar_event",
+        event.id,
+        event.status === "deleted" ? "delete" : "upsert",
+        event.status === "deleted"
+          ? { type: "calendar_event", op: "delete", id: event.id, userId }
+          : { type: "calendar_event", op: "upsert", event }
+      )
+    ]);
+    return { event, created: !existing };
+  }
+
+  async updateCalendarEvent(
+    userId: EntityId,
+    eventId: EntityId,
+    expectedVersion: number,
+    patch: CalendarEventPatch,
+    now: string
+  ): Promise<CalendarEvent> {
+    const row = await this.db
+      .prepare(`SELECT * FROM calendar_events WHERE id = ? AND user_id = ? AND status != 'deleted'`)
+      .bind(eventId, userId)
+      .first<CalendarEventRow>();
+    if (!row) throw new StoreError("not_found", "Calendar event not found");
+    const existing = calendarEventFromRow(row);
+    const next: CalendarEvent = {
+      ...existing,
+      status: patch.status ?? existing.status,
+      version: existing.version + 1,
+      updatedAt: now,
+      dismissedAt:
+        patch.status === "dismissed" ? now : patch.status === "active" ? null : existing.dismissedAt
+    };
+    const result = await this.db
+      .prepare(
+        `UPDATE calendar_events
+         SET status = ?, version = ?, updated_at = ?, dismissed_at = ?
+         WHERE id = ? AND user_id = ? AND version = ? AND status != 'deleted'`
+      )
+      .bind(
+        next.status,
+        next.version,
+        next.updatedAt,
+        next.dismissedAt,
+        eventId,
+        userId,
+        expectedVersion
+      )
+      .run();
+    if ((result.meta?.changes ?? 0) !== 1) {
+      throw new StoreError("version_mismatch", "Calendar event changed on the server");
+    }
+    await this.batch([
+      this.changeStatement(
+        userId,
+        "calendar_event",
+        next.id,
+        next.status === "deleted" ? "delete" : "upsert",
+        next.status === "deleted"
+          ? { type: "calendar_event", op: "delete", id: next.id, userId }
+          : { type: "calendar_event", op: "upsert", event: next }
+      )
+    ]);
+    return next;
+  }
+
   async listNotifications(userId: EntityId): Promise<{ notifications: Notification[] }> {
     const rows = await this.all<NotificationRow>(
       `SELECT * FROM notifications
@@ -1742,7 +1936,14 @@ export class D1DentLinkStore implements DentLinkStore {
   private changeStatement(
     userId: EntityId,
     entityType:
-      "note" | "folder" | "tag" | "notification" | "webhook" | "connector_account" | "conflict",
+      | "note"
+      | "folder"
+      | "tag"
+      | "notification"
+      | "calendar_event"
+      | "webhook"
+      | "connector_account"
+      | "conflict",
     entityId: string,
     operation: "upsert" | "delete",
     payload: SyncPayload
@@ -1834,6 +2035,33 @@ function notificationFromRow(row: NotificationRow): Notification {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at,
+    dismissedAt: row.dismissed_at
+  };
+}
+
+function calendarEventFromRow(row: CalendarEventRow): CalendarEvent {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    connectorAccountId: row.connector_account_id,
+    provider: row.provider,
+    providerEventId: row.provider_event_id,
+    calendarId: row.calendar_id,
+    calendarSummary: row.calendar_summary,
+    title: row.title,
+    description: row.description,
+    location: row.location,
+    sourceUrl: row.source_url,
+    startAt: row.start_at,
+    endAt: row.end_at,
+    startDate: row.start_date,
+    endDate: row.end_date,
+    timezone: row.timezone,
+    allDay: Boolean(row.all_day),
+    status: row.status,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
     dismissedAt: row.dismissed_at
   };
 }

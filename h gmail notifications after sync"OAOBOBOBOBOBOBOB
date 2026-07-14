@@ -1,0 +1,240 @@
+[1mdiff --git a/apps/web/src/notes-app.tsx b/apps/web/src/notes-app.tsx[m
+[1mindex cbf3af7..27bf6de 100644[m
+[1m--- a/apps/web/src/notes-app.tsx[m
+[1m+++ b/apps/web/src/notes-app.tsx[m
+[36m@@ -113,6 +113,10 @@[m [mexport function DentLinkNotesApp(): ReactElement {[m
+     if (requestId === connectorsRequest.current) setConnectorAccounts(response.accounts);[m
+   }[m
+ [m
+[32m+[m[32m  async function refreshConnectorNotificationState(): Promise<void> {[m
+[32m+[m[32m    await Promise.all([loadConnectors(), loadNotifications()]);[m
+[32m+[m[32m  }[m
+[32m+[m
+   async function authenticate(mode: "login" | "register"): Promise<void> {[m
+     try {[m
+       setError(null);[m
+[36m@@ -334,9 +338,9 @@[m [mexport function DentLinkNotesApp(): ReactElement {[m
+   async function syncGmail(account: ConnectorAccount): Promise<void> {[m
+     try {[m
+       setError(null);[m
+[31m-      await client.syncGmailAccount(account.id);[m
+[31m-      await loadConnectors();[m
+[31m-      await loadNotifications();[m
+[32m+[m[32m      const result = await client.syncGmailAccount(account.id);[m
+[32m+[m[32m      await refreshConnectorNotificationState();[m
+[32m+[m[32m      if (result.createdNotifications > 0) setView("notifications");[m
+     } catch (caught) {[m
+       handleFailure(caught);[m
+       await loadConnectors().catch(() => undefined);[m
+[36m@@ -540,7 +544,7 @@[m [mexport function DentLinkNotesApp(): ReactElement {[m
+           onReconnectGmail={(account) => connectGmail(account.id)}[m
+           onSyncGmail={syncGmail}[m
+           onDisconnectGmail={disconnectGmail}[m
+[31m-          onRefreshConnectors={loadConnectors}[m
+[32m+[m[32m          onRefreshConnectors={refreshConnectorNotificationState}[m
+         />[m
+       ) : null}[m
+     </>[m
+[1mdiff --git a/tests/browser/milestone-2-1.spec.ts b/tests/browser/milestone-2-1.spec.ts[m
+[1mindex 774ac72..f31e5f9 100644[m
+[1m--- a/tests/browser/milestone-2-1.spec.ts[m
+[1m+++ b/tests/browser/milestone-2-1.spec.ts[m
+[36m@@ -1,4 +1,4 @@[m
+[31m-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";[m
+[32m+[m[32mimport { expect, test, type APIRequestContext, type Page, type Route } from "@playwright/test";[m
+ [m
+ const apiBaseUrl =[m
+   process.env.DENTLINK_PREVIEW_API_URL ?? "https://dentlink-api-preview.evanjrizzo.workers.dev";[m
+[36m@@ -180,8 +180,6 @@[m [mtest.describe("Milestone 2.1 preview browser verification", () => {[m
+     await page.getByRole("button", { name: "Connectors" }).click();[m
+     await expect(page.getByRole("button", { name: "Connect Gmail" })).toBeVisible();[m
+     await expect(page.getByText("No Gmail accounts connected.")).toBeVisible();[m
+[31m-    await page.getByRole("button", { name: "Connect Gmail" }).click();[m
+[31m-    await expect(page.getByRole("alert")).toContainText(/GOOGLE_CLIENT_ID|GOOGLE_CLIENT_SECRET/);[m
+ [m
+     await page.getByRole("button", { name: "Log out" }).click();[m
+     await expect(page.getByRole("button", { name: "Register" })).toBeVisible();[m
+[36m@@ -203,6 +201,131 @@[m [mtest.describe("Milestone 2.1 preview browser verification", () => {[m
+ [m
+     expect(leakedConsole).toEqual([]);[m
+   });[m
+[32m+[m
+[32m+[m[32m  test("refreshes Gmail notifications after Sync Now without reloading", async ({ page }) => {[m
+[32m+[m[32m    const now = new Date().toISOString();[m
+[32m+[m[32m    const user = {[m
+[32m+[m[32m      id: "user_browser_gmail_refresh",[m
+[32m+[m[32m      email: "gmail-refresh@example.invalid",[m
+[32m+[m[32m      createdAt: now[m
+[32m+[m[32m    };[m
+[32m+[m[32m    const session = {[m
+[32m+[m[32m      user,[m
+[32m+[m[32m      session: {[m
+[32m+[m[32m        token: "session_browser_gmail_refresh",[m
+[32m+[m[32m        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString()[m
+[32m+[m[32m      }[m
+[32m+[m[32m    };[m
+[32m+[m[32m    const gmailAccount = {[m
+[32m+[m[32m      id: "connector_gmail_browser_refresh",[m
+[32m+[m[32m      userId: user.id,[m
+[32m+[m[32m      connectorKey: "gmail",[m
+[32m+[m[32m      displayName: "Gmail gmail-refresh@example.invalid",[m
+[32m+[m[32m      status: "connected",[m
+[32m+[m[32m      healthStatus: "healthy",[m
+[32m+[m[32m      syncStatus: "idle",[m
+[32m+[m[32m      settings: { googleEmail: "gmail-refresh@example.invalid" },[m
+[32m+[m[32m      credentialRef: "credential_browser_refresh",[m
+[32m+[m[32m      credentialStatus: "configured",[m
+[32m+[m[32m      syncCursor: "history_100",[m
+[32m+[m[32m      lastSyncAt: null as string | null,[m
+[32m+[m[32m      nextSyncAt: null,[m
+[32m+[m[32m      lastHealthAt: now,[m
+[32m+[m[32m      errorCode: null,[m
+[32m+[m[32m      errorMessage: null,[m
+[32m+[m[32m      createdAt: now,[m
+[32m+[m[32m      updatedAt: now,[m
+[32m+[m[32m      version: 1[m
+[32m+[m[32m    };[m
+[32m+[m[32m    let notifications: unknown[] = [];[m
+[32m+[m
+[32m+[m[32m    await page.route("**/v1/**", async (route) => {[m
+[32m+[m[32m      const request = route.request();[m
+[32m+[m[32m      const url = new URL(request.url());[m
+[32m+[m[32m      const path = url.pathname;[m
+[32m+[m[32m      const method = request.method();[m
+[32m+[m[32m      if (method === "OPTIONS") {[m
+[32m+[m[32m        await route.fulfill({ status: 204, headers: corsHeaders() });[m
+[32m+[m[32m        return;[m
+[32m+[m[32m      }[m
+[32m+[m[32m      if (method === "GET" && path === "/v1/auth/session") {[m
+[32m+[m[32m        await fulfillJson(route, { user, session: { expiresAt: session.session.expiresAt } });[m
+[32m+[m[32m        return;[m
+[32m+[m[32m      }[m
+[32m+[m[32m      if (method === "GET" && path === "/v1/notes") {[m
+[32m+[m[32m        await fulfillJson(route, { notes: [], folders: [], tags: [] });[m
+[32m+[m[32m        return;[m
+[32m+[m[32m      }[m
+[32m+[m[32m      if (method === "GET" && path === "/v1/notifications") {[m
+[32m+[m[32m        await fulfillJson(route, { notifications });[m
+[32m+[m[32m        return;[m
+[32m+[m[32m      }[m
+[32m+[m[32m      if (method === "GET" && path === "/v1/webhooks") {[m
+[32m+[m[32m        await fulfillJson(route, { webhooks: [] });[m
+[32m+[m[32m        return;[m
+[32m+[m[32m      }[m
+[32m+[m[32m      if (method === "GET" && path === "/v1/connectors/accounts") {[m
+[32m+[m[32m        await fulfillJson(route, { accounts: [gmailAccount] });[m
+[32m+[m[32m        return;[m
+[32m+[m[32m      }[m
+[32m+[m[32m      if (method === "POST" && path === `/v1/connectors/gmail/${gmailAccount.id}/sync`) {[m
+[32m+[m[32m        const syncedAt = new Date().toISOString();[m
+[32m+[m[32m        gmailAccount.lastSyncAt = syncedAt;[m
+[32m+[m[32m        gmailAccount.lastHealthAt = syncedAt;[m
+[32m+[m[32m        gmailAccount.syncCursor = "history_101";[m
+[32m+[m[32m        gmailAccount.updatedAt = syncedAt;[m
+[32m+[m[32m        gmailAccount.version += 1;[m
+[32m+[m[32m        notifications = [[m
+[32m+[m[32m          notificationFixture({[m
+[32m+[m[32m            id: "notification_gmail_synced",[m
+[32m+[m[32m            title: "Gmail synced message",[m
+[32m+[m[32m            summary: "From browser-controlled Gmail sync",[m
+[32m+[m[32m            createdAt: syncedAt,[m
+[32m+[m[32m            updatedAt: syncedAt[m
+[32m+[m[32m          })[m
+[32m+[m[32m        ];[m
+[32m+[m[32m        await fulfillJson(route, {[m
+[32m+[m[32m          account: gmailAccount,[m
+[32m+[m[32m          processed: 1,[m
+[32m+[m[32m          createdNotifications: 1[m
+[32m+[m[32m        });[m
+[32m+[m[32m        return;[m
+[32m+[m[32m      }[m
+[32m+[m[32m      await route.fulfill({[m
+[32m+[m[32m        status: 404,[m
+[32m+[m[32m        headers: corsHeaders(),[m
+[32m+[m[32m        contentType: "application/json",[m
+[32m+[m[32m        body: JSON.stringify({ error: { code: "not_found", message: "Not found" } })[m
+[32m+[m[32m      });[m
+[32m+[m[32m    });[m
+[32m+[m
+[32m+[m[32m    await page.addInitScript((storedSession) => {[m
+[32m+[m[32m      window.localStorage.setItem("dentlink.auth.session.v1", JSON.stringify(storedSession));[m
+[32m+[m[32m    }, session);[m
+[32m+[m
+[32m+[m[32m    await page.goto("/");[m
+[32m+[m[32m    await expect(page.getByText(user.email)).toBeVisible();[m
+[32m+[m[32m    await page.getByRole("button", { name: "Connectors" }).click();[m
+[32m+[m[32m    await expect(page.getByText(gmailAccount.displayName)).toBeVisible();[m
+[32m+[m[32m    await expect(page.getByText("Last sync: Never")).toBeVisible();[m
+[32m+[m
+[32m+[m[32m    await page.getByRole("button", { name: "Sync Now" }).click();[m
+[32m+[m[32m    await expect(notificationCard(page, "Gmail synced message")).toBeVisible();[m
+[32m+[m[32m    await page.getByRole("button", { name: "Connectors" }).click();[m
+[32m+[m[32m    await expect(page.getByText("Last sync: Never")).toHaveCount(0);[m
+[32m+[m
+[32m+[m[32m    notifications = [[m
+[32m+[m[32m      ...notifications,[m
+[32m+[m[32m      notificationFixture({[m
+[32m+[m[32m        id: "notification_gmail_refresh",[m
+[32m+[m[32m        title: "Gmail refresh message",[m
+[32m+[m[32m        summary: "Loaded by the normal Refresh control"[m
+[32m+[m[32m      })[m
+[32m+[m[32m    ];[m
+[32m+[m[32m    await page.getByRole("button", { name: "Notifications" }).click();[m
+[32m+[m[32m    await page.getByRole("button", { name: "Refresh" }).click();[m
+[32m+[m[32m    await expect(notificationCard(page, "Gmail refresh message")).toBeVisible();[m
+[32m+[m[32m  });[m
+ });[m
+ [m
+ function noteCard(page: Page, title: string) {[m
+[36m@@ -299,3 +422,51 @@[m [masync function settleMutation(page: Page): Promise<void> {[m
+   await page.waitForTimeout(500);[m
+   await expect(page.getByRole("alert")).toHaveCount(0);[m
+ }[m
+[32m+[m
+[32m+[m[32mfunction notificationFixture(input: {[m
+[32m+[m[32m  id: string;[m
+[32m+[m[32m  title: string;[m
+[32m+[m[32m  summary: string;[m
+[32m+[m[32m  createdAt?: string;[m
+[32m+[m[32m  updatedAt?: string;[m
+[32m+[m[32m}) {[m
+[32m+[m[32m  const timestamp = new Date().toISOString();[m
+[32m+[m[32m  return {[m
+[32m+[m[32m    id: input.id,[m
+[32m+[m[32m    userId: "user_browser_gmail_refresh",[m
+[32m+[m[32m    title: input.title,[m
+[32m+[m[32m    summary: input.summary,[m
+[32m+[m[32m    body: "",[m
+[32m+[m[32m    source: "connector",[m
+[32m+[m[32m    sourceLabel: "Gmail",[m
+[32m+[m[32m    sourceUrl: "https://mail.google.com/mail/u/0/#inbox/test-message",[m
+[32m+[m[32m    severity: "info",[m
+[32m+[m[32m    status: "active",[m
+[32m+[m[32m    pinned: false,[m
+[32m+[m[32m    rank: 0,[m
+[32m+[m[32m    globalOrder: 1000,[m
+[32m+[m[32m    version: 1,[m
+[32m+[m[32m    createdAt: input.createdAt ?? timestamp,[m
+[32m+[m[32m    updatedAt: input.updatedAt ?? timestamp,[m
+[32m+[m[32m    completedAt: null,[m
+[32m+[m[32m    dismissedAt: null[m
+[32m+[m[32m  };[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32masync function fulfillJson(route: Route, body: unknown): Promise<void> {[m
+[32m+[m[32m  await route.fulfill({[m
+[32m+[m[32m    status: 200,[m
+[32m+[m[32m    headers: corsHeaders(),[m
+[32m+[m[32m    contentType: "application/json",[m
+[32m+[m[32m    body: JSON.stringify(body)[m
+[32m+[m[32m  });[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mfunction corsHeaders(): Record<string, string> {[m
+[32m+[m[32m  return {[m
+[32m+[m[32m    "access-control-allow-origin": webOrigin,[m
+[32m+[m[32m    "access-control-allow-methods": "GET,POST,PATCH,DELETE,OPTIONS",[m
+[32m+[m[32m    "access-control-allow-headers": "authorization,content-type",[m
+[32m+[m[32m    vary: "Origin"[m
+[32m+[m[32m  };[m
+[32m+[m[32m}[m

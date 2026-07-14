@@ -176,3 +176,21 @@ stored in `connector_credentials`, and normalized Gmail message metadata is stor
 
 Gmail source records are unique by `(account_id, source_external_id)`, which makes message ingestion
 retry-safe and prevents duplicate notification creation for the same Gmail message.
+
+## Milestone 4 D1 schema
+
+`migrations/0005_google_calendar_connector.sql` adds Google Calendar agenda persistence:
+
+- `calendar_events`: user-scoped normalized provider event instances linked to connector accounts.
+  Rows store provider event ID, calendar ID/summary, title, description, location, source URL,
+  start/end timestamps, all-day dates, timezone, status, version, and local dismissal timestamp.
+- `sync_changes`: rebuilt in place to permit `calendar_event` entity changes while preserving
+  existing cursors and payloads.
+
+Google Calendar connector accounts continue to live in `connector_accounts` with
+`connector_key = 'google-calendar'`. The account stores calendar metadata, sync token, health, and
+credential reference only. Refresh tokens remain encrypted in `connector_credentials`.
+
+Calendar events are unique by `(connector_account_id, provider_event_id)`, which makes repeated
+sync retry-safe. DentLink-local agenda dismissal updates only the `calendar_events.status` and
+`dismissed_at` fields; it does not mutate Google Calendar.

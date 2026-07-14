@@ -69,6 +69,13 @@ user data paths. OAuth callbacks link accounts server-side, encrypted refresh to
 connector credential storage, and Gmail messages are normalized into source records before creating
 DentLink notifications.
 
+Milestone 4 adds Google Calendar using the same provider-neutral connector framework. Google
+Calendar OAuth links a calendar connector account, encrypted refresh tokens remain in connector
+credential storage, and synced event instances are normalized into `calendar_events` plus
+connector source records. Google Calendar remains authoritative: DentLink supports agenda viewing
+and local agenda dismissal only, not provider event creation, editing, deletion, RSVP, or attendee
+management.
+
 ## Sync architecture
 
 Clients use cursor-based incremental synchronization, optimistic local updates, offline mutation

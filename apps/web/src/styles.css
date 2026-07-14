@@ -117,7 +117,8 @@ textarea {
 }
 
 .notifications-shell,
-.webhooks-shell {
+.webhooks-shell,
+.agenda-shell {
   display: grid;
   gap: 12px;
   padding: 20px;
@@ -190,8 +191,20 @@ textarea {
 }
 
 .notification-card.done,
-.notification-card.dismissed {
+.notification-card.dismissed,
+.notification-card.cancelled {
   opacity: 0.68;
+}
+
+.calendar-time {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #5a6472;
+}
+
+.notification-card a {
+  color: #1d4ed8;
 }
 
 .note-card {

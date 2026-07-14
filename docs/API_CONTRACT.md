@@ -207,3 +207,41 @@ The Gmail connector uses the metadata-only Gmail scope:
 ```text
 https://www.googleapis.com/auth/gmail.metadata
 ```
+
+## Milestone 4 Google Calendar endpoints
+
+Milestone 4 adds Google Calendar as a read-only calendar connector through the same connector
+framework. It does not add event creation, editing, deletion, RSVP, attendee management, Microsoft
+Graph, Outlook, IMAP, push notifications, widgets, or AI behavior.
+
+- `POST /v1/connectors/google-calendar/start`: authenticated OAuth initiation. Optional query
+  parameters: `returnTo` and `accountId` for reconnect. Returns an authorization URL and state
+  expiration. The state value is stored server-side as a hash.
+- `GET /v1/connectors/google-calendar/callback`: public OAuth callback. Validates state, exchanges
+  the code, discovers the primary calendar, links or reconnects the connector account, stores the
+  encrypted refresh token, runs the initial read-only event sync, and redirects to a safe `returnTo`
+  URL when present. JSON clients may send `Accept: application/json`.
+- `POST /v1/connectors/google-calendar/:accountId/sync`: authenticated manual sync for an owned
+  Google Calendar connector account.
+- `POST /v1/connectors/google-calendar/:accountId/disconnect`: authenticated disconnect. Removes
+  stored connector credentials and leaves the metadata account paused.
+- `GET /v1/calendar/events`: list the authenticated user's upcoming, non-dismissed normalized
+  calendar events in chronological order.
+- `PATCH /v1/calendar/events/:eventId`: update DentLink-local agenda state with `expectedVersion`.
+  Milestone 4 accepts only `status: "dismissed"` or `status: "active"`.
+
+Generic `POST /v1/connectors/accounts` rejects `connectorKey: "google-calendar"`; Google Calendar
+accounts must be linked through OAuth.
+
+Google Calendar sync stores normalized source records with provider metadata, including provider,
+provider item ID, calendar ID, calendar summary, recurrence identifiers where provided, permalink,
+and connector account. Normalized agenda events include all-day/timed start and end fields,
+location, status, provider deep link, and source calendar label. Cancelled events are preserved with
+`status: "cancelled"`. Agenda dismissal hides the DentLink copy from agenda listing only and does
+not modify or delete the Google event.
+
+The Google Calendar connector uses the read-only Calendar scope:
+
+```text
+https://www.googleapis.com/auth/calendar.readonly
+```

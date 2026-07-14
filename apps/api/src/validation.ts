@@ -1,5 +1,6 @@
 import type {
   ConflictResolution,
+  CalendarEventPatch,
   ConnectorAccountInput,
   ConnectorAccountPatch,
   ConnectorSourceRecordInput,
@@ -150,6 +151,23 @@ export function parseNotificationPatch(value: unknown): {
       rank: optionalNumber(patch.rank, "rank"),
       globalOrder: optionalNumber(patch.globalOrder, "globalOrder"),
       status: parseNotificationStatus(patch.status)
+    }
+  };
+}
+
+export function parseCalendarEventPatch(value: unknown): {
+  expectedVersion: number;
+  patch: CalendarEventPatch;
+} {
+  const object = asObject(value);
+  const patch = asObject(object.patch);
+  return {
+    expectedVersion: asVersion(object.expectedVersion),
+    patch: {
+      status:
+        patch.status === undefined || patch.status === "active" || patch.status === "dismissed"
+          ? patch.status
+          : invalid("invalid_status")
     }
   };
 }

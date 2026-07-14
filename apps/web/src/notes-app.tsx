@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { DentLinkApiClient, DentLinkApiError } from "@dentlink/api-client";
 import type {
   AuthSession,
+  CalendarEvent,
   ConnectorAccount,
   EntityId,
   Notification,
@@ -19,7 +20,7 @@ import { NotesWorkspace } from "@dentlink/ui";
 
 const initialList: NotesList = { notes: [], folders: [], tags: [] };
 const SESSION_STORAGE_KEY = "dentlink.auth.session.v1";
-type View = "notifications" | "notes" | "webhooks" | "connectors";
+type View = "notifications" | "agenda" | "notes" | "webhooks" | "connectors";
 
 export function DentLinkNotesApp(): ReactElement {
   const [client] = useState(
@@ -33,6 +34,7 @@ export function DentLinkNotesApp(): ReactElement {
   const [credentials, setCredentials] = useState({ email: "", password: "" });
   const [notesList, setNotesList] = useState<NotesList>(initialList);
   const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
   const [webhooks, setWebhooks] = useState<Array<WebhookEndpoint & { ingestUrl: string }>>([]);
   const [connectorAccounts, setConnectorAccounts] = useState<ConnectorAccount[]>([]);
   const [webhookDraft, setWebhookDraft] = useState({
@@ -49,6 +51,7 @@ export function DentLinkNotesApp(): ReactElement {
   const [updatingNoteIds, setUpdatingNoteIds] = useState<EntityId[]>([]);
   const notesRequest = useRef(0);
   const notificationsRequest = useRef(0);
+  const calendarRequest = useRef(0);
   const webhooksRequest = useRef(0);
   const connectorsRequest = useRef(0);
 
@@ -67,6 +70,7 @@ export function DentLinkNotesApp(): ReactElement {
         });
         await loadNotes("", null, []);
         await loadNotifications();
+        await loadCalendarEvents();
         await loadWebhooks();
         await loadConnectors();
       })
@@ -101,6 +105,12 @@ export function DentLinkNotesApp(): ReactElement {
     if (requestId === notificationsRequest.current) setNotifications(response.notifications);
   }
 
+  async function loadCalendarEvents(): Promise<void> {
+    const requestId = (calendarRequest.current += 1);
+    const response = await client.listCalendarEvents();
+    if (requestId === calendarRequest.current) setCalendarEvents(response.events);
+  }
+
   async function loadWebhooks(): Promise<void> {
     const requestId = (webhooksRequest.current += 1);
     const response = await client.listWebhooks();
@@ -114,7 +124,7 @@ export function DentLinkNotesApp(): ReactElement {
   }
 
   async function refreshConnectorNotificationState(): Promise<void> {
-    await Promise.all([loadConnectors(), loadNotifications()]);
+    await Promise.all([loadConnectors(), loadNotifications(), loadCalendarEvents()]);
   }
 
   async function authenticate(mode: "login" | "register"): Promise<void> {
@@ -128,6 +138,7 @@ export function DentLinkNotesApp(): ReactElement {
       storeSession(session);
       await loadNotes("", null, []);
       await loadNotifications();
+      await loadCalendarEvents();
       await loadWebhooks();
       await loadConnectors();
     } catch (caught) {
@@ -335,6 +346,17 @@ export function DentLinkNotesApp(): ReactElement {
     }
   }
 
+  async function connectGoogleCalendar(accountId?: EntityId): Promise<void> {
+    try {
+      setError(null);
+      const returnTo = window.location.origin + window.location.pathname;
+      const response = await client.startGoogleCalendarOAuth({ returnTo, accountId });
+      window.location.assign(response.authorizationUrl);
+    } catch (caught) {
+      handleFailure(caught);
+    }
+  }
+
   async function syncGmail(account: ConnectorAccount): Promise<void> {
     try {
       setError(null);
@@ -357,6 +379,40 @@ export function DentLinkNotesApp(): ReactElement {
     }
   }
 
+  async function syncGoogleCalendar(account: ConnectorAccount): Promise<void> {
+    try {
+      setError(null);
+      const result = await client.syncGoogleCalendarAccount(account.id);
+      await Promise.all([loadConnectors(), loadCalendarEvents()]);
+      if (result.upsertedEvents > 0) setView("agenda");
+    } catch (caught) {
+      handleFailure(caught);
+      await loadConnectors().catch(() => undefined);
+    }
+  }
+
+  async function disconnectGoogleCalendar(account: ConnectorAccount): Promise<void> {
+    try {
+      setError(null);
+      await client.disconnectGoogleCalendarAccount(account.id);
+      await Promise.all([loadConnectors(), loadCalendarEvents()]);
+    } catch (caught) {
+      handleFailure(caught);
+    }
+  }
+
+  async function dismissCalendarEvent(event: CalendarEvent): Promise<void> {
+    const previous = calendarEvents;
+    setCalendarEvents(calendarEvents.filter((item) => item.id !== event.id));
+    try {
+      await client.updateCalendarEvent(event.id, event.version, { status: "dismissed" });
+      await loadCalendarEvents();
+    } catch (caught) {
+      setCalendarEvents(previous);
+      handleFailure(caught);
+    }
+  }
+
   async function logout(): Promise<void> {
     try {
       await client.logout();
@@ -367,6 +423,7 @@ export function DentLinkNotesApp(): ReactElement {
       setAuth(null);
       setNotesList(initialList);
       setNotifications([]);
+      setCalendarEvents([]);
       setWebhooks([]);
       setConnectorAccounts([]);
       setLastWebhookSecret(null);
@@ -459,6 +516,9 @@ export function DentLinkNotesApp(): ReactElement {
           >
             Notifications
           </button>
+          <button className={view === "agenda" ? "selected" : ""} onClick={() => setView("agenda")}>
+            Agenda
+          </button>
           <button className={view === "notes" ? "selected" : ""} onClick={() => setView("notes")}>
             Notes
           </button>
@@ -491,6 +551,16 @@ export function DentLinkNotesApp(): ReactElement {
           onDeleteNotification={deleteNotification}
           onRefreshNotifications={loadNotifications}
           onReorderNotifications={reorderNotifications}
+        />
+      ) : null}
+      {view === "agenda" ? (
+        <AgendaView
+          events={calendarEvents}
+          accounts={connectorAccounts}
+          onRefresh={loadCalendarEvents}
+          onConnectGoogleCalendar={connectGoogleCalendar}
+          onSyncGoogleCalendar={syncGoogleCalendar}
+          onDismissEvent={dismissCalendarEvent}
         />
       ) : null}
       {view === "notes" ? (
@@ -544,6 +614,10 @@ export function DentLinkNotesApp(): ReactElement {
           onReconnectGmail={(account) => connectGmail(account.id)}
           onSyncGmail={syncGmail}
           onDisconnectGmail={disconnectGmail}
+          onConnectGoogleCalendar={connectGoogleCalendar}
+          onReconnectGoogleCalendar={(account) => connectGoogleCalendar(account.id)}
+          onSyncGoogleCalendar={syncGoogleCalendar}
+          onDisconnectGoogleCalendar={disconnectGoogleCalendar}
           onRefreshConnectors={refreshConnectorNotificationState}
         />
       ) : null}
@@ -797,22 +871,96 @@ function WebhooksView(props: {
   );
 }
 
+function AgendaView(props: {
+  events: CalendarEvent[];
+  accounts: ConnectorAccount[];
+  onRefresh: () => Promise<void>;
+  onConnectGoogleCalendar: () => Promise<void>;
+  onSyncGoogleCalendar: (account: ConnectorAccount) => Promise<void>;
+  onDismissEvent: (event: CalendarEvent) => Promise<void>;
+}): ReactElement {
+  const calendarAccounts = props.accounts.filter(
+    (account) => account.connectorKey === "google-calendar"
+  );
+  const connectedAccounts = calendarAccounts.filter((account) => account.status === "connected");
+  return (
+    <main className="agenda-shell">
+      <div className="note-toolbar">
+        <button onClick={() => void props.onRefresh()}>Refresh</button>
+        <button onClick={() => void props.onConnectGoogleCalendar()}>
+          Connect Google Calendar
+        </button>
+        {connectedAccounts.map((account) => (
+          <button key={account.id} onClick={() => void props.onSyncGoogleCalendar(account)}>
+            Sync Now
+          </button>
+        ))}
+      </div>
+      {calendarAccounts.length === 0 ? <p>No Google Calendar account connected.</p> : null}
+      {calendarAccounts.some((account) => account.errorMessage) ? (
+        <p role="alert">{calendarAccounts.find((account) => account.errorMessage)?.errorMessage}</p>
+      ) : null}
+      {calendarAccounts.length > 0 && props.events.length === 0 ? <p>No upcoming events.</p> : null}
+      <div className="note-list">
+        {props.events.map((event) => (
+          <article key={event.id} className={`notification-card calendar-event ${event.status}`}>
+            <div className="note-card-top">
+              <strong>{event.title}</strong>
+              <span>
+                {event.provider === "google-calendar" ? "Google Calendar" : event.provider}
+              </span>
+              {event.allDay ? <span>All day</span> : null}
+            </div>
+            <div className="calendar-time">
+              <time dateTime={event.startAt}>{formatEventStart(event)}</time>
+              <span>{event.allDay ? formatAllDayRange(event) : formatEventEnd(event)}</span>
+            </div>
+            {event.location ? <p>{event.location}</p> : null}
+            <span>{event.calendarSummary}</span>
+            <div className="note-order">
+              {event.sourceUrl ? (
+                <a href={event.sourceUrl} target="_blank" rel="noreferrer">
+                  Open in Google Calendar
+                </a>
+              ) : null}
+              <button type="button" onClick={() => void props.onDismissEvent(event)}>
+                Dismiss
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
+    </main>
+  );
+}
+
 function ConnectorsView(props: {
   accounts: ConnectorAccount[];
   onConnectGmail: () => Promise<void>;
   onReconnectGmail: (account: ConnectorAccount) => Promise<void>;
   onSyncGmail: (account: ConnectorAccount) => Promise<void>;
   onDisconnectGmail: (account: ConnectorAccount) => Promise<void>;
+  onConnectGoogleCalendar: () => Promise<void>;
+  onReconnectGoogleCalendar: (account: ConnectorAccount) => Promise<void>;
+  onSyncGoogleCalendar: (account: ConnectorAccount) => Promise<void>;
+  onDisconnectGoogleCalendar: (account: ConnectorAccount) => Promise<void>;
   onRefreshConnectors: () => Promise<void>;
 }): ReactElement {
   const gmailAccounts = props.accounts.filter((account) => account.connectorKey === "gmail");
+  const calendarAccounts = props.accounts.filter(
+    (account) => account.connectorKey === "google-calendar"
+  );
   return (
     <main className="webhooks-shell">
       <div className="note-toolbar">
         <button onClick={() => void props.onRefreshConnectors()}>Refresh</button>
         <button onClick={() => void props.onConnectGmail()}>Connect Gmail</button>
+        <button onClick={() => void props.onConnectGoogleCalendar()}>
+          Connect Google Calendar
+        </button>
       </div>
       {gmailAccounts.length === 0 ? <p>No Gmail accounts connected.</p> : null}
+      {calendarAccounts.length === 0 ? <p>No Google Calendar accounts connected.</p> : null}
       <div className="note-list">
         {gmailAccounts.map((account) => (
           <article key={account.id} className="notification-card">
@@ -838,9 +986,47 @@ function ConnectorsView(props: {
             </div>
           </article>
         ))}
+        {calendarAccounts.map((account) => (
+          <article key={account.id} className="notification-card">
+            <strong>{account.displayName}</strong>
+            <span>Status: {account.status}</span>
+            <span>Health: {account.healthStatus}</span>
+            <span>Sync: {account.syncStatus}</span>
+            <span>
+              Last sync:{" "}
+              {account.lastSyncAt ? new Date(account.lastSyncAt).toLocaleString() : "Never"}
+            </span>
+            {account.errorMessage ? <p>{account.errorMessage}</p> : null}
+            <div className="note-order">
+              <button type="button" onClick={() => void props.onSyncGoogleCalendar(account)}>
+                Sync Now
+              </button>
+              <button type="button" onClick={() => void props.onReconnectGoogleCalendar(account)}>
+                Reconnect
+              </button>
+              <button type="button" onClick={() => void props.onDisconnectGoogleCalendar(account)}>
+                Disconnect
+              </button>
+            </div>
+          </article>
+        ))}
       </div>
     </main>
   );
+}
+
+function formatEventStart(event: CalendarEvent): string {
+  if (event.allDay && event.startDate) return event.startDate;
+  return new Date(event.startAt).toLocaleString();
+}
+
+function formatEventEnd(event: CalendarEvent): string {
+  return new Date(event.endAt).toLocaleTimeString();
+}
+
+function formatAllDayRange(event: CalendarEvent): string {
+  if (!event.endDate || event.endDate === event.startDate) return "All day";
+  return `through ${event.endDate}`;
 }
 
 function move<T>(items: T[], from: number, to: number): T[] {

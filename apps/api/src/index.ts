@@ -18,9 +18,19 @@ import {
   type GmailRuntimeEnv
 } from "./gmail";
 import {
+  completeGoogleCalendarOAuth,
+  disconnectGoogleCalendarAccount,
+  googleCalendarConnectorDefinition,
+  startGoogleCalendarOAuth,
+  syncGoogleCalendarAccount,
+  type GoogleCalendarApiClient,
+  type GoogleCalendarRuntimeEnv
+} from "./google-calendar";
+import {
   parseConnectorAccountInput,
   parseConnectorAccountPatch,
   parseConnectorSourceRecordInput,
+  parseCalendarEventPatch,
   parseCredentials,
   parseConflictResolution,
   parseCursor,
@@ -42,18 +52,21 @@ import type { ConnectorDefinition } from "@dentlink/connector-sdk";
 import type { AuthSession, NoteConflict } from "@dentlink/item-model";
 
 export type ApiEnv = GmailRuntimeEnv & {
-  store?: DentLinkStore;
-  DB?: D1DatabaseLike;
-  DENTLINK_ENV?: string;
-  ALLOWED_ORIGINS?: string;
-  DENTLINK_BUILD_ID?: string;
-  gmailClient?: GmailApiClient;
-};
+  googleCalendarClient?: GoogleCalendarApiClient;
+} & GoogleCalendarRuntimeEnv & {
+    store?: DentLinkStore;
+    DB?: D1DatabaseLike;
+    DENTLINK_ENV?: string;
+    ALLOWED_ORIGINS?: string;
+    DENTLINK_BUILD_ID?: string;
+    gmailClient?: GmailApiClient;
+  };
 
 const defaultStore = new MemoryDentLinkStore();
 
 const connectorCatalog: ConnectorDefinition[] = [
   gmailConnectorDefinition(),
+  googleCalendarConnectorDefinition(),
   {
     key: "generic-email",
     name: "Generic email connector",
@@ -188,7 +201,24 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
         return json({ account: result.account });
       }
       const redirectTo = result.returnTo
-        ? withOAuthResult(result.returnTo, "connected")
+        ? withOAuthResult(result.returnTo, "gmail", "connected")
+        : `${url.origin}/v1/connectors/accounts`;
+      return new Response(null, { status: 303, headers: { Location: redirectTo } });
+    }
+    if (method === "GET" && path === "/v1/connectors/google-calendar/callback") {
+      const result = await completeGoogleCalendarOAuth(store, env, url, now);
+      const sync = await syncGoogleCalendarAccount(
+        store,
+        result.account.userId,
+        result.account.id,
+        env,
+        now
+      );
+      if (request.headers.get("Accept")?.includes("application/json")) {
+        return json({ account: sync.account, initialSync: sync });
+      }
+      const redirectTo = result.returnTo
+        ? withOAuthResult(result.returnTo, "calendar", "connected")
         : `${url.origin}/v1/connectors/accounts`;
       return new Response(null, { status: 303, headers: { Location: redirectTo } });
     }
@@ -263,6 +293,9 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     if (method === "POST" && path === "/v1/connectors/gmail/start") {
       return json(await startGmailOAuth(store, auth.user.id, env, url, now), 201);
     }
+    if (method === "POST" && path === "/v1/connectors/google-calendar/start") {
+      return json(await startGoogleCalendarOAuth(store, auth.user.id, env, url, now), 201);
+    }
     if (method === "GET" && path === "/v1/connectors/accounts") {
       return json(await store.listConnectorAccounts(auth.user.id));
     }
@@ -273,6 +306,13 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
       }
       if (input.connectorKey === "gmail") {
         return error("gmail_oauth_required", "Use the Gmail OAuth flow to connect Gmail", 400);
+      }
+      if (input.connectorKey === "google-calendar") {
+        return error(
+          "google_calendar_oauth_required",
+          "Use the Google Calendar OAuth flow to connect Google Calendar",
+          400
+        );
       }
       return json(await store.createConnectorAccount(auth.user.id, input, now), 201);
     }
@@ -328,6 +368,49 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     if (gmailDisconnectMatch && method === "POST") {
       return json(
         await disconnectGmailAccount(store, auth.user.id, gmailDisconnectMatch[1] ?? "", now)
+      );
+    }
+    const googleCalendarSyncMatch = path.match(
+      /^\/v1\/connectors\/google-calendar\/([^/]+)\/sync$/
+    );
+    if (googleCalendarSyncMatch && method === "POST") {
+      return json(
+        await syncGoogleCalendarAccount(
+          store,
+          auth.user.id,
+          googleCalendarSyncMatch[1] ?? "",
+          env,
+          now
+        )
+      );
+    }
+    const googleCalendarDisconnectMatch = path.match(
+      /^\/v1\/connectors\/google-calendar\/([^/]+)\/disconnect$/
+    );
+    if (googleCalendarDisconnectMatch && method === "POST") {
+      return json(
+        await disconnectGoogleCalendarAccount(
+          store,
+          auth.user.id,
+          googleCalendarDisconnectMatch[1] ?? "",
+          now
+        )
+      );
+    }
+    if (method === "GET" && path === "/v1/calendar/events") {
+      return json(await store.listCalendarEvents(auth.user.id, now));
+    }
+    const calendarEventMatch = path.match(/^\/v1\/calendar\/events\/([^/]+)$/);
+    if (calendarEventMatch && method === "PATCH") {
+      const { expectedVersion, patch } = parseCalendarEventPatch(await readJson(request));
+      return json(
+        await store.updateCalendarEvent(
+          auth.user.id,
+          calendarEventMatch[1] ?? "",
+          expectedVersion,
+          patch,
+          now
+        )
       );
     }
     if (method === "GET" && path === "/v1/notifications") {
@@ -448,7 +531,7 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
   } catch (caught) {
     if (caught instanceof ValidationError) return error(caught.code, caught.message, 400);
     if (caught instanceof GmailConfigError)
-      return error("gmail_not_configured", caught.message, 503);
+      return error("google_not_configured", caught.message, 503);
     if (caught instanceof StoreError) {
       const status =
         caught.code === "not_found"
@@ -511,9 +594,13 @@ function webhookIngestUrl(url: URL, slug: string): string {
   return `${url.origin}/v1/ingest/webhooks/${slug}`;
 }
 
-function withOAuthResult(returnTo: string, result: "connected" | "error"): string {
+function withOAuthResult(
+  returnTo: string,
+  provider: "gmail" | "calendar",
+  result: "connected" | "error"
+): string {
   const url = new URL(returnTo);
-  url.searchParams.set("gmail", result);
+  url.searchParams.set(provider, result);
   return url.toString();
 }
 

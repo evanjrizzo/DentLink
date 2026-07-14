@@ -34,6 +34,15 @@ export const connectorCatalog = [
     version: 1
   },
   {
+    key: "google-calendar",
+    name: "Google Calendar",
+    kind: "calendar",
+    authType: "oauth2",
+    capabilities: ["poll", "normalize_calendar"],
+    settings: [],
+    version: 1
+  },
+  {
     key: "generic-email",
     name: "Generic Email Connector",
     kind: "email",

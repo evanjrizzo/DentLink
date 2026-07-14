@@ -263,6 +263,24 @@ async function main() {
     gmailStart
   );
 
+  const calendarStart = await request(
+    `/v1/connectors/google-calendar/start?returnTo=${encodeURIComponent("https://dentlink-web-preview.pages.dev/agenda")}`,
+    {
+      method: "POST",
+      headers: auth(tokenA)
+    }
+  );
+  assert(
+    calendarStart.status === 201 || calendarStart.status === 503,
+    "google calendar oauth start did not return a controlled response",
+    calendarStart
+  );
+  record("google-calendar-oauth");
+
+  const agenda = await request("/v1/calendar/events", { headers: auth(tokenA) });
+  assert(agenda.status === 200 && Array.isArray(agenda.json?.events), "agenda list failed", agenda);
+  record("agenda");
+
   const rejectedProvider = await request("/v1/connectors/accounts", {
     method: "POST",
     headers: auth(tokenA),
@@ -272,6 +290,16 @@ async function main() {
     rejectedProvider.status === 400,
     "provider-specific connector was unexpectedly accepted",
     rejectedProvider
+  );
+  const rejectedCalendarProvider = await request("/v1/connectors/accounts", {
+    method: "POST",
+    headers: auth(tokenA),
+    body: { connectorKey: "google-calendar", displayName: "Should use OAuth" }
+  });
+  assert(
+    rejectedCalendarProvider.status === 400,
+    "google calendar metadata bypass was unexpectedly accepted",
+    rejectedCalendarProvider
   );
 
   const connectorAccount = await request("/v1/connectors/accounts", {

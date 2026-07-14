@@ -1,8 +1,8 @@
 # Deployment
 
 DentLink targets Cloudflare Workers with D1. The runtime baseline is shared by the Milestone 1 Notes
-slice, the Milestone 2 Notifications/webhook slice, the Milestone 3 connector framework, and the
-Milestone 3.1 Gmail connector.
+slice, the Milestone 2 Notifications/webhook slice, the Milestone 3 connector framework, the
+Milestone 3.1 Gmail connector, and the Milestone 4 Google Calendar connector.
 
 ## Runtime
 
@@ -115,9 +115,11 @@ Non-secret Worker variables:
 - `DENTLINK_BUILD_ID`: safe build identifier.
 - `GOOGLE_REDIRECT_URI`: OAuth callback URL, for example
   `https://dentlink-api-preview.evanjrizzo.workers.dev/v1/connectors/gmail/callback`.
-- `DENTLINK_WEB_ORIGIN`: exact web origin allowed for Gmail OAuth return redirects.
+- `GOOGLE_CALENDAR_REDIRECT_URI`: OAuth callback URL for Google Calendar, for example
+  `https://dentlink-api-preview.evanjrizzo.workers.dev/v1/connectors/google-calendar/callback`.
+- `DENTLINK_WEB_ORIGIN`: exact web origin allowed for Google connector OAuth return redirects.
 
-Worker secrets for Gmail:
+Worker secrets for Google connectors:
 
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
@@ -165,6 +167,38 @@ https://www.googleapis.com/auth/gmail.metadata
 Disconnect removes encrypted credentials and pauses the account metadata. Reconnect starts OAuth
 with the account ID and replaces the stored encrypted refresh token.
 
+## Google Calendar OAuth Setup
+
+Use the same Google Cloud project or OAuth client if it includes both authorized redirect URIs.
+Google Calendar is read-only in Milestone 4.
+
+1. Enable the Google Calendar API in the Google Cloud project.
+2. Add the authorized redirect URI:
+
+   ```text
+   https://dentlink-api-preview.evanjrizzo.workers.dev/v1/connectors/google-calendar/callback
+   ```
+
+3. Store or update the same Google OAuth secrets used by Gmail:
+
+   ```bash
+   pnpm exec wrangler secret put GOOGLE_CLIENT_ID --env preview
+   pnpm exec wrangler secret put GOOGLE_CLIENT_SECRET --env preview
+   pnpm exec wrangler secret put GMAIL_CREDENTIAL_ENCRYPTION_KEY --env preview
+   ```
+
+4. Set `GOOGLE_CALENDAR_REDIRECT_URI` and `DENTLINK_WEB_ORIGIN` for preview before deploying.
+
+The Google Calendar connector requests only:
+
+```text
+https://www.googleapis.com/auth/calendar.readonly
+```
+
+Disconnect removes encrypted credentials and pauses the account metadata. Reconnect starts OAuth
+with the account ID and replaces the stored encrypted refresh token. DentLink does not request write
+scopes and cannot create, edit, delete, RSVP to, or manage attendees on Google Calendar events.
+
 ## Local Development
 
 ```bash
@@ -189,8 +223,9 @@ pnpm db:migrate:production
 
 Production migrations are explicit and manual. Do not add destructive production reset scripts.
 Milestone 2 adds `0002_notifications_webhooks.sql`; Milestone 3 adds `0003_connector_framework.sql`;
-Milestone 3.1 adds `0004_gmail_connector.sql`. Apply migrations to preview before deploying code
-that uses the corresponding sync change types.
+Milestone 3.1 adds `0004_gmail_connector.sql`; Milestone 4 adds
+`0005_google_calendar_connector.sql`. Apply migrations to preview before deploying code that uses
+the corresponding sync change types.
 
 ## Workflows
 
@@ -228,9 +263,9 @@ DENTLINK_SMOKE_BASE_URL=http://127.0.0.1:8787 pnpm smoke:api
 ```
 
 The script creates temporary users, notes, notifications, webhooks, and generic connector records
-through the public API. It also checks that Gmail OAuth start returns a controlled response when
-Google secrets are absent. It does not print bearer tokens, passwords, webhook secrets, OAuth state
-values, or connector credential references.
+through the public API. It also checks that Gmail and Google Calendar OAuth start return controlled
+responses when Google secrets are absent. It does not print bearer tokens, passwords, webhook
+secrets, OAuth state values, or connector credential references.
 
 ## Browser Verification
 

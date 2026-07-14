@@ -172,31 +172,54 @@ Out of scope and still not implemented: Google Calendar, Microsoft Graph, Outloo
 summaries, attachments, email sending, notification ranking changes, widgets, desktop features,
 Android, and push notifications.
 
-## Milestone 4: Calendar foundation and ICS
+## Milestone 4: Google Calendar connector
 
-Implement calendar data model, DentLink-local events, ICS import/export, agenda/grid views,
-filtering, annotations, and agenda-only dismissal.
+Status: implemented.
 
-## Milestone 5: Microsoft and IMAP
+Implemented scope:
+
+- Google Calendar OAuth authorization start and callback endpoints using server-side CSRF state
+  storage.
+- Google Calendar account linking, reconnect, manual sync, status refresh, and disconnect using the
+  connector account framework.
+- Encrypted refresh-token storage in the shared connector credential table.
+- Primary calendar discovery, read-only event synchronization, incremental sync tokens,
+  invalid-token recovery, pagination handling, idempotent provider-event upsert, and connector
+  health/status transitions.
+- Normalized agenda events for timed, all-day, cancelled, and recurring instances as returned by
+  Google Calendar.
+- Minimal Agenda UI for chronological events, all-day indicator, time range, location, provider
+  source link, Refresh, Sync Now, and local dismissal.
+
+Out of scope and still not implemented: ICS import/export, local event creation, Google event
+editing, RSVP, attendee management, Microsoft Graph, Outlook, IMAP, AI summaries, push
+notifications, widgets, Tauri, and Android.
+
+## Milestone 5: Calendar foundation and ICS
+
+Implement DentLink-local calendar events, ICS import/export, calendar annotations, source filters,
+and richer calendar views without provider writeback.
+
+## Milestone 6: Microsoft and IMAP
 
 Add Microsoft 365 Mail, Microsoft 365 Calendar, and IMAP connectors with provider-specific
 capability handling behind the connector abstraction.
 
-## Milestone 6: Ranking and optional AI
+## Milestone 7: Ranking and optional AI
 
 Implement richer explainable ranking, feedback loops, ranking explanations, optional OpenAI provider
 integration, usage accounting, provider-neutral AI interface, and approved task suggestions.
 
-## Milestone 7: Tauri desktop and local agent
+## Milestone 8: Tauri desktop and local agent
 
 Build the desktop client around shared UI, preserve touchscreen/fullscreen workflows, and add
 trusted local capability layers for desktop-only actions.
 
-## Milestone 8: Android app and native widget
+## Milestone 9: Android app and native widget
 
 Build Android surfaces, widget views, quick note, done, refresh, and source opening where possible.
 
-## Milestone 9: Compatibility testing and migration
+## Milestone 10: Compatibility testing and migration
 
 Validate behavior against previous reference systems, test multi-client sync, harden migration
 paths, and prepare operational runbooks.

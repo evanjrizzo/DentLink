@@ -7,15 +7,16 @@ describe("@dentlink/connector-sdk", () => {
     expect(connectorSdkPackage.name).toBe("@dentlink/connector-sdk");
   });
 
-  it("exposes Gmail as the first provider without adding other providers", () => {
+  it("exposes Gmail and Google Calendar without adding out-of-scope providers", () => {
     expect(connectorCatalog.map((definition) => definition.key)).toEqual([
       "gmail",
+      "google-calendar",
       "generic-email",
       "generic-calendar"
     ]);
     expect(connectorByKey("gmail")?.capabilities).toContain("normalize_notifications");
+    expect(connectorByKey("google-calendar")?.capabilities).toContain("normalize_calendar");
     expect(connectorByKey("generic-email")?.capabilities).toContain("normalize_notifications");
-    expect(connectorByKey("google-calendar")).toBeNull();
     expect(connectorByKey("outlook")).toBeNull();
     expect(connectorByKey("imap")).toBeNull();
   });

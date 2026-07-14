@@ -1,5 +1,7 @@
 import type {
   ConflictResolution,
+  CalendarEvent,
+  CalendarEventPatch,
   ConnectorAccount,
   ConnectorAccountInput,
   ConnectorAccountPatch,
@@ -151,6 +153,22 @@ export interface DentLinkStore {
     kind: ConnectorCredentialKind
   ): Promise<ConnectorCredential | null>;
   deleteConnectorCredentials(userId: EntityId, accountId: EntityId): Promise<void>;
+  listCalendarEvents(userId: EntityId, now: string): Promise<{ events: CalendarEvent[] }>;
+  upsertCalendarEvent(
+    userId: EntityId,
+    input: Omit<
+      CalendarEvent,
+      "id" | "userId" | "version" | "createdAt" | "updatedAt" | "dismissedAt"
+    >,
+    now: string
+  ): Promise<{ event: CalendarEvent; created: boolean }>;
+  updateCalendarEvent(
+    userId: EntityId,
+    eventId: EntityId,
+    expectedVersion: number,
+    patch: CalendarEventPatch,
+    now: string
+  ): Promise<CalendarEvent>;
   listNotifications(userId: EntityId): Promise<{ notifications: Notification[] }>;
   createNotification(
     userId: EntityId,
@@ -218,6 +236,7 @@ export class MemoryDentLinkStore implements DentLinkStore {
   private connectorSourceRecords = new Map<EntityId, ConnectorSourceRecord>();
   private connectorOAuthStates = new Map<string, ConnectorOAuthState>();
   private connectorCredentials = new Map<EntityId, ConnectorCredential>();
+  private calendarEvents = new Map<EntityId, CalendarEvent>();
   private notifications = new Map<EntityId, Notification>();
   private webhooks = new Map<EntityId, WebhookEndpoint & { secretHash: string }>();
   private webhookDeliveries: Array<{
@@ -731,6 +750,93 @@ export class MemoryDentLinkStore implements DentLinkStore {
     }
   }
 
+  async listCalendarEvents(userId: EntityId, now: string): Promise<{ events: CalendarEvent[] }> {
+    return {
+      events: [...this.calendarEvents.values()]
+        .filter(
+          (event) =>
+            event.userId === userId &&
+            event.status !== "deleted" &&
+            event.status !== "dismissed" &&
+            event.endAt >= now
+        )
+        .sort(compareCalendarEvents)
+        .map(copyCalendarEvent)
+    };
+  }
+
+  async upsertCalendarEvent(
+    userId: EntityId,
+    input: Omit<
+      CalendarEvent,
+      "id" | "userId" | "version" | "createdAt" | "updatedAt" | "dismissedAt"
+    >,
+    now: string
+  ): Promise<{ event: CalendarEvent; created: boolean }> {
+    const account = await this.getConnectorAccount(userId, input.connectorAccountId);
+    if (!account) throw new StoreError("not_found", "Connector account not found");
+    const existing = [...this.calendarEvents.values()].find(
+      (event) =>
+        event.userId === userId &&
+        event.connectorAccountId === input.connectorAccountId &&
+        event.providerEventId === input.providerEventId
+    );
+    const event: CalendarEvent = {
+      ...(existing ?? {
+        id: this.nextId("calendar"),
+        userId,
+        createdAt: now,
+        version: 0,
+        dismissedAt: null
+      }),
+      ...input,
+      status:
+        input.status === "cancelled" || existing?.status !== "dismissed"
+          ? input.status
+          : existing.status,
+      version: (existing?.version ?? 0) + 1,
+      updatedAt: now
+    };
+    this.calendarEvents.set(event.id, event);
+    this.recordChange(
+      event.status === "deleted"
+        ? { type: "calendar_event", op: "delete", id: event.id, userId, cursor: "0" }
+        : { type: "calendar_event", op: "upsert", event, cursor: "0" }
+    );
+    return { event: copyCalendarEvent(event), created: !existing };
+  }
+
+  async updateCalendarEvent(
+    userId: EntityId,
+    eventId: EntityId,
+    expectedVersion: number,
+    patch: CalendarEventPatch,
+    now: string
+  ): Promise<CalendarEvent> {
+    const existing = this.calendarEvents.get(eventId);
+    if (!existing || existing.userId !== userId || existing.status === "deleted") {
+      throw new StoreError("not_found", "Calendar event not found");
+    }
+    if (existing.version !== expectedVersion) {
+      throw new StoreError("version_mismatch", "Calendar event changed on the server");
+    }
+    const next: CalendarEvent = {
+      ...existing,
+      status: patch.status ?? existing.status,
+      version: existing.version + 1,
+      updatedAt: now,
+      dismissedAt:
+        patch.status === "dismissed" ? now : patch.status === "active" ? null : existing.dismissedAt
+    };
+    this.calendarEvents.set(next.id, next);
+    this.recordChange(
+      next.status === "deleted"
+        ? { type: "calendar_event", op: "delete", id: next.id, userId, cursor: "0" }
+        : { type: "calendar_event", op: "upsert", event: next, cursor: "0" }
+    );
+    return copyCalendarEvent(next);
+  }
+
   async listNotifications(userId: EntityId): Promise<{ notifications: Notification[] }> {
     return {
       notifications: [...this.notifications.values()]
@@ -1190,6 +1296,10 @@ function compareNotifications(left: Notification, right: Notification): number {
   );
 }
 
+function compareCalendarEvents(left: CalendarEvent, right: CalendarEvent): number {
+  return left.startAt.localeCompare(right.startAt) || left.title.localeCompare(right.title);
+}
+
 function compareConnectorAccounts(left: ConnectorAccount, right: ConnectorAccount): number {
   return left.displayName.localeCompare(right.displayName);
 }
@@ -1227,6 +1337,9 @@ function changeBelongsTo(change: SyncChange, userId: EntityId): boolean {
   if (change.type === "notification" && change.op === "upsert")
     return change.notification.userId === userId;
   if (change.type === "notification" && change.op === "delete") return change.userId === userId;
+  if (change.type === "calendar_event" && change.op === "upsert")
+    return change.event.userId === userId;
+  if (change.type === "calendar_event" && change.op === "delete") return change.userId === userId;
   if (change.type === "webhook" && change.op === "upsert") return change.webhook.userId === userId;
   if (change.type === "webhook" && change.op === "delete") return change.userId === userId;
   if (change.type === "connector_account" && change.op === "upsert")
@@ -1245,4 +1358,8 @@ function copyConnectorSourceRecord(record: ConnectorSourceRecord): ConnectorSour
       unknown
     >
   };
+}
+
+function copyCalendarEvent(event: CalendarEvent): CalendarEvent {
+  return { ...event };
 }

@@ -89,6 +89,10 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
 - Milestone 3.1 Gmail synchronization uses the metadata-only Gmail scope, stores normalized headers
   and identifiers, and does not download attachments or message bodies. Gmail-created notifications
   use sender, subject, unread state, received metadata, connector reference, and a Gmail deep link.
+- Milestone 4 Google Calendar synchronization uses the read-only Calendar scope, stores normalized
+  event metadata and provider identifiers, and does not create, edit, delete, RSVP to, or manage
+  attendees on Google Calendar events. Calendar refresh tokens use the same AES-GCM encrypted
+  connector credential storage as Gmail. Agenda dismissal is DentLink-local state only.
 
 ## Local agents and platform actions
 
