@@ -1398,8 +1398,8 @@ function NotificationDetails(props: {
     >
       <div className="sheet-header">
         <h2>Notification</h2>
-        <button type="button" onClick={props.onClose}>
-          Close
+        <button type="button" aria-label="Dismiss notification details" onClick={props.onClose}>
+          Done
         </button>
       </div>
       <div className="detail-grid">
@@ -1477,6 +1477,11 @@ function NotificationDetails(props: {
           </button>
         </div>
       ) : null}
+      <div className="notification-detail-actions">
+        <button type="button" onClick={props.onClose}>
+          Close
+        </button>
+      </div>
     </section>
   );
 }
