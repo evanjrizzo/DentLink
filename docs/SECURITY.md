@@ -112,6 +112,14 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   Notification creation. Rule evaluation uses normalized metadata only and does not download or
   expose raw message bodies. Scheduled Gmail sync runs under Worker cron with stored encrypted
   credentials and the same user-scoped connector account checks as manual Sync Now.
+- Milestone 7 Slice 4 normalizes bounded email text for optional summarization only after
+  deterministic rules have allowed notification creation. Suppressed messages do not call OpenAI.
+  DentLink never sends OAuth data, credentials, full raw MIME, attachment binary content, or hidden
+  headers to AI providers. Email bodies are not written to normal logs, diagnostics exports, or the
+  browser diagnostics surface. AI provider keys must be configured only as Worker secrets; the
+  `/v1/ai/settings` response returns enabled/model/usage state but never returns provider keys.
+  Invalid, timed-out, or rate-limited AI responses are stored as safe AI failure metadata while the
+  notification remains visible with deterministic fallback content.
 - Milestone 4 Google Calendar synchronization uses the read-only Calendar scope, stores normalized
   event metadata and provider identifiers, and does not create, edit, delete, RSVP to, or manage
   attendees on Google Calendar events. Calendar refresh tokens use the same AES-GCM encrypted
@@ -140,6 +148,9 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   override explicit user rules, or produce unbounded ranking changes.
 - Record provider, model, prompt or rule version, timestamp, confidence where available, source
   item, and usage metadata.
+- Email AI is disabled unless `DENTLINK_AI_ENABLED=true` and `OPENAI_API_KEY` are configured
+  server-side. Model and input length are configurable with `DENTLINK_AI_MODEL` and
+  `DENTLINK_AI_MAX_INPUT_CHARS`.
 
 ## Data minimization
 

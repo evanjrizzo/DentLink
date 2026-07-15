@@ -16,6 +16,7 @@ import type {
   ConnectorSourceRecord,
   ConnectorSourceRecordInput,
   CurrentSession,
+  EmailAiSettings,
   EntityId,
   Folder,
   Notification,
@@ -240,6 +241,23 @@ export interface DentLinkStore {
     notificationOrders: Array<{ id: EntityId; expectedVersion: number; globalOrder: number }>,
     now: string
   ): Promise<Notification[]>;
+  recordAiUsage(
+    userId: EntityId,
+    input: {
+      provider: "openai";
+      model: string;
+      inputChars: number;
+      outputTokens?: number | null;
+      failed: boolean;
+      estimatedCostMicros?: number | null;
+    },
+    now: string
+  ): Promise<void>;
+  getAiUsageSettings(
+    userId: EntityId,
+    config: Pick<EmailAiSettings, "enabled" | "model" | "maxInputChars" | "estimatedCostThisMonth">,
+    now: string
+  ): Promise<EmailAiSettings>;
   createWebhookEndpoint(
     userId: EntityId,
     input: WebhookEndpointInput,
@@ -292,6 +310,23 @@ export class MemoryDentLinkStore implements DentLinkStore {
   private calendarEvents = new Map<EntityId, CalendarEvent>();
   private calendarAnnotations = new Map<EntityId, CalendarEventAnnotation>();
   private notifications = new Map<EntityId, Notification>();
+  private aiUsage = new Map<
+    string,
+    {
+      id: EntityId;
+      userId: EntityId;
+      usageDate: string;
+      provider: "openai";
+      model: string;
+      requests: number;
+      inputChars: number;
+      outputTokens: number;
+      failedRequests: number;
+      estimatedCostMicros: number | null;
+      createdAt: string;
+      updatedAt: string;
+    }
+  >();
   private webhooks = new Map<EntityId, WebhookEndpoint & { secretHash: string }>();
   private webhookDeliveries: Array<{
     id: EntityId;
@@ -1096,7 +1131,10 @@ export class MemoryDentLinkStore implements DentLinkStore {
       createdAt: now,
       updatedAt: now,
       completedAt: null,
-      dismissedAt: null
+      dismissedAt: null,
+      email: input.email ?? null,
+      rule: input.rule ?? null,
+      ai: input.ai ?? defaultNotificationAi()
     };
     this.notifications.set(notification.id, notification);
     this.recordChange({
@@ -1135,7 +1173,14 @@ export class MemoryDentLinkStore implements DentLinkStore {
       completedAt:
         patch.status === "done" ? now : patch.status === "active" ? null : existing.completedAt,
       dismissedAt:
-        patch.status === "dismissed" ? now : patch.status === "active" ? null : existing.dismissedAt
+        patch.status === "dismissed"
+          ? now
+          : patch.status === "active"
+            ? null
+            : existing.dismissedAt,
+      email: patch.email === undefined ? existing.email : patch.email,
+      rule: patch.rule === undefined ? existing.rule : patch.rule,
+      ai: patch.ai === undefined ? existing.ai : patch.ai
     };
     this.notifications.set(next.id, next);
     this.recordChange(
@@ -1171,6 +1216,70 @@ export class MemoryDentLinkStore implements DentLinkStore {
       updated.push({ ...next });
     }
     return updated.sort(compareNotifications);
+  }
+
+  async recordAiUsage(
+    userId: EntityId,
+    input: {
+      provider: "openai";
+      model: string;
+      inputChars: number;
+      outputTokens?: number | null;
+      failed: boolean;
+      estimatedCostMicros?: number | null;
+    },
+    now: string
+  ): Promise<void> {
+    const usageDate = now.slice(0, 10);
+    const key = `${userId}:${usageDate}:${input.provider}:${input.model}`;
+    const existing = this.aiUsage.get(key);
+    this.aiUsage.set(key, {
+      ...(existing ?? {
+        id: this.nextId("ai-usage"),
+        userId,
+        usageDate,
+        provider: input.provider,
+        model: input.model,
+        requests: 0,
+        inputChars: 0,
+        outputTokens: 0,
+        failedRequests: 0,
+        estimatedCostMicros: null,
+        createdAt: now
+      }),
+      requests: (existing?.requests ?? 0) + 1,
+      inputChars: (existing?.inputChars ?? 0) + Math.max(0, input.inputChars),
+      outputTokens: (existing?.outputTokens ?? 0) + Math.max(0, input.outputTokens ?? 0),
+      failedRequests: (existing?.failedRequests ?? 0) + (input.failed ? 1 : 0),
+      estimatedCostMicros:
+        input.estimatedCostMicros === undefined
+          ? (existing?.estimatedCostMicros ?? null)
+          : (existing?.estimatedCostMicros ?? 0) + (input.estimatedCostMicros ?? 0),
+      updatedAt: now
+    });
+  }
+
+  async getAiUsageSettings(
+    userId: EntityId,
+    config: Pick<EmailAiSettings, "enabled" | "model" | "maxInputChars" | "estimatedCostThisMonth">,
+    now: string
+  ): Promise<EmailAiSettings> {
+    const month = now.slice(0, 7);
+    const rows = [...this.aiUsage.values()].filter(
+      (row) => row.userId === userId && row.usageDate.startsWith(month)
+    );
+    return {
+      ...config,
+      requestsThisMonth: rows.reduce((sum, row) => sum + row.requests, 0),
+      inputCharsThisMonth: rows.reduce((sum, row) => sum + row.inputChars, 0),
+      outputTokensThisMonth: rows.reduce((sum, row) => sum + row.outputTokens, 0),
+      failedRequestsThisMonth: rows.reduce((sum, row) => sum + row.failedRequests, 0),
+      estimatedCostThisMonth:
+        rows.some((row) => row.estimatedCostMicros !== null) ||
+        config.estimatedCostThisMonth !== null
+          ? rows.reduce((sum, row) => sum + (row.estimatedCostMicros ?? 0), 0) / 1_000_000
+          : null
+    };
   }
 
   async createWebhookEndpoint(
@@ -1602,6 +1711,27 @@ function compareNotifications(left: Notification, right: Notification): number {
     left.globalOrder - right.globalOrder ||
     left.updatedAt.localeCompare(right.updatedAt)
   );
+}
+
+function defaultNotificationAi(): Notification["ai"] {
+  return {
+    status: "disabled",
+    model: null,
+    promptVersion: null,
+    processedAt: null,
+    inputChars: null,
+    outputTokens: null,
+    contentHash: null,
+    summary: null,
+    category: null,
+    importance: null,
+    requiresAction: null,
+    suggestedAction: null,
+    deadline: null,
+    reason: null,
+    errorCode: null,
+    errorMessage: null
+  };
 }
 
 function compareCalendarEvents(left: CalendarEvent, right: CalendarEvent): number {

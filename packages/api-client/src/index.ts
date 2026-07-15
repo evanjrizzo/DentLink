@@ -17,6 +17,7 @@ import type {
   ConnectorSourceRecordInput,
   ConnectorSyncAllResult,
   CurrentSession,
+  EmailAiSettings,
   EntityId,
   Folder,
   GmailDiagnostics,
@@ -393,6 +394,10 @@ export class DentLinkApiClient {
 
   async listNotifications(): Promise<NotificationsList> {
     return this.request<NotificationsList>("/v1/notifications");
+  }
+
+  async getEmailAiSettings(): Promise<EmailAiSettings> {
+    return this.request<EmailAiSettings>("/v1/ai/settings");
   }
 
   async createNotification(input: NotificationInput): Promise<Notification> {

@@ -249,3 +249,21 @@ rule outcomes. Gmail rules are stored as validated JSON in the owned Gmail conne
 settings under `gmailRulesJson`; provider credentials remain in `connector_credentials`. Matched
 rule ID, name, action, and category are copied into normalized Gmail source-record metadata so a
 created or suppressed notification can be audited without storing raw email bodies.
+
+`migrations/0009_email_sorting_ai.sql` adds optional email enrichment metadata without changing the
+notification ownership model:
+
+- `notifications.email_metadata_json`: provider-neutral normalized email metadata used by Gmail
+  IMAP notifications, including sender, recipients, subject, received timestamp, unread state,
+  attachment metadata, body hash, source link, and safe fallback snippet.
+- `notifications.rule_metadata_json`: the deterministic rule decision that caused a notification to
+  be shown, prioritized, tagged, categorized, or explained.
+- `notifications.ai_metadata_json`: optional AI processing state, model, prompt version, content
+  hash, summary/classification fields, usage estimates, and safe failure metadata.
+- `ai_usage_daily`: user-scoped daily aggregate counts for AI requests, input characters, output
+  tokens, failed requests, model, provider, and optional estimated cost.
+
+Normalized email body text is retained in Gmail source-record normalized metadata only as bounded
+text for notification fallback and optional summarization. Attachment binary content is not stored.
+Older notifications without these metadata columns are surfaced with `ai.status = disabled` and
+empty email/rule metadata.

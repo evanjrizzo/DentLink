@@ -219,6 +219,78 @@ textarea {
   opacity: 0.68;
 }
 
+.ai-settings-panel,
+.email-notification-details,
+.ai-summary,
+.connection-section,
+.gmail-rules-panel,
+.rule-card {
+  border: 1px solid #d7dce5;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.ai-settings-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px 12px;
+  padding: 12px;
+}
+
+.email-notification-details,
+.ai-summary {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+}
+
+.ai-summary.complete {
+  border-color: #7c3aed;
+}
+
+.ai-summary.failed {
+  border-color: #b42318;
+}
+
+.ai-summary.pending {
+  border-color: #b7791f;
+}
+
+.connection-section,
+.gmail-rules-panel,
+.rule-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.connection-section > summary,
+.gmail-rules-panel > summary {
+  min-height: 40px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.rules-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.rules-grid label,
+.gmail-rules-panel label,
+.note-toolbar label {
+  display: grid;
+  gap: 4px;
+}
+
+.rule-explanation,
+.recommendation-explanation,
+.connector-help {
+  color: #5a6472;
+  font-size: 13px;
+}
+
 .gmail-diagnostics {
   display: grid;
   gap: 10px;

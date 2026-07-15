@@ -21,14 +21,26 @@ import {
   type GmailImapPollResult,
   type ImapSocket
 } from "../../../packages/imap-client/src";
+import {
+  createOpenAIEmailAiClient,
+  DEFAULT_EMAIL_AI_MAX_INPUT_CHARS,
+  DEFAULT_EMAIL_AI_MODEL,
+  EMAIL_AI_PROMPT_VERSION,
+  emailContentHash,
+  EmailAiError,
+  normalizeEmailBody,
+  type EmailAiClient
+} from "../../../packages/ai/src";
 import type {
   ConnectorAccount,
   ConnectorSourceRecord,
+  EmailAttachmentMetadata,
   EntityId,
   GmailDiagnostics,
   GmailRule,
   GmailRulesResponse,
-  GmailSyncResult
+  GmailSyncResult,
+  Notification
 } from "@dentlink/item-model";
 import type { ConnectorDefinition } from "@dentlink/connector-sdk";
 
@@ -58,6 +70,11 @@ type GmailOperation =
 export type GmailRuntimeEnv = GoogleRuntimeEnv & {
   gmailClient?: GmailApiClient;
   gmailImapClient?: GmailImapClient;
+  emailAiClient?: EmailAiClient;
+  OPENAI_API_KEY?: string;
+  DENTLINK_AI_ENABLED?: string;
+  DENTLINK_AI_MODEL?: string;
+  DENTLINK_AI_MAX_INPUT_CHARS?: string;
 };
 
 export type GmailIngestionEngine = "gmail_api" | "gmail_imap";
@@ -144,9 +161,13 @@ type NormalizedGmailEmail = {
   subject: string;
   recipients: string[];
   hasAttachment: boolean;
+  attachments: EmailAttachmentMetadata[];
   automatedSender: boolean;
   mailingList: boolean;
   permalink: string | null;
+  normalizedBody: string;
+  normalizedBodyHash: string | null;
+  htmlPresent: boolean;
 };
 
 export class GmailUpstreamError extends StoreError {
@@ -402,6 +423,7 @@ export async function syncGmailAccount(
       gmail,
       token.accessToken,
       messages.messageIds,
+      env,
       now
     );
     const latest = await store.getConnectorAccount(userId, account.id);
@@ -517,6 +539,7 @@ export async function backfillGmailAccount(
       gmail,
       token.accessToken,
       messages.messageIds,
+      env,
       now
     );
     const latest = await store.getConnectorAccount(userId, account.id);
@@ -633,6 +656,25 @@ export async function updateGmailRules(
   );
   if (!updated) throw new StoreError("not_found", "Gmail account not found");
   return { account: updated, rules: normalized };
+}
+
+export async function getEmailAiSettings(
+  store: DentLinkStore,
+  userId: EntityId,
+  env: GmailRuntimeEnv,
+  now: string
+) {
+  const config = emailAiConfig(env);
+  return store.getAiUsageSettings(
+    userId,
+    {
+      enabled: config.enabled,
+      model: config.model,
+      maxInputChars: config.maxInputChars,
+      estimatedCostThisMonth: null
+    },
+    now
+  );
 }
 
 export async function updateGmailEngine(
@@ -881,7 +923,7 @@ async function syncGmailImapAccount(
     recentWindowDays: GMAIL_IMAP_RECENT_WINDOW_DAYS,
     maxMessages: GMAIL_IMAP_MAX_MESSAGES
   });
-  const result = await processGmailImapMessages(store, userId, account, poll.messages, now);
+  const result = await processGmailImapMessages(store, userId, account, poll.messages, env, now);
   const latest = await store.getConnectorAccount(userId, account.id);
   if (!latest) throw new StoreError("not_found", "Gmail account not found");
   const summary = summarizeGmailOutcomes(poll.discoveredUids.length, result.outcomes);
@@ -996,6 +1038,7 @@ async function processGmailMessageIds(
   gmail: GmailApiClient,
   accessToken: string,
   messageIds: string[],
+  env: GmailRuntimeEnv,
   now: string
 ): Promise<{
   createdNotifications: number;
@@ -1016,7 +1059,7 @@ async function processGmailMessageIds(
       }
       const message = await gmail.getMessage(accessToken, messageId);
       nextCursor = maxHistoryId(nextCursor, message.historyId);
-      const outcome = await ingestGmailMessage(store, userId, account, message, now);
+      const outcome = await ingestGmailMessage(store, userId, account, message, env, now);
       outcomes.push(outcome);
       if (outcome.status === "notification_created") createdNotifications += 1;
     } catch (error) {
@@ -1031,6 +1074,7 @@ async function processGmailImapMessages(
   userId: EntityId,
   account: ConnectorAccount,
   messages: GmailImapMessage[],
+  env: GmailRuntimeEnv,
   now: string
 ): Promise<{
   createdNotifications: number;
@@ -1056,6 +1100,7 @@ async function processGmailImapMessages(
         userId,
         account,
         normalizedGmailEmailFromImap(message, now),
+        env,
         now
       );
       outcomes.push(outcome);
@@ -1081,6 +1126,7 @@ async function ingestGmailMessage(
   userId: EntityId,
   account: ConnectorAccount,
   message: GmailMessage,
+  env: GmailRuntimeEnv,
   now: string
 ): Promise<GmailSyncResult["outcomes"][number]> {
   return ingestNormalizedGmailEmail(
@@ -1088,6 +1134,7 @@ async function ingestGmailMessage(
     userId,
     account,
     normalizedGmailEmailFromApi(message, now),
+    env,
     now
   );
 }
@@ -1097,6 +1144,7 @@ async function ingestNormalizedGmailEmail(
   userId: EntityId,
   account: ConnectorAccount,
   email: NormalizedGmailEmail,
+  env: GmailRuntimeEnv,
   now: string
 ): Promise<GmailSyncResult["outcomes"][number]> {
   const context: GmailRuleContext = {
@@ -1106,6 +1154,7 @@ async function ingestNormalizedGmailEmail(
       ? (email.senderAddress.split("@").pop() ?? "")
       : "",
     subject: email.subject,
+    body: email.normalizedBody,
     labels: email.labels,
     recipients: email.recipients,
     hasAttachment: email.hasAttachment,
@@ -1114,6 +1163,42 @@ async function ingestNormalizedGmailEmail(
     mailingList: email.mailingList
   };
   const ruleDecision = evaluateGmailRules(gmailRulesFromSettings(account.settings), context);
+  const bodyHash =
+    email.normalizedBody.length > 0
+      ? await hashSessionToken(`${email.subject}\n${email.senderAddress}\n${email.normalizedBody}`)
+      : null;
+  const emailMetadata = {
+    accountId: account.id,
+    provider: "gmail" as const,
+    providerMessageId: email.providerItemId,
+    messageId: email.messageId,
+    xGmMsgId: email.sourceExternalId.startsWith("x-gm-msgid:")
+      ? email.sourceExternalId.slice("x-gm-msgid:".length)
+      : null,
+    senderAddress: email.senderAddress,
+    senderDisplayName: email.sender,
+    recipients: email.recipients,
+    subject: email.subject,
+    receivedAt: email.receivedAt,
+    labels: email.labels,
+    unread: email.unread,
+    automatedSender: email.automatedSender,
+    mailingList: email.mailingList,
+    attachments: email.attachments,
+    snippet: email.normalizedBody.slice(0, 300),
+    normalizedBodyHash: bodyHash,
+    sourceUrl: email.permalink
+  };
+  const ruleMetadata = {
+    ruleId: ruleDecision.rule?.id ?? null,
+    ruleName: ruleDecision.rule?.name ?? null,
+    action: ruleDecision.action,
+    category: ruleDecision.category ?? null,
+    tag: ruleDecision.tag ?? null,
+    explanation: ruleDecision.rule
+      ? `${gmailRuleActionLabel(ruleDecision.action)} rule matched: ${ruleDecision.rule.name}`
+      : "No sorting rule matched; default notify action applied."
+  };
   const normalizedPayload = {
     provider: "gmail",
     provider_item_id: email.providerItemId,
@@ -1129,12 +1214,17 @@ async function ingestNormalizedGmailEmail(
     subject: email.subject,
     recipients: email.recipients,
     has_attachment: email.hasAttachment,
+    attachments: email.attachments,
     automated_sender: email.automatedSender,
     mailing_list: email.mailingList,
+    html_present: email.htmlPresent,
+    normalized_body: email.normalizedBody,
+    normalized_body_hash: bodyHash,
     matched_rule_id: ruleDecision.rule?.id ?? null,
     matched_rule_name: ruleDecision.rule?.name ?? null,
     matched_rule_action: ruleDecision.action,
     assigned_category: ruleDecision.category ?? null,
+    assigned_tag: ruleDecision.tag ?? null,
     permalink: email.permalink,
     connector_account: account.id
   };
@@ -1180,18 +1270,34 @@ async function ingestNormalizedGmailEmail(
     userId,
     {
       title: email.subject,
-      summary: `${email.sender}${email.unread ? " · unread" : ""}${ruleDecision.category ? ` · ${ruleDecision.category}` : ""}`,
-      body: ruleDecision.rule ? `Matched Gmail rule: ${ruleDecision.rule.name}` : "",
+      summary:
+        email.normalizedBody.slice(0, 240) || `${email.sender}${email.unread ? " · unread" : ""}`,
+      body: ruleMetadata.explanation,
       source: "connector",
       sourceLabel: "Gmail",
       sourceUrl: email.permalink,
-      severity
+      severity,
+      rank: notificationRankForRule(ruleDecision.action),
+      email: emailMetadata,
+      rule: ruleMetadata,
+      ai: initialEmailAiMetadata(env, email, now)
     },
+    now
+  );
+  const enrichedNotification = await maybeProcessEmailAi(
+    store,
+    userId,
+    notification,
+    email,
+    env,
     now
   );
   const updatedPayload = {
     ...normalizedPayload,
-    notification_id: notification.id
+    notification_id: enrichedNotification.id,
+    ai_status: enrichedNotification.ai.status,
+    ai_model: enrichedNotification.ai.model,
+    ai_content_hash: enrichedNotification.ai.contentHash
   };
   const updatedRecord = await store.updateConnectorSourceRecordProcessing(
     userId,
@@ -1242,9 +1348,13 @@ function normalizedGmailEmailFromApi(message: GmailMessage, now: string): Normal
     subject,
     recipients,
     hasAttachment: gmailMessageHasAttachment(message),
+    attachments: [],
     automatedSender: isAutomatedSender(headers),
     mailingList: isMailingList(headers),
-    permalink: gmailPermalink(message.threadId)
+    permalink: gmailPermalink(message.threadId),
+    normalizedBody: "",
+    normalizedBodyHash: null,
+    htmlPresent: false
   };
 }
 
@@ -1261,6 +1371,11 @@ function normalizedGmailEmailFromImap(
     ...(message.parsed.cc ? [message.parsed.cc] : [])
   ];
   const receivedAt = message.parsed.date ? validIsoOrFallback(message.parsed.date, now) : now;
+  const normalizedBody = normalizeEmailBody({
+    plainText: message.parsed.plainText,
+    html: message.parsed.html,
+    maxChars: DEFAULT_EMAIL_AI_MAX_INPUT_CHARS
+  });
   return {
     sourceExternalId: message.sourceExternalId,
     providerItemId: message.sourceExternalId,
@@ -1276,9 +1391,13 @@ function normalizedGmailEmailFromImap(
     subject,
     recipients,
     hasAttachment: message.parsed.attachments.length > 0,
+    attachments: message.parsed.attachments,
     automatedSender: isAutomatedSender(headers),
     mailingList: isMailingList(headers),
-    permalink: "https://mail.google.com/mail/u/0/#inbox"
+    permalink: "https://mail.google.com/mail/u/0/#inbox",
+    normalizedBody,
+    normalizedBodyHash: null,
+    htmlPresent: Boolean(message.parsed.html)
   };
 }
 
@@ -1456,6 +1575,7 @@ type GmailRuleContext = {
   senderAddress: string;
   senderDomain: string;
   subject: string;
+  body: string;
   labels: string[];
   recipients: string[];
   hasAttachment: boolean;
@@ -1468,6 +1588,7 @@ type GmailRuleDecision = {
   action: GmailRule["action"];
   rule: GmailRule | null;
   category?: string;
+  tag?: string;
 };
 
 function gmailRulesFromSettings(settings: ConnectorAccount["settings"]): GmailRule[] {
@@ -1482,28 +1603,36 @@ function gmailRulesFromSettings(settings: ConnectorAccount["settings"]): GmailRu
 }
 
 function normalizeGmailRules(rules: unknown[]): GmailRule[] {
-  return rules.slice(0, 50).map((rule, index) => {
-    const object = rule && typeof rule === "object" ? (rule as Record<string, unknown>) : {};
-    const action = gmailRuleAction(object.action);
-    return {
-      id: stringValue(object.id) ?? `gmail-rule-${index + 1}`,
-      name: stringValue(object.name) ?? `Gmail rule ${index + 1}`,
-      enabled: object.enabled === undefined ? true : object.enabled === true,
-      senderAddress: stringValue(object.senderAddress),
-      senderDomain: stringValue(object.senderDomain),
-      subjectContains: stringValue(object.subjectContains),
-      gmailLabel: stringValue(object.gmailLabel),
-      recipient: stringValue(object.recipient),
-      hasAttachment: booleanValue(object.hasAttachment),
-      unread: booleanValue(object.unread),
-      automatedSender: booleanValue(object.automatedSender),
-      mailingList: booleanValue(object.mailingList),
-      alwaysNotify: booleanValue(object.alwaysNotify),
-      neverNotify: booleanValue(object.neverNotify),
-      action,
-      category: stringValue(object.category)
-    };
-  });
+  return rules
+    .slice(0, 50)
+    .map((rule, index) => {
+      const object = rule && typeof rule === "object" ? (rule as Record<string, unknown>) : {};
+      const action = gmailRuleAction(object.action);
+      const matchMode: GmailRule["matchMode"] = object.matchMode === "any" ? "any" : "all";
+      return {
+        id: stringValue(object.id) ?? `gmail-rule-${index + 1}`,
+        name: stringValue(object.name) ?? `Gmail rule ${index + 1}`,
+        enabled: object.enabled === undefined ? true : object.enabled === true,
+        priority: numberValue(object.priority) ?? index + 1,
+        matchMode,
+        senderAddress: stringValue(object.senderAddress),
+        senderDomain: stringValue(object.senderDomain),
+        subjectContains: stringValue(object.subjectContains),
+        gmailLabel: stringValue(object.gmailLabel),
+        recipient: stringValue(object.recipient),
+        bodyContains: stringValue(object.bodyContains),
+        hasAttachment: booleanValue(object.hasAttachment),
+        unread: booleanValue(object.unread),
+        automatedSender: booleanValue(object.automatedSender),
+        mailingList: booleanValue(object.mailingList),
+        alwaysNotify: booleanValue(object.alwaysNotify),
+        neverNotify: booleanValue(object.neverNotify),
+        action,
+        category: stringValue(object.category),
+        tag: stringValue(object.tag)
+      };
+    })
+    .sort((left, right) => (left.priority ?? 0) - (right.priority ?? 0));
 }
 
 function gmailRuleAction(value: unknown): GmailRule["action"] {
@@ -1512,7 +1641,8 @@ function gmailRuleAction(value: unknown): GmailRule["action"] {
     value === "suppress" ||
     value === "low_priority" ||
     value === "high_priority" ||
-    value === "assign_category"
+    value === "assign_category" ||
+    value === "assign_tag"
   ) {
     return value;
   }
@@ -1529,38 +1659,38 @@ function booleanValue(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 function evaluateGmailRules(rules: GmailRule[], context: GmailRuleContext): GmailRuleDecision {
   const rule = rules.find((candidate) => candidate.enabled && gmailRuleMatches(candidate, context));
   if (!rule) return { action: "notify", rule: null };
   if (rule.neverNotify) return { action: "suppress", rule, category: rule.category };
   if (rule.alwaysNotify) return { action: "notify", rule, category: rule.category };
-  return { action: rule.action, rule, category: rule.category };
+  return { action: rule.action, rule, category: rule.category, tag: rule.tag };
 }
 
 function gmailRuleMatches(rule: GmailRule, context: GmailRuleContext): boolean {
   if (rule.alwaysNotify || rule.neverNotify) return true;
-  if (rule.senderAddress && !equalsIgnoreCase(context.senderAddress, rule.senderAddress))
-    return false;
-  if (rule.senderDomain && !equalsIgnoreCase(context.senderDomain, rule.senderDomain)) return false;
-  if (rule.subjectContains && !includesIgnoreCase(context.subject, rule.subjectContains))
-    return false;
-  if (rule.gmailLabel) {
-    const gmailLabel = rule.gmailLabel;
-    if (!context.labels.some((label) => equalsIgnoreCase(label, gmailLabel))) return false;
-  }
-  if (rule.recipient) {
-    const recipientRule = rule.recipient;
-    if (!context.recipients.some((recipient) => includesIgnoreCase(recipient, recipientRule))) {
-      return false;
-    }
-  }
-  if (rule.hasAttachment !== undefined && context.hasAttachment !== rule.hasAttachment)
-    return false;
-  if (rule.unread !== undefined && context.unread !== rule.unread) return false;
-  if (rule.automatedSender !== undefined && context.automatedSender !== rule.automatedSender)
-    return false;
-  if (rule.mailingList !== undefined && context.mailingList !== rule.mailingList) return false;
-  return true;
+  const conditions = [
+    rule.senderAddress ? equalsIgnoreCase(context.senderAddress, rule.senderAddress) : null,
+    rule.senderDomain ? equalsIgnoreCase(context.senderDomain, rule.senderDomain) : null,
+    rule.subjectContains ? includesIgnoreCase(context.subject, rule.subjectContains) : null,
+    rule.bodyContains ? includesIgnoreCase(context.body, rule.bodyContains) : null,
+    rule.gmailLabel
+      ? context.labels.some((label) => equalsIgnoreCase(label, rule.gmailLabel ?? ""))
+      : null,
+    rule.recipient
+      ? context.recipients.some((recipient) => includesIgnoreCase(recipient, rule.recipient ?? ""))
+      : null,
+    rule.hasAttachment !== undefined ? context.hasAttachment === rule.hasAttachment : null,
+    rule.unread !== undefined ? context.unread === rule.unread : null,
+    rule.automatedSender !== undefined ? context.automatedSender === rule.automatedSender : null,
+    rule.mailingList !== undefined ? context.mailingList === rule.mailingList : null
+  ].filter((value): value is boolean => value !== null);
+  if (conditions.length === 0) return false;
+  return rule.matchMode === "any" ? conditions.some(Boolean) : conditions.every(Boolean);
 }
 
 function gmailNotificationSeverity(
@@ -1570,6 +1700,194 @@ function gmailNotificationSeverity(
   if (action === "low_priority") return "low";
   if (action === "high_priority") return "high";
   return unread ? "medium" : "info";
+}
+
+function notificationRankForRule(action: GmailRule["action"]): number {
+  if (action === "high_priority") return 90;
+  if (action === "low_priority") return -20;
+  return 0;
+}
+
+function gmailRuleActionLabel(action: GmailRule["action"]): string {
+  if (action === "high_priority") return "High priority";
+  if (action === "low_priority") return "Low priority";
+  if (action === "suppress") return "Suppress";
+  if (action === "assign_category") return "Category";
+  if (action === "assign_tag") return "Tag";
+  return "Notify";
+}
+
+function initialEmailAiMetadata(
+  env: GmailRuntimeEnv,
+  email: NormalizedGmailEmail,
+  now: string
+): Notification["ai"] {
+  const config = emailAiConfig(env);
+  if (!config.enabled) return notificationAiState("disabled", config.model);
+  if (!email.normalizedBody.trim()) return notificationAiState("skipped", config.model, now);
+  return notificationAiState("pending", config.model);
+}
+
+async function maybeProcessEmailAi(
+  store: DentLinkStore,
+  userId: EntityId,
+  notification: Notification,
+  email: NormalizedGmailEmail,
+  env: GmailRuntimeEnv,
+  now: string
+): Promise<Notification> {
+  const config = emailAiConfig(env);
+  if (!config.enabled || notification.ai.status !== "pending") return notification;
+  const inputBody = email.normalizedBody.slice(0, config.maxInputChars);
+  const contentHash = await emailContentHash({
+    subject: email.subject,
+    body: inputBody,
+    sender: email.senderAddress,
+    promptVersion: EMAIL_AI_PROMPT_VERSION,
+    model: config.model
+  });
+  try {
+    const client =
+      env.emailAiClient ??
+      createOpenAIEmailAiClient({ apiKey: config.apiKey, model: config.model });
+    const result = await client.summarizeEmail({
+      sender: email.sender,
+      subject: email.subject,
+      body: inputBody,
+      receivedAt: email.receivedAt,
+      labels: email.labels
+    });
+    await store.recordAiUsage(
+      userId,
+      {
+        provider: "openai",
+        model: config.model,
+        inputChars: inputBody.length,
+        outputTokens: result.outputTokens,
+        failed: false
+      },
+      now
+    );
+    return store.updateNotification(
+      userId,
+      notification.id,
+      notification.version,
+      {
+        summary: result.summary,
+        severity:
+          result.requiresAction || result.importance >= 0.75 ? "high" : notification.severity,
+        rank: notification.rank + Math.round(result.importance * 50),
+        ai: {
+          status: "complete",
+          model: config.model,
+          promptVersion: EMAIL_AI_PROMPT_VERSION,
+          processedAt: now,
+          inputChars: inputBody.length,
+          outputTokens: result.outputTokens,
+          contentHash,
+          summary: result.summary,
+          category: result.category,
+          importance: result.importance,
+          requiresAction: result.requiresAction,
+          suggestedAction: result.suggestedAction,
+          deadline: result.deadline,
+          reason: result.reason,
+          errorCode: null,
+          errorMessage: null
+        }
+      },
+      now
+    );
+  } catch (error) {
+    const code = error instanceof EmailAiError ? error.code : "ai_failed";
+    const message = error instanceof Error ? error.message : "AI processing failed.";
+    await store.recordAiUsage(
+      userId,
+      {
+        provider: "openai",
+        model: config.model,
+        inputChars: inputBody.length,
+        outputTokens: null,
+        failed: true
+      },
+      now
+    );
+    return store.updateNotification(
+      userId,
+      notification.id,
+      notification.version,
+      {
+        ai: {
+          status: "failed",
+          model: config.model,
+          promptVersion: EMAIL_AI_PROMPT_VERSION,
+          processedAt: now,
+          inputChars: inputBody.length,
+          outputTokens: null,
+          contentHash,
+          summary: null,
+          category: null,
+          importance: null,
+          requiresAction: null,
+          suggestedAction: null,
+          deadline: null,
+          reason: null,
+          errorCode: code,
+          errorMessage: safeAiMessage(message)
+        }
+      },
+      now
+    );
+  }
+}
+
+function notificationAiState(
+  status: Notification["ai"]["status"],
+  model: string | null,
+  processedAt: string | null = null
+): Notification["ai"] {
+  return {
+    status,
+    model,
+    promptVersion: status === "disabled" ? null : EMAIL_AI_PROMPT_VERSION,
+    processedAt,
+    inputChars: null,
+    outputTokens: null,
+    contentHash: null,
+    summary: null,
+    category: null,
+    importance: null,
+    requiresAction: null,
+    suggestedAction: null,
+    deadline: null,
+    reason: null,
+    errorCode: null,
+    errorMessage: null
+  };
+}
+
+function emailAiConfig(env: GmailRuntimeEnv): {
+  enabled: boolean;
+  apiKey: string;
+  model: string;
+  maxInputChars: number;
+} {
+  const apiKey = env.OPENAI_API_KEY ?? "";
+  const enabled = env.DENTLINK_AI_ENABLED === "true" && apiKey.length > 0;
+  const maxInputChars = Number.parseInt(env.DENTLINK_AI_MAX_INPUT_CHARS ?? "", 10);
+  return {
+    enabled,
+    apiKey,
+    model: env.DENTLINK_AI_MODEL || DEFAULT_EMAIL_AI_MODEL,
+    maxInputChars:
+      Number.isFinite(maxInputChars) && maxInputChars > 0
+        ? Math.min(maxInputChars, 20_000)
+        : DEFAULT_EMAIL_AI_MAX_INPUT_CHARS
+  };
+}
+
+function safeAiMessage(message: string): string {
+  return message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").slice(0, 300);
 }
 
 function emailAddressFromHeader(value: string): string {

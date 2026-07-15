@@ -23,6 +23,7 @@ import type {
   ConnectorSourceRecord,
   ConnectorSourceRecordInput,
   CurrentSession,
+  EmailAiSettings,
   EntityId,
   Folder,
   Notification,
@@ -171,6 +172,17 @@ type NotificationRow = {
   updated_at: string;
   completed_at: string | null;
   dismissed_at: string | null;
+  email_metadata_json?: string | null;
+  rule_metadata_json?: string | null;
+  ai_metadata_json?: string | null;
+};
+
+type AiUsageRow = {
+  requests: number;
+  input_chars: number;
+  output_tokens: number;
+  failed_requests: number;
+  estimated_cost_micros: number | null;
 };
 
 type WebhookRow = {
@@ -1617,15 +1629,19 @@ export class D1DentLinkStore implements DentLinkStore {
       createdAt: now,
       updatedAt: now,
       completedAt: null,
-      dismissedAt: null
+      dismissedAt: null,
+      email: input.email ?? null,
+      rule: input.rule ?? null,
+      ai: input.ai ?? defaultNotificationAi()
     };
     await this.batch([
       this.db
         .prepare(
           `INSERT INTO notifications
            (id, user_id, title, summary, body, source, source_label, source_url, severity, status,
-            pinned, rank, global_order, version, created_at, updated_at, completed_at, dismissed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            pinned, rank, global_order, version, created_at, updated_at, completed_at, dismissed_at,
+            email_metadata_json, rule_metadata_json, ai_metadata_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .bind(
           notification.id,
@@ -1645,7 +1661,10 @@ export class D1DentLinkStore implements DentLinkStore {
           notification.createdAt,
           notification.updatedAt,
           notification.completedAt,
-          notification.dismissedAt
+          notification.dismissedAt,
+          jsonOrNull(notification.email),
+          jsonOrNull(notification.rule),
+          JSON.stringify(notification.ai)
         ),
       this.changeStatement(userId, "notification", notification.id, "upsert", {
         type: "notification",
@@ -1680,14 +1699,22 @@ export class D1DentLinkStore implements DentLinkStore {
       completedAt:
         patch.status === "done" ? now : patch.status === "active" ? null : existing.completedAt,
       dismissedAt:
-        patch.status === "dismissed" ? now : patch.status === "active" ? null : existing.dismissedAt
+        patch.status === "dismissed"
+          ? now
+          : patch.status === "active"
+            ? null
+            : existing.dismissedAt,
+      email: patch.email === undefined ? existing.email : patch.email,
+      rule: patch.rule === undefined ? existing.rule : patch.rule,
+      ai: patch.ai === undefined ? existing.ai : patch.ai
     };
     const result = await this.db
       .prepare(
         `UPDATE notifications
          SET title = ?, summary = ?, body = ?, source_url = ?, severity = ?, status = ?,
              pinned = ?, rank = ?, global_order = ?, version = ?, updated_at = ?,
-             completed_at = ?, dismissed_at = ?
+             completed_at = ?, dismissed_at = ?, email_metadata_json = ?, rule_metadata_json = ?,
+             ai_metadata_json = ?
          WHERE id = ? AND user_id = ? AND status != 'deleted' AND version = ?`
       )
       .bind(
@@ -1704,6 +1731,9 @@ export class D1DentLinkStore implements DentLinkStore {
         next.updatedAt,
         next.completedAt,
         next.dismissedAt,
+        jsonOrNull(next.email),
+        jsonOrNull(next.rule),
+        JSON.stringify(next.ai),
         notificationId,
         userId,
         expectedVersion
@@ -1757,6 +1787,88 @@ export class D1DentLinkStore implements DentLinkStore {
       updated.push(notification);
     }
     return updated.sort(compareNotifications);
+  }
+
+  async recordAiUsage(
+    userId: EntityId,
+    input: {
+      provider: "openai";
+      model: string;
+      inputChars: number;
+      outputTokens?: number | null;
+      failed: boolean;
+      estimatedCostMicros?: number | null;
+    },
+    now: string
+  ): Promise<void> {
+    const usageDate = now.slice(0, 10);
+    await this.db
+      .prepare(
+        `INSERT INTO ai_usage_daily
+         (id, user_id, usage_date, provider, model, requests, input_chars, output_tokens,
+          failed_requests, estimated_cost_micros, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(user_id, usage_date, provider, model)
+         DO UPDATE SET requests = requests + 1,
+                       input_chars = input_chars + excluded.input_chars,
+                       output_tokens = output_tokens + excluded.output_tokens,
+                       failed_requests = failed_requests + excluded.failed_requests,
+                       estimated_cost_micros =
+                         CASE
+                           WHEN ai_usage_daily.estimated_cost_micros IS NULL
+                                AND excluded.estimated_cost_micros IS NULL THEN NULL
+                           ELSE COALESCE(ai_usage_daily.estimated_cost_micros, 0)
+                                + COALESCE(excluded.estimated_cost_micros, 0)
+                         END,
+                       updated_at = excluded.updated_at`
+      )
+      .bind(
+        nextId("ai-usage"),
+        userId,
+        usageDate,
+        input.provider,
+        input.model,
+        Math.max(0, input.inputChars),
+        Math.max(0, input.outputTokens ?? 0),
+        input.failed ? 1 : 0,
+        input.estimatedCostMicros ?? null,
+        now,
+        now
+      )
+      .run();
+  }
+
+  async getAiUsageSettings(
+    userId: EntityId,
+    config: Pick<EmailAiSettings, "enabled" | "model" | "maxInputChars" | "estimatedCostThisMonth">,
+    now: string
+  ): Promise<EmailAiSettings> {
+    const monthStart = `${now.slice(0, 7)}-01`;
+    const monthEnd = new Date(`${monthStart}T00:00:00.000Z`);
+    monthEnd.setUTCMonth(monthEnd.getUTCMonth() + 1);
+    const row = await this.db
+      .prepare(
+        `SELECT COALESCE(SUM(requests), 0) AS requests,
+                COALESCE(SUM(input_chars), 0) AS input_chars,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(failed_requests), 0) AS failed_requests,
+                SUM(estimated_cost_micros) AS estimated_cost_micros
+         FROM ai_usage_daily
+         WHERE user_id = ? AND usage_date >= ? AND usage_date < ?`
+      )
+      .bind(userId, monthStart, monthEnd.toISOString().slice(0, 10))
+      .first<AiUsageRow>();
+    return {
+      ...config,
+      requestsThisMonth: row?.requests ?? 0,
+      inputCharsThisMonth: row?.input_chars ?? 0,
+      outputTokensThisMonth: row?.output_tokens ?? 0,
+      failedRequestsThisMonth: row?.failed_requests ?? 0,
+      estimatedCostThisMonth:
+        row?.estimated_cost_micros === null || row?.estimated_cost_micros === undefined
+          ? config.estimatedCostThisMonth
+          : row.estimated_cost_micros / 1_000_000
+    };
   }
 
   async createWebhookEndpoint(
@@ -2411,8 +2523,45 @@ function notificationFromRow(row: NotificationRow): Notification {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at,
-    dismissedAt: row.dismissed_at
+    dismissedAt: row.dismissed_at,
+    email: parseJsonOrNull<Notification["email"]>(row.email_metadata_json ?? null),
+    rule: parseJsonOrNull<Notification["rule"]>(row.rule_metadata_json ?? null),
+    ai: parseJsonOrNull<Notification["ai"]>(row.ai_metadata_json ?? null) ?? defaultNotificationAi()
   };
+}
+
+function defaultNotificationAi(): Notification["ai"] {
+  return {
+    status: "disabled",
+    model: null,
+    promptVersion: null,
+    processedAt: null,
+    inputChars: null,
+    outputTokens: null,
+    contentHash: null,
+    summary: null,
+    category: null,
+    importance: null,
+    requiresAction: null,
+    suggestedAction: null,
+    deadline: null,
+    reason: null,
+    errorCode: null,
+    errorMessage: null
+  };
+}
+
+function jsonOrNull(value: unknown): string | null {
+  return value === null || value === undefined ? null : JSON.stringify(value);
+}
+
+function parseJsonOrNull<T>(value: string | null): T | null {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return null;
+  }
 }
 
 function calendarEventFromRow(row: CalendarEventRow): CalendarEvent {

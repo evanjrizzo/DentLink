@@ -37,6 +37,11 @@ export type CalendarEventSource = "local" | "google-calendar";
 export type CalendarEventStatus = "active" | "cancelled" | "dismissed" | "deleted";
 export type CalendarSourceFilter = "all" | CalendarEventSource;
 export type NotificationSeverity = "info" | "low" | "medium" | "high";
+export type EmailAiStatus = "disabled" | "pending" | "complete" | "failed" | "skipped";
+export type EmailAiCategory =
+  "action_required" | "personal" | "work" | "receipt" | "newsletter" | "system" | "other";
+export type NotificationSortMode =
+  "recommended" | "newest" | "oldest" | "high_priority" | "requires_action" | "deadline_soon";
 export type ConflictStatus = "open" | "resolved";
 export type ConflictResolution = "keep_mine" | "keep_theirs" | "merge" | "keep_both";
 export type WebhookDestination = "notification" | "note";
@@ -171,6 +176,66 @@ export type Notification = {
   updatedAt: IsoDateTime;
   completedAt: IsoDateTime | null;
   dismissedAt: IsoDateTime | null;
+  email: NotificationEmailMetadata | null;
+  rule: NotificationRuleMetadata | null;
+  ai: NotificationAiMetadata;
+};
+
+export type EmailAttachmentMetadata = {
+  filename: string | null;
+  contentType: string;
+  disposition: string | null;
+  contentId: string | null;
+  sizeBytes: number | null;
+};
+
+export type NotificationEmailMetadata = {
+  accountId: EntityId;
+  provider: "gmail";
+  providerMessageId: string;
+  messageId: string | null;
+  xGmMsgId: string | null;
+  senderAddress: string;
+  senderDisplayName: string;
+  recipients: string[];
+  subject: string;
+  receivedAt: IsoDateTime;
+  labels: string[];
+  unread: boolean;
+  automatedSender: boolean;
+  mailingList: boolean;
+  attachments: EmailAttachmentMetadata[];
+  snippet: string;
+  normalizedBodyHash: string | null;
+  sourceUrl: string | null;
+};
+
+export type NotificationRuleMetadata = {
+  ruleId: EntityId | null;
+  ruleName: string | null;
+  action: GmailRuleAction;
+  category: string | null;
+  tag: string | null;
+  explanation: string;
+};
+
+export type NotificationAiMetadata = {
+  status: EmailAiStatus;
+  model: string | null;
+  promptVersion: string | null;
+  processedAt: IsoDateTime | null;
+  inputChars: number | null;
+  outputTokens: number | null;
+  contentHash: string | null;
+  summary: string | null;
+  category: EmailAiCategory | null;
+  importance: number | null;
+  requiresAction: boolean | null;
+  suggestedAction: string | null;
+  deadline: string | null;
+  reason: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
 };
 
 export type NotificationInput = {
@@ -181,6 +246,9 @@ export type NotificationInput = {
   severity?: NotificationSeverity;
   pinned?: boolean;
   rank?: number;
+  email?: NotificationEmailMetadata | null;
+  rule?: NotificationRuleMetadata | null;
+  ai?: NotificationAiMetadata;
 };
 
 export type NotificationPatch = Partial<NotificationInput> & {
@@ -384,17 +452,20 @@ export type ConnectorAccountPatch = Partial<
 >;
 
 export type GmailRuleAction =
-  "notify" | "suppress" | "low_priority" | "high_priority" | "assign_category";
+  "notify" | "suppress" | "low_priority" | "high_priority" | "assign_category" | "assign_tag";
 
 export type GmailRule = {
   id: EntityId;
   name: string;
   enabled: boolean;
+  priority?: number;
+  matchMode?: "all" | "any";
   senderAddress?: string;
   senderDomain?: string;
   subjectContains?: string;
   gmailLabel?: string;
   recipient?: string;
+  bodyContains?: string;
   hasAttachment?: boolean;
   unread?: boolean;
   automatedSender?: boolean;
@@ -403,6 +474,7 @@ export type GmailRule = {
   neverNotify?: boolean;
   action: GmailRuleAction;
   category?: string;
+  tag?: string;
 };
 
 export type GmailRulesResponse = {
@@ -515,6 +587,17 @@ export type GmailDiagnostics = {
   account: ConnectorAccount;
   summary: GmailSyncSummary;
   messages: GmailDiagnosticMessage[];
+};
+
+export type EmailAiSettings = {
+  enabled: boolean;
+  model: string;
+  maxInputChars: number;
+  requestsThisMonth: number;
+  inputCharsThisMonth: number;
+  outputTokensThisMonth: number;
+  failedRequestsThisMonth: number;
+  estimatedCostThisMonth: number | null;
 };
 
 export type GoogleCalendarSyncResult = {

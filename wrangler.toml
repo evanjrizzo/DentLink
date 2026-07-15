@@ -11,6 +11,9 @@ DENTLINK_BUILD_ID = "local"
 GOOGLE_REDIRECT_URI = "http://127.0.0.1:8787/v1/connectors/gmail/callback"
 GOOGLE_CALENDAR_REDIRECT_URI = "http://127.0.0.1:8787/v1/connectors/google-calendar/callback"
 DENTLINK_WEB_ORIGIN = "http://localhost:5173"
+DENTLINK_AI_ENABLED = "false"
+DENTLINK_AI_MODEL = "gpt-4.1-mini"
+DENTLINK_AI_MAX_INPUT_CHARS = "6000"
 
 [[d1_databases]]
 binding = "DB"
@@ -33,6 +36,9 @@ DENTLINK_BUILD_ID = "preview"
 GOOGLE_REDIRECT_URI = "https://dentlink-api-preview.evanjrizzo.workers.dev/v1/connectors/gmail/callback"
 GOOGLE_CALENDAR_REDIRECT_URI = "https://dentlink-api-preview.evanjrizzo.workers.dev/v1/connectors/google-calendar/callback"
 DENTLINK_WEB_ORIGIN = "https://dentlink-web-preview.pages.dev"
+DENTLINK_AI_ENABLED = "false"
+DENTLINK_AI_MODEL = "gpt-4.1-mini"
+DENTLINK_AI_MAX_INPUT_CHARS = "6000"
 
 [[env.preview.d1_databases]]
 binding = "DB"
@@ -58,6 +64,9 @@ DENTLINK_BUILD_ID = "production"
 GOOGLE_REDIRECT_URI = "https://REPLACE_WITH_PRODUCTION_API_ORIGIN/v1/connectors/gmail/callback"
 GOOGLE_CALENDAR_REDIRECT_URI = "https://REPLACE_WITH_PRODUCTION_API_ORIGIN/v1/connectors/google-calendar/callback"
 DENTLINK_WEB_ORIGIN = "https://REPLACE_WITH_PRODUCTION_WEB_ORIGIN"
+DENTLINK_AI_ENABLED = "false"
+DENTLINK_AI_MODEL = "gpt-4.1-mini"
+DENTLINK_AI_MAX_INPUT_CHARS = "6000"
 
 [[env.production.d1_databases]]
 binding = "DB"

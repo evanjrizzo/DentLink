@@ -67,6 +67,10 @@ const milestone7RulesSchemaPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../migrations/0008_gmail_rules.sql"
 );
+const milestone7AiSchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0009_email_sorting_ai.sql"
+);
 
 type StoreFixture = {
   name: string;
@@ -97,7 +101,8 @@ const fixtures: StoreFixture[] = [
         milestone4SchemaPath,
         milestone5SchemaPath,
         milestone7SchemaPath,
-        milestone7RulesSchemaPath
+        milestone7RulesSchemaPath,
+        milestone7AiSchemaPath
       ]);
       return {
         store: new D1DentLinkStore(db),
@@ -1069,7 +1074,13 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       200,
       env
     );
-    expect(rules.rules).toEqual([suppressRule]);
+    expect(rules.rules).toEqual([
+      {
+        ...suppressRule,
+        priority: 1,
+        matchMode: "all"
+      }
+    ]);
 
     const sync = await requestJson<{
       summary: { examined: number; created: number; filtered: number };
@@ -1381,6 +1392,111 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       owner.session.token
     );
     expect(notifications.notifications).toEqual([]);
+  });
+
+  it("stores optional AI summaries for IMAP Gmail notifications without making AI required", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-imap-ai@example.com");
+    let aiCalls = 0;
+    const env = {
+      ...gmailTestEnv(fakeGmailClient(), fakeGmailImapClient()),
+      DENTLINK_AI_ENABLED: "true",
+      OPENAI_API_KEY: "test-openai-key",
+      DENTLINK_AI_MODEL: "gpt-test-mini",
+      emailAiClient: {
+        async summarizeEmail() {
+          aiCalls += 1;
+          return {
+            summary: "AI says this insurance update needs review.",
+            importance: 0.9,
+            category: "action_required" as const,
+            requiresAction: true,
+            suggestedAction: "Review",
+            deadline: null,
+            reason: "The message references an insurance update.",
+            outputTokens: 42
+          };
+        }
+      }
+    };
+    const linked = await connectImapGmailForTest(store, owner, env);
+    const sync = await requestJson<{ summary: { created: number } }>(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(sync.summary.created).toBe(1);
+    expect(aiCalls).toBe(1);
+    const notifications = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(notifications.notifications[0]).toMatchObject({
+      summary: "AI says this insurance update needs review.",
+      severity: "high",
+      email: {
+        provider: "gmail",
+        senderAddress: "clinic@example.test",
+        attachments: [{ filename: "statement.pdf" }]
+      },
+      rule: {
+        action: "notify"
+      },
+      ai: {
+        status: "complete",
+        model: "gpt-test-mini",
+        category: "action_required",
+        requiresAction: true
+      }
+    });
+    const settings = await requestJson(
+      store,
+      "GET",
+      "/v1/ai/settings",
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(settings).toMatchObject({
+      enabled: true,
+      model: "gpt-test-mini",
+      requestsThisMonth: 1,
+      failedRequestsThisMonth: 0
+    });
+    expect(JSON.stringify(settings)).not.toMatch(/test-openai-key|Plain text/);
+  });
+
+  it("creates IMAP notifications with fallback content when AI is disabled", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-imap-no-ai@example.com");
+    const env = gmailTestEnv(fakeGmailClient(), fakeGmailImapClient());
+    const linked = await connectImapGmailForTest(store, owner, env);
+    await requestJson(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    const notifications = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(notifications.notifications[0]?.ai).toMatchObject({ status: "disabled" });
+    expect(notifications.notifications[0]?.summary).toContain("Plain text");
   });
 
   it("requests mail.google.com and verifies IMAP capability during IMAP reconnect", async () => {
@@ -3462,6 +3578,58 @@ function gmailTestEnv(
     gmailClient,
     gmailImapClient
   };
+}
+
+async function connectImapGmailForTest(
+  store: DentLinkStore,
+  owner: AuthSession,
+  env: Partial<ApiEnv>
+): Promise<ConnectorAccount> {
+  const start = await requestJson<{ authorizationUrl: string }>(
+    store,
+    "POST",
+    "/v1/connectors/gmail/start",
+    undefined,
+    owner.session.token,
+    201,
+    env
+  );
+  const startUrl = new URL(start.authorizationUrl);
+  const callback = await handleApiRequest(
+    new Request(
+      `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${startUrl.searchParams.get(
+        "state"
+      )}`,
+      { headers: { Accept: "application/json" } }
+    ),
+    { store, ...env }
+  );
+  const linked = (await callback.json()) as { account: ConnectorAccount };
+  const granted = await store.updateConnectorAccount(
+    owner.user.id,
+    linked.account.id,
+    linked.account.version,
+    {
+      settings: {
+        ...linked.account.settings,
+        gmailIngestionEngine: "gmail_imap",
+        gmailGrantedScopes: "https://mail.google.com/",
+        gmailImapGranted: true,
+        gmailReconnectRequired: false
+      }
+    },
+    "2026-07-14T20:00:00.000Z"
+  );
+  if (!granted) throw new Error("Expected Gmail account to be granted");
+  return requestJson<ConnectorAccount>(
+    store,
+    "PUT",
+    `/v1/connectors/gmail/${linked.account.id}/engine`,
+    { expectedVersion: granted.version, engine: "gmail_imap" },
+    owner.session.token,
+    200,
+    env
+  );
 }
 
 function googleCalendarTestEnv(googleCalendarClient: GoogleCalendarApiClient): Partial<ApiEnv> {

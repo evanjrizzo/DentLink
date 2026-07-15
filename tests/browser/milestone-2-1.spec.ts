@@ -92,6 +92,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await notificationCard(page, secondNotification)
       .getByRole("button", { name: "Dismiss" })
       .click();
+    await page.getByLabel("Show dismissed").check();
     await notificationCard(page, firstNotification).getByRole("button", { name: "Down" }).click();
     await page.reload();
     await expect(page.getByText(email)).toBeVisible();
@@ -283,6 +284,17 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       },
       messages: [] as unknown[]
     };
+    let gmailRules = [
+      {
+        id: "browser-rule-high-priority",
+        name: "High priority example.com",
+        enabled: true,
+        priority: 1,
+        matchMode: "all",
+        senderDomain: "example.com",
+        action: "high_priority"
+      }
+    ];
 
     await page.route("**/v1/**", async (route) => {
       const request = route.request();
@@ -303,6 +315,19 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       }
       if (method === "GET" && path === "/v1/notifications") {
         await fulfillJson(route, { notifications });
+        return;
+      }
+      if (method === "GET" && path === "/v1/ai/settings") {
+        await fulfillJson(route, {
+          enabled: true,
+          model: "gpt-test-mini",
+          maxInputChars: 6000,
+          requestsThisMonth: 1,
+          inputCharsThisMonth: 1200,
+          outputTokensThisMonth: 42,
+          failedRequestsThisMonth: 0,
+          estimatedCostThisMonth: null
+        });
         return;
       }
       if (method === "GET" && path === "/v1/events") {
@@ -359,6 +384,16 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       }
       if (method === "GET" && path === `/v1/connectors/gmail/${gmailAccount.id}/diagnostics`) {
         await fulfillJson(route, gmailDiagnostics);
+        return;
+      }
+      if (method === "GET" && path === `/v1/connectors/gmail/${gmailAccount.id}/rules`) {
+        await fulfillJson(route, { account: gmailAccount, rules: gmailRules });
+        return;
+      }
+      if (method === "PUT" && path === `/v1/connectors/gmail/${gmailAccount.id}/rules`) {
+        const body = (await request.postDataJSON()) as { rules: unknown[] };
+        gmailRules = body.rules;
+        await fulfillJson(route, { account: gmailAccount, rules: gmailRules });
         return;
       }
       if (method === "PUT" && path === `/v1/connectors/gmail/${gmailAccount.id}/engine`) {
@@ -546,8 +581,8 @@ test.describe("Milestone 2.1 preview browser verification", () => {
             id: "calendar_refresh_all",
             title: "Refresh All calendar event",
             allDay: false,
-            startAt: "2026-07-14T15:00:00.000Z",
-            endAt: "2026-07-14T15:30:00.000Z",
+            startAt: "2026-07-15T15:00:00.000Z",
+            endAt: "2026-07-15T15:30:00.000Z",
             version: 1
           })
         ];
@@ -599,6 +634,18 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     expect(eventStreamOpened).toBe(true);
     await page.getByRole("button", { name: "Connectors" }).click();
     await expect(page.getByText(gmailAccount.displayName)).toBeVisible();
+    await expect(page.getByText("Gmail Connections")).toBeVisible();
+    await expect(page.getByText("Google Calendar Connections")).toBeVisible();
+    await expect(page.getByText("Webhook Connections")).toBeVisible();
+    await expect(page.getByText("Email Sorting Rules")).toBeVisible();
+    await page.getByText("Email Sorting Rules").click();
+    await expect(page.getByLabel("Rule name")).toHaveValue("High priority example.com");
+    await expect(page.getByLabel("Sender domain equals")).toHaveValue("example.com");
+    await expect(page.getByLabel("Action")).toHaveValue("high_priority");
+    await page.getByRole("button", { name: "Add Rule" }).click();
+    await expect(page.getByLabel("Rule name").last()).toHaveValue("New email rule");
+    await page.getByRole("button", { name: "Save Rules" }).click();
+    await expect(page.getByRole("button", { name: "Saving Rules..." })).toHaveCount(0);
     await expect(
       page
         .getByRole("article")
@@ -703,7 +750,16 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByText("Google Calendar: success")).toBeVisible();
     expect(syncAllRequests).toBe(1);
     await page.getByRole("button", { name: "Notifications" }).click();
+    await expect(page.getByText("Email AI: Enabled")).toBeVisible();
+    await expect(page.getByText("Model: gpt-test-mini")).toBeVisible();
+    await page.getByLabel("Sort").selectOption("requires_action");
     await expect(notificationCard(page, "Gmail Refresh All message")).toBeVisible();
+    await expect(page.getByText("AI summary: complete").first()).toBeVisible();
+    await expect(
+      page.getByText("High priority rule matched: High priority example.com").first()
+    ).toBeVisible();
+    await expect(page.getByText("Suggested action: Review").first()).toBeVisible();
+    await expect(page.getByText("Open Gmail").first()).toBeVisible();
     await page.getByRole("button", { name: "Agenda" }).click();
     await expect(page.getByText("Refresh All calendar event")).toBeVisible();
   });
@@ -1255,7 +1311,53 @@ function notificationFixture(input: {
     createdAt: input.createdAt ?? timestamp,
     updatedAt: input.updatedAt ?? timestamp,
     completedAt: null,
-    dismissedAt: null
+    dismissedAt: null,
+    email: {
+      accountId: "connector_gmail_browser_refresh",
+      provider: "gmail",
+      providerMessageId: "x-gm-msgid:test",
+      messageId: "<browser-message@example.test>",
+      xGmMsgId: "test",
+      senderAddress: "sender@example.com",
+      senderDisplayName: "Sender Example",
+      recipients: ["gmail-refresh@example.invalid"],
+      subject: input.title,
+      receivedAt: input.createdAt ?? timestamp,
+      labels: ["INBOX"],
+      unread: true,
+      automatedSender: false,
+      mailingList: false,
+      attachments: [],
+      snippet: input.summary,
+      normalizedBodyHash: "hash",
+      sourceUrl: "https://mail.google.com/mail/u/0/#inbox/test-message"
+    },
+    rule: {
+      ruleId: "browser-rule-high-priority",
+      ruleName: "High priority example.com",
+      action: "high_priority",
+      category: null,
+      tag: null,
+      explanation: "High priority rule matched: High priority example.com"
+    },
+    ai: {
+      status: "complete",
+      model: "gpt-test-mini",
+      promptVersion: "email-summary-v1",
+      processedAt: input.updatedAt ?? timestamp,
+      inputChars: 1200,
+      outputTokens: 42,
+      contentHash: "content-hash",
+      summary: input.summary,
+      category: "action_required",
+      importance: 0.9,
+      requiresAction: true,
+      suggestedAction: "Review",
+      deadline: null,
+      reason: "The message needs review.",
+      errorCode: null,
+      errorMessage: null
+    }
   };
 }
 

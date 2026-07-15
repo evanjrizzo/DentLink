@@ -288,6 +288,11 @@ behavior. Slice 3.5 adds an authenticated metadata-only DentLink event stream, p
 visibility refresh, and `Refresh All` orchestration across connected supported services without
 moving provider polling into the browser.
 
+Slice 4 adds user-manageable email sorting rules, normalized IMAP email metadata, optional
+server-side OpenAI summarization/classification, AI usage accounting, explainable notification
+sorting modes, and a more organized Connections view with collapsible Gmail, Google Calendar, and
+Webhook sections.
+
 Scope
 
 Implement:
@@ -375,6 +380,10 @@ Every notification should expose why it was shown or hidden.
 Phase 4: Optional AI Processing
 
 Introduce an optional provider-neutral AI layer.
+
+Implemented in Slice 4 for Gmail IMAP notifications as an optional post-rule enrichment step. AI is
+disabled unless server-side configuration supplies an OpenAI key and enables the feature. Failures
+are recorded on the notification and do not block ingestion.
 
 Requirements:
 

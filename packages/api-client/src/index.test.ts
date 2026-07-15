@@ -77,4 +77,30 @@ describe("@dentlink/api-client", () => {
 
     await expect(client.syncAllConnectors()).resolves.toMatchObject({ status: "success" });
   });
+
+  it("loads email AI settings without exposing provider secrets", async () => {
+    const client = new DentLinkApiClient({
+      fetchImpl: async (url) => {
+        expect(url).toBe("/v1/ai/settings");
+        return new Response(
+          JSON.stringify({
+            enabled: false,
+            model: "gpt-4.1-mini",
+            maxInputChars: 6000,
+            requestsThisMonth: 0,
+            inputCharsThisMonth: 0,
+            outputTokensThisMonth: 0,
+            failedRequestsThisMonth: 0,
+            estimatedCostThisMonth: null
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    });
+
+    await expect(client.getEmailAiSettings()).resolves.toMatchObject({
+      enabled: false,
+      model: "gpt-4.1-mini"
+    });
+  });
 });

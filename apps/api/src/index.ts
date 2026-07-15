@@ -12,6 +12,7 @@ import {
   completeGmailOAuth,
   disconnectGmailAccount,
   getGmailDiagnostics,
+  getEmailAiSettings,
   getGmailRules,
   GmailConfigError,
   gmailConnectorDefinition,
@@ -565,6 +566,9 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     }
     if (method === "GET" && path === "/v1/notifications") {
       return json(await store.listNotifications(auth.user.id));
+    }
+    if (method === "GET" && path === "/v1/ai/settings") {
+      return json(await getEmailAiSettings(store, auth.user.id, env, now));
     }
     if (method === "POST" && path === "/v1/notifications") {
       return json(

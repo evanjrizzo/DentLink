@@ -10,11 +10,14 @@ import type {
   ConnectorAccount,
   ConnectorSyncAllResult,
   DentLinkChangeEvent,
+  EmailAiSettings,
   EntityId,
   GmailDiagnostics,
+  GmailRule,
   Notification,
   NotificationInput,
   NotificationSeverity,
+  NotificationSortMode,
   Note,
   NoteInput,
   NotePatch,
@@ -82,6 +85,8 @@ export function DentLinkNotesApp(): ReactElement {
   const [webhooks, setWebhooks] = useState<Array<WebhookEndpoint & { ingestUrl: string }>>([]);
   const [connectorAccounts, setConnectorAccounts] = useState<ConnectorAccount[]>([]);
   const [gmailDiagnostics, setGmailDiagnostics] = useState<Record<EntityId, GmailDiagnostics>>({});
+  const [gmailRules, setGmailRules] = useState<Record<EntityId, GmailRule[]>>({});
+  const [emailAiSettings, setEmailAiSettings] = useState<EmailAiSettings | null>(null);
   const [gmailSyncStates, setGmailSyncStates] = useState<Record<EntityId, GmailSyncUiState>>({});
   const [refreshState, setRefreshState] = useState<RefreshState>({
     running: false,
@@ -177,8 +182,14 @@ export function DentLinkNotesApp(): ReactElement {
 
   async function loadNotifications(): Promise<void> {
     const requestId = (notificationsRequest.current += 1);
-    const response = await client.listNotifications();
-    if (requestId === notificationsRequest.current) setNotifications(response.notifications);
+    const [response, aiSettings] = await Promise.all([
+      client.listNotifications(),
+      client.getEmailAiSettings().catch(() => null)
+    ]);
+    if (requestId === notificationsRequest.current) {
+      setNotifications(response.notifications);
+      if (aiSettings) setEmailAiSettings(aiSettings);
+    }
   }
 
   async function loadCalendarEvents(
@@ -213,6 +224,7 @@ export function DentLinkNotesApp(): ReactElement {
         })
       );
       await loadGmailDiagnosticsForAccounts(response.accounts);
+      await loadGmailRulesForAccounts(response.accounts);
     }
     return response.accounts;
   }
@@ -232,6 +244,27 @@ export function DentLinkNotesApp(): ReactElement {
       const next = { ...current };
       for (const [accountId, diagnostics] of entries) {
         if (diagnostics) next[accountId] = diagnostics;
+      }
+      return next;
+    });
+  }
+
+  async function loadGmailRulesForAccounts(accounts: ConnectorAccount[]): Promise<void> {
+    const gmailAccounts = accounts.filter((account) => account.connectorKey === "gmail");
+    const entries = await Promise.all(
+      gmailAccounts.map(async (account) => {
+        try {
+          const response = await client.getGmailRules(account.id);
+          return [account.id, response.rules] as const;
+        } catch {
+          return [account.id, null] as const;
+        }
+      })
+    );
+    setGmailRules((current) => {
+      const next = { ...current };
+      for (const [accountId, rules] of entries) {
+        if (rules) next[accountId] = rules;
       }
       return next;
     });
@@ -638,6 +671,17 @@ export function DentLinkNotesApp(): ReactElement {
     if (diagnostics) setGmailDiagnostics((current) => ({ ...current, [accountId]: diagnostics }));
   }
 
+  async function saveGmailRules(account: ConnectorAccount, rules: GmailRule[]): Promise<void> {
+    try {
+      setError(null);
+      const response = await client.updateGmailRules(account.id, rules);
+      setConnectorAccounts((current) => mergeConnectorAccount(current, response.account));
+      setGmailRules((current) => ({ ...current, [account.id]: response.rules }));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Gmail rules could not be saved.");
+    }
+  }
+
   async function disconnectGmail(account: ConnectorAccount): Promise<void> {
     try {
       setError(null);
@@ -928,6 +972,7 @@ export function DentLinkNotesApp(): ReactElement {
       {view === "notifications" ? (
         <NotificationsView
           notifications={notifications}
+          aiSettings={emailAiSettings}
           onCreateNotification={createNotification}
           onUpdateNotification={updateNotification}
           onDeleteNotification={deleteNotification}
@@ -1007,14 +1052,23 @@ export function DentLinkNotesApp(): ReactElement {
       {view === "connectors" ? (
         <ConnectorsView
           accounts={connectorAccounts}
+          webhooks={webhooks}
+          webhookDraft={webhookDraft}
+          lastWebhookSecret={lastWebhookSecret}
+          onWebhookDraftChange={setWebhookDraft}
+          onCreateWebhook={createWebhook}
+          onUpdateWebhook={updateWebhook}
+          onDeleteWebhook={deleteWebhook}
           onConnectGmail={connectGmail}
           onReconnectGmail={(account) => connectGmail(account.id)}
           onSyncGmail={syncGmail}
           onUpdateGmailEngine={updateGmailEngine}
           onDisconnectGmail={disconnectGmail}
           gmailDiagnostics={gmailDiagnostics}
+          gmailRules={gmailRules}
           gmailSyncStates={gmailSyncStates}
           gmailEngineSaveStates={gmailEngineSaveStates}
+          onSaveGmailRules={saveGmailRules}
           onConnectGoogleCalendar={connectGoogleCalendar}
           onReconnectGoogleCalendar={(account) => connectGoogleCalendar(account.id)}
           onSyncGoogleCalendar={syncGoogleCalendar}
@@ -1041,6 +1095,7 @@ function optimisticNote(note: Note, patch: NotePatch, tags: NotesList["tags"]): 
 
 function NotificationsView(props: {
   notifications: Notification[];
+  aiSettings: EmailAiSettings | null;
   onCreateNotification: (input: NotificationInput) => Promise<void>;
   onUpdateNotification: (
     notification: Notification,
@@ -1051,15 +1106,17 @@ function NotificationsView(props: {
   onReorderNotifications: (notifications: Notification[]) => Promise<void>;
 }): ReactElement {
   const [rankingMode, setRankingMode] = useState(false);
+  const [sortMode, setSortMode] = useState<NotificationSortMode>("recommended");
+  const [showSuppressed, setShowSuppressed] = useState(false);
   const [draft, setDraft] = useState<NotificationInput>({
     title: "",
     summary: "",
     severity: "info"
   });
-  const sorted = [...props.notifications].sort((left, right) => {
-    if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
-    return right.rank - left.rank || left.globalOrder - right.globalOrder;
-  });
+  const visibleNotifications = props.notifications.filter((notification) =>
+    showSuppressed ? true : notification.status !== "dismissed"
+  );
+  const sorted = sortNotifications(visibleNotifications, sortMode);
   return (
     <main className="notifications-shell">
       <div className="note-toolbar">
@@ -1070,7 +1127,42 @@ function NotificationsView(props: {
           Ranking Mode
         </button>
         <button onClick={() => void props.onRefreshNotifications()}>Refresh</button>
+        <label>
+          Sort
+          <select
+            value={sortMode}
+            onChange={(event) => setSortMode(event.currentTarget.value as NotificationSortMode)}
+          >
+            <option value="recommended">Recommended</option>
+            <option value="newest">Newest</option>
+            <option value="oldest">Oldest</option>
+            <option value="high_priority">High priority</option>
+            <option value="requires_action">Requires action</option>
+            <option value="deadline_soon">Deadline soon</option>
+          </select>
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={showSuppressed}
+            onChange={(event) => setShowSuppressed(event.currentTarget.checked)}
+          />{" "}
+          Show dismissed
+        </label>
       </div>
+      <section className="ai-settings-panel" aria-label="Email AI settings">
+        <strong>Email AI: {props.aiSettings?.enabled ? "Enabled" : "Disabled"}</strong>
+        <span>Model: {props.aiSettings?.model ?? "Not configured"}</span>
+        <span>Requests this month: {props.aiSettings?.requestsThisMonth ?? 0}</span>
+        <span>Failed requests: {props.aiSettings?.failedRequestsThisMonth ?? 0}</span>
+        <span>
+          Estimated cost:{" "}
+          {props.aiSettings?.estimatedCostThisMonth === null ||
+          props.aiSettings?.estimatedCostThisMonth === undefined
+            ? "Not configured"
+            : `$${props.aiSettings.estimatedCostThisMonth.toFixed(4)}`}
+        </span>
+      </section>
       <form
         className="note-composer"
         onSubmit={(event) => {
@@ -1125,7 +1217,43 @@ function NotificationsView(props: {
             </button>
           </div>
           <p>{notification.summary || notification.body}</p>
+          {notification.email ? (
+            <div className="email-notification-details">
+              <span>From: {notification.email.senderDisplayName}</span>
+              <span>Subject: {notification.email.subject}</span>
+              <span>Received: {new Date(notification.email.receivedAt).toLocaleString()}</span>
+              {notification.email.attachments.length > 0 ? (
+                <span>{notification.email.attachments.length} attachment(s)</span>
+              ) : null}
+            </div>
+          ) : null}
+          {notification.ai ? (
+            <div className={`ai-summary ${notification.ai.status}`}>
+              <strong>AI summary: {notification.ai.status}</strong>
+              {notification.ai.summary ? <p>{notification.ai.summary}</p> : null}
+              {notification.ai.status !== "complete" && notification.email?.snippet ? (
+                <p>Fallback snippet: {notification.email.snippet}</p>
+              ) : null}
+              {notification.ai.category ? <span>Category: {notification.ai.category}</span> : null}
+              {notification.ai.requiresAction ? <span>Requires action</span> : null}
+              {notification.ai.suggestedAction ? (
+                <span>Suggested action: {notification.ai.suggestedAction}</span>
+              ) : null}
+              {notification.ai.deadline ? <span>Deadline: {notification.ai.deadline}</span> : null}
+              {notification.ai.reason ? <span>{notification.ai.reason}</span> : null}
+              {notification.ai.errorMessage ? <span>{notification.ai.errorMessage}</span> : null}
+            </div>
+          ) : null}
+          {notification.rule ? (
+            <p className="rule-explanation">{notification.rule.explanation}</p>
+          ) : null}
+          <p className="recommendation-explanation">{recommendationExplanation(notification)}</p>
           <div className="note-order">
+            {notification.sourceUrl ? (
+              <a href={notification.sourceUrl} target="_blank" rel="noreferrer">
+                Open Gmail
+              </a>
+            ) : null}
             <button
               onClick={() => void props.onUpdateNotification(notification, { status: "done" })}
             >
@@ -2418,11 +2546,113 @@ function exportGmailDiagnostics(
   );
 }
 
+function sortNotifications(
+  notifications: Notification[],
+  mode: NotificationSortMode
+): Notification[] {
+  return [...notifications].sort((left, right) => {
+    if (mode === "newest") return right.createdAt.localeCompare(left.createdAt);
+    if (mode === "oldest") return left.createdAt.localeCompare(right.createdAt);
+    if (mode === "high_priority") {
+      return (
+        severityScore(right.severity) - severityScore(left.severity) ||
+        recommendedScore(right) - recommendedScore(left)
+      );
+    }
+    if (mode === "requires_action") {
+      return (
+        Number(Boolean(right.ai?.requiresAction)) - Number(Boolean(left.ai?.requiresAction)) ||
+        recommendedScore(right) - recommendedScore(left)
+      );
+    }
+    if (mode === "deadline_soon") {
+      return (
+        deadlineScore(left) - deadlineScore(right) ||
+        recommendedScore(right) - recommendedScore(left)
+      );
+    }
+    return recommendedScore(right) - recommendedScore(left);
+  });
+}
+
+function recommendedScore(notification: Notification): number {
+  let score = notification.rank + severityScore(notification.severity) * 20;
+  if (notification.pinned) score += 1000;
+  if (notification.rule?.action === "high_priority") score += 80;
+  if (notification.rule?.action === "low_priority") score -= 30;
+  if (notification.ai?.requiresAction) score += 60;
+  if (notification.ai?.importance) score += notification.ai.importance * 50;
+  if (notification.ai?.deadline) score += Math.max(0, 50 - deadlineScore(notification));
+  score += Math.max(0, 30 - notificationAgeHours(notification));
+  return score;
+}
+
+function recommendationExplanation(notification: Notification): string {
+  const parts: string[] = [];
+  if (notification.pinned) parts.push("pinned");
+  if (notification.rule?.action === "high_priority") parts.push("high priority rule matched");
+  if (notification.rule?.action === "low_priority") parts.push("low priority rule matched");
+  if (notification.ai?.requiresAction) parts.push("reply or review requested");
+  if (notification.ai?.deadline) parts.push(`deadline ${notification.ai.deadline}`);
+  if (notification.ai?.importance !== null && notification.ai?.importance !== undefined) {
+    parts.push(`AI importance ${notification.ai.importance.toFixed(2)}`);
+  }
+  if (parts.length === 0) return "Recommended by recency and current order.";
+  return `${capitalize(parts.join("; "))}.`;
+}
+
+function severityScore(severity: NotificationSeverity): number {
+  if (severity === "high") return 4;
+  if (severity === "medium") return 3;
+  if (severity === "low") return 2;
+  return 1;
+}
+
+function deadlineScore(notification: Notification): number {
+  if (!notification.ai?.deadline) return Number.MAX_SAFE_INTEGER;
+  const value = Date.parse(notification.ai.deadline);
+  if (Number.isNaN(value)) return Number.MAX_SAFE_INTEGER;
+  return Math.max(0, Math.floor((value - Date.now()) / 3_600_000));
+}
+
+function notificationAgeHours(notification: Notification): number {
+  return Math.max(0, Math.floor((Date.now() - Date.parse(notification.createdAt)) / 3_600_000));
+}
+
+function capitalize(value: string): string {
+  return value.length === 0 ? value : `${value[0]?.toUpperCase()}${value.slice(1)}`;
+}
+
+function ruleTestExplanation(rule: GmailRule, diagnostics: GmailDiagnostics | undefined): string {
+  const latest = diagnostics?.messages[0];
+  if (!latest) return "Test rule: no recent Gmail processing outcome available yet.";
+  if (!rule.enabled) return "Test rule: disabled rules are skipped.";
+  if (rule.neverNotify) return `Test rule: would suppress recent message ${latest.messageId}.`;
+  if (rule.alwaysNotify)
+    return `Test rule: would always notify for recent message ${latest.messageId}.`;
+  return `Test rule: evaluates before AI; latest outcome was ${latest.outcome}.`;
+}
+
 function ConnectorsView(props: {
   accounts: ConnectorAccount[];
+  webhooks: Array<WebhookEndpoint & { ingestUrl: string }>;
+  webhookDraft: { name: string; slug: string; destination: WebhookDestination };
+  lastWebhookSecret: string | null;
   gmailDiagnostics: Record<EntityId, GmailDiagnostics>;
+  gmailRules: Record<EntityId, GmailRule[]>;
   gmailSyncStates: Record<EntityId, GmailSyncUiState>;
   gmailEngineSaveStates: Record<EntityId, GmailEngineSaveState>;
+  onWebhookDraftChange: (draft: {
+    name: string;
+    slug: string;
+    destination: WebhookDestination;
+  }) => void;
+  onCreateWebhook: () => Promise<void>;
+  onUpdateWebhook: (
+    webhook: WebhookEndpoint & { ingestUrl: string },
+    patch: { enabled: boolean }
+  ) => Promise<void>;
+  onDeleteWebhook: (webhook: WebhookEndpoint & { ingestUrl: string }) => Promise<void>;
   onConnectGmail: () => Promise<void>;
   onReconnectGmail: (account: ConnectorAccount) => Promise<void>;
   onSyncGmail: (account: ConnectorAccount) => Promise<void>;
@@ -2431,6 +2661,7 @@ function ConnectorsView(props: {
     engine: "gmail_api" | "gmail_imap",
     comparisonMode?: boolean
   ) => Promise<void>;
+  onSaveGmailRules: (account: ConnectorAccount, rules: GmailRule[]) => Promise<void>;
   onDisconnectGmail: (account: ConnectorAccount) => Promise<void>;
   onConnectGoogleCalendar: () => Promise<void>;
   onReconnectGoogleCalendar: (account: ConnectorAccount) => Promise<void>;
@@ -2451,47 +2682,73 @@ function ConnectorsView(props: {
           Connect Google Calendar
         </button>
       </div>
-      {gmailAccounts.length === 0 ? <p>No Gmail accounts connected.</p> : null}
-      {calendarAccounts.length === 0 ? <p>No Google Calendar accounts connected.</p> : null}
-      <div className="note-list">
-        {gmailAccounts.map((account) => (
-          <GmailConnectorCard
-            key={account.id}
-            account={account}
-            diagnostics={props.gmailDiagnostics[account.id]}
-            syncState={props.gmailSyncStates[account.id]}
-            engineSaveState={props.gmailEngineSaveStates[account.id]}
-            onSync={props.onSyncGmail}
-            onReconnect={props.onReconnectGmail}
-            onUpdateEngine={props.onUpdateGmailEngine}
-            onDisconnect={props.onDisconnectGmail}
-          />
-        ))}
-        {calendarAccounts.map((account) => (
-          <article key={account.id} className="notification-card">
-            <strong>{account.displayName}</strong>
-            <span>Status: {account.status}</span>
-            <span>Health: {account.healthStatus}</span>
-            <span>Sync: {account.syncStatus}</span>
-            <span>
-              Last sync:{" "}
-              {account.lastSyncAt ? new Date(account.lastSyncAt).toLocaleString() : "Never"}
-            </span>
-            {account.errorMessage ? <p>{account.errorMessage}</p> : null}
-            <div className="note-order">
-              <button type="button" onClick={() => void props.onSyncGoogleCalendar(account)}>
-                Sync Now
-              </button>
-              <button type="button" onClick={() => void props.onReconnectGoogleCalendar(account)}>
-                Reconnect
-              </button>
-              <button type="button" onClick={() => void props.onDisconnectGoogleCalendar(account)}>
-                Disconnect
-              </button>
-            </div>
-          </article>
-        ))}
-      </div>
+      <details className="connection-section" open>
+        <summary>Gmail Connections</summary>
+        {gmailAccounts.length === 0 ? <p>No Gmail accounts connected.</p> : null}
+        <div className="note-list">
+          {gmailAccounts.map((account) => (
+            <GmailConnectorCard
+              key={account.id}
+              account={account}
+              diagnostics={props.gmailDiagnostics[account.id]}
+              rules={props.gmailRules[account.id] ?? []}
+              syncState={props.gmailSyncStates[account.id]}
+              engineSaveState={props.gmailEngineSaveStates[account.id]}
+              onSync={props.onSyncGmail}
+              onReconnect={props.onReconnectGmail}
+              onUpdateEngine={props.onUpdateGmailEngine}
+              onSaveRules={props.onSaveGmailRules}
+              onDisconnect={props.onDisconnectGmail}
+            />
+          ))}
+        </div>
+      </details>
+      <details className="connection-section" open>
+        <summary>Google Calendar Connections</summary>
+        {calendarAccounts.length === 0 ? <p>No Google Calendar accounts connected.</p> : null}
+        <div className="note-list">
+          {calendarAccounts.map((account) => (
+            <article key={account.id} className="notification-card">
+              <strong>{account.displayName}</strong>
+              <span>Status: {account.status}</span>
+              <span>Health: {account.healthStatus}</span>
+              <span>Sync: {account.syncStatus}</span>
+              <span>
+                Last sync:{" "}
+                {account.lastSyncAt ? new Date(account.lastSyncAt).toLocaleString() : "Never"}
+              </span>
+              {account.errorMessage ? <p>{account.errorMessage}</p> : null}
+              <div className="note-order">
+                <button type="button" onClick={() => void props.onSyncGoogleCalendar(account)}>
+                  Sync Now
+                </button>
+                <button type="button" onClick={() => void props.onReconnectGoogleCalendar(account)}>
+                  Reconnect
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void props.onDisconnectGoogleCalendar(account)}
+                >
+                  Disconnect
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      </details>
+      <details className="connection-section">
+        <summary>Webhook Connections</summary>
+        <WebhooksView
+          webhooks={props.webhooks}
+          draft={props.webhookDraft}
+          lastSecret={props.lastWebhookSecret}
+          onDraftChange={props.onWebhookDraftChange}
+          onCreateWebhook={props.onCreateWebhook}
+          onUpdateWebhook={props.onUpdateWebhook}
+          onDeleteWebhook={props.onDeleteWebhook}
+          onRefreshWebhooks={props.onRefreshConnectors}
+        />
+      </details>
     </main>
   );
 }
@@ -2499,6 +2756,7 @@ function ConnectorsView(props: {
 function GmailConnectorCard(props: {
   account: ConnectorAccount;
   diagnostics: GmailDiagnostics | undefined;
+  rules: GmailRule[];
   syncState: GmailSyncUiState | undefined;
   engineSaveState: GmailEngineSaveState | undefined;
   onSync: (account: ConnectorAccount) => Promise<void>;
@@ -2508,6 +2766,7 @@ function GmailConnectorCard(props: {
     engine: "gmail_api" | "gmail_imap",
     comparisonMode?: boolean
   ) => Promise<void>;
+  onSaveRules: (account: ConnectorAccount, rules: GmailRule[]) => Promise<void>;
   onDisconnect: (account: ConnectorAccount) => Promise<void>;
 }): ReactElement {
   const selectedEngine =
@@ -2638,6 +2897,12 @@ function GmailConnectorCard(props: {
           {syncState.error ?? syncState.stage}
         </p>
       ) : null}
+      <GmailRulesEditor
+        account={props.account}
+        rules={props.rules}
+        diagnostics={props.diagnostics}
+        onSave={(rules) => props.onSaveRules(props.account, rules)}
+      />
       <GmailDiagnosticsSummary
         diagnostics={props.diagnostics}
         degraded={props.account.healthStatus === "degraded"}
@@ -2667,6 +2932,259 @@ function GmailConnectorCard(props: {
         </button>
       </div>
     </article>
+  );
+}
+
+function GmailRulesEditor(props: {
+  account: ConnectorAccount;
+  rules: GmailRule[];
+  diagnostics: GmailDiagnostics | undefined;
+  onSave: (rules: GmailRule[]) => Promise<void>;
+}): ReactElement {
+  const [drafts, setDrafts] = useState<GmailRule[]>(props.rules);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => setDrafts(props.rules), [props.account.id, JSON.stringify(props.rules)]);
+  const updateRule = (index: number, patch: Partial<GmailRule>) => {
+    setDrafts((current) =>
+      current.map((rule, itemIndex) => (itemIndex === index ? { ...rule, ...patch } : rule))
+    );
+  };
+  const save = async (rules: GmailRule[]) => {
+    setSaving(true);
+    try {
+      await props.onSave(rules.map((rule, index) => ({ ...rule, priority: index + 1 })));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <details className="gmail-rules-panel">
+      <summary>Email Sorting Rules</summary>
+      <p className="connector-help">
+        Rules run before optional AI summaries. Suppressed messages remain visible in Gmail
+        diagnostics.
+      </p>
+      <div className="note-order">
+        <button
+          type="button"
+          onClick={() =>
+            setDrafts((current) => [
+              ...current,
+              {
+                id: `gmail-rule-${Date.now()}`,
+                name: "New email rule",
+                enabled: true,
+                priority: current.length + 1,
+                matchMode: "all",
+                action: "notify"
+              }
+            ])
+          }
+        >
+          Add Rule
+        </button>
+        <button type="button" disabled={saving} onClick={() => void save(drafts)}>
+          {saving ? "Saving Rules..." : "Save Rules"}
+        </button>
+      </div>
+      {drafts.length === 0 ? <p>No email rules configured.</p> : null}
+      {drafts.map((rule, index) => (
+        <article key={rule.id} className="rule-card">
+          <label>
+            Rule name
+            <input
+              value={rule.name}
+              onChange={(event) => updateRule(index, { name: event.currentTarget.value })}
+            />
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={rule.enabled}
+              onChange={(event) => updateRule(index, { enabled: event.currentTarget.checked })}
+            />{" "}
+            Enabled
+          </label>
+          <label>
+            Match mode
+            <select
+              value={rule.matchMode ?? "all"}
+              onChange={(event) =>
+                updateRule(index, {
+                  matchMode: event.currentTarget.value === "any" ? "any" : "all"
+                })
+              }
+            >
+              <option value="all">All conditions</option>
+              <option value="any">Any condition</option>
+            </select>
+          </label>
+          <div className="rules-grid">
+            <RuleTextInput
+              label="Sender address equals"
+              value={rule.senderAddress}
+              onChange={(value) => updateRule(index, { senderAddress: value })}
+            />
+            <RuleTextInput
+              label="Sender domain equals"
+              value={rule.senderDomain}
+              onChange={(value) => updateRule(index, { senderDomain: value })}
+            />
+            <RuleTextInput
+              label="Subject contains"
+              value={rule.subjectContains}
+              onChange={(value) => updateRule(index, { subjectContains: value })}
+            />
+            <RuleTextInput
+              label="Recipient contains"
+              value={rule.recipient}
+              onChange={(value) => updateRule(index, { recipient: value })}
+            />
+            <RuleTextInput
+              label="Gmail/IMAP label contains"
+              value={rule.gmailLabel}
+              onChange={(value) => updateRule(index, { gmailLabel: value })}
+            />
+            <RuleTextInput
+              label="Body contains"
+              value={rule.bodyContains}
+              onChange={(value) => updateRule(index, { bodyContains: value })}
+            />
+            <RuleBooleanSelect
+              label="Unread"
+              value={rule.unread}
+              onChange={(value) => updateRule(index, { unread: value })}
+            />
+            <RuleBooleanSelect
+              label="Has attachment"
+              value={rule.hasAttachment}
+              onChange={(value) => updateRule(index, { hasAttachment: value })}
+            />
+            <RuleBooleanSelect
+              label="Automated sender"
+              value={rule.automatedSender}
+              onChange={(value) => updateRule(index, { automatedSender: value })}
+            />
+            <RuleBooleanSelect
+              label="Mailing list/newsletter"
+              value={rule.mailingList}
+              onChange={(value) => updateRule(index, { mailingList: value })}
+            />
+          </div>
+          <div className="rules-grid">
+            <label>
+              Action
+              <select
+                value={rule.action}
+                onChange={(event) =>
+                  updateRule(index, { action: event.currentTarget.value as GmailRule["action"] })
+                }
+              >
+                <option value="notify">Notify</option>
+                <option value="suppress">Suppress</option>
+                <option value="low_priority">Low priority</option>
+                <option value="high_priority">High priority</option>
+                <option value="assign_category">Assign category</option>
+                <option value="assign_tag">Assign tag</option>
+              </select>
+            </label>
+            <RuleTextInput
+              label="Category"
+              value={rule.category}
+              onChange={(value) => updateRule(index, { category: value })}
+            />
+            <RuleTextInput
+              label="Tag"
+              value={rule.tag}
+              onChange={(value) => updateRule(index, { tag: value })}
+            />
+            <label>
+              <input
+                type="checkbox"
+                checked={rule.alwaysNotify === true}
+                onChange={(event) =>
+                  updateRule(index, { alwaysNotify: event.currentTarget.checked })
+                }
+              />{" "}
+              Always notify
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={rule.neverNotify === true}
+                onChange={(event) =>
+                  updateRule(index, { neverNotify: event.currentTarget.checked })
+                }
+              />{" "}
+              Never notify
+            </label>
+          </div>
+          <p className="rule-explanation">{ruleTestExplanation(rule, props.diagnostics)}</p>
+          <div className="note-order">
+            <button
+              type="button"
+              disabled={index === 0}
+              onClick={() => setDrafts((current) => move(current, index, index - 1))}
+            >
+              Up
+            </button>
+            <button
+              type="button"
+              disabled={index === drafts.length - 1}
+              onClick={() => setDrafts((current) => move(current, index, index + 1))}
+            >
+              Down
+            </button>
+            <button
+              type="button"
+              onClick={() => setDrafts((current) => current.filter((item) => item.id !== rule.id))}
+            >
+              Delete
+            </button>
+          </div>
+        </article>
+      ))}
+    </details>
+  );
+}
+
+function RuleTextInput(props: {
+  label: string;
+  value: string | undefined;
+  onChange: (value: string | undefined) => void;
+}): ReactElement {
+  return (
+    <label>
+      {props.label}
+      <input
+        value={props.value ?? ""}
+        onChange={(event) => props.onChange(event.currentTarget.value.trim() || undefined)}
+      />
+    </label>
+  );
+}
+
+function RuleBooleanSelect(props: {
+  label: string;
+  value: boolean | undefined;
+  onChange: (value: boolean | undefined) => void;
+}): ReactElement {
+  return (
+    <label>
+      {props.label}
+      <select
+        value={props.value === undefined ? "any" : props.value ? "true" : "false"}
+        onChange={(event) =>
+          props.onChange(
+            event.currentTarget.value === "any" ? undefined : event.currentTarget.value === "true"
+          )
+        }
+      >
+        <option value="any">Any</option>
+        <option value="true">True</option>
+        <option value="false">False</option>
+      </select>
+    </label>
   );
 }
 
