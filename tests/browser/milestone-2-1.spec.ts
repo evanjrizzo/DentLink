@@ -80,28 +80,52 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await resolveOpenConflict(page);
 
     await page.getByRole("button", { name: "Notifications" }).click();
+    await expect(page.getByRole("button", { name: "Notifications" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Agenda" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Notes" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Settings" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Webhooks" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Connectors" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Refresh All" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Refresh", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "Debug" }).click();
+    await page.getByLabel("Debug Mode").check();
+    await page.reload();
+    await expect(page.getByText(email)).toBeVisible();
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "Debug" }).click();
+    await expect(page.getByLabel("Debug Mode")).toBeChecked();
+    await page.getByRole("button", { name: "Notifications" }).click();
     const firstNotification = `Alpha alert ${runId}`;
     const secondNotification = `Bravo alert ${runId}`;
     await createNotification(page, firstNotification, "medium");
     await createNotification(page, secondNotification, "high");
     await expect(notificationCard(page, firstNotification)).toBeVisible();
-    await expect(page.getByRole("button", { name: "Dismiss" })).toHaveCount(0);
     await notificationCard(page, firstNotification).getByRole("button", { name: "Pin" }).click();
     await notificationCard(page, firstNotification).getByRole("button", { name: "Done" }).click();
     await page.getByRole("button", { name: "Ranking Mode" }).click();
     await notificationCard(page, secondNotification)
       .getByRole("button", { name: "Dismiss" })
       .click();
-    await page.getByLabel("Show dismissed").check();
-    await notificationCard(page, firstNotification).getByRole("button", { name: "Down" }).click();
+    await expect(notificationCard(page, secondNotification)).toHaveCount(0);
+    await page.getByRole("button", { name: "History" }).click();
+    await expect(notificationCard(page, secondNotification)).toBeVisible();
+    await page.getByRole("button", { name: "Active" }).click();
     await page.reload();
     await expect(page.getByText(email)).toBeVisible();
     await page.getByRole("button", { name: "Notifications" }).click();
     await expect(notificationCard(page, firstNotification)).toBeVisible();
+    await notificationCard(page, firstNotification).getByRole("button").first().click();
     await notificationCard(page, firstNotification).getByRole("button", { name: "Delete" }).click();
     await expect(notificationCard(page, firstNotification)).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Webhooks" }).click();
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "Connections" }).click();
+    await expect(page.getByText("Gmail Connections")).toBeVisible();
+    await expect(page.getByText("Google Calendar Connections")).toBeVisible();
+    await expect(page.getByText("Webhook Connections")).toBeVisible();
+    await page.getByText("Webhook Connections").click();
     const notificationSlug = `browser-notification-${runId}`.replaceAll(".", "-");
     const noteSlug = `browser-note-${runId}`.replaceAll(".", "-");
     const notificationWebhookSecret = await createWebhook(page, {
@@ -117,7 +141,9 @@ test.describe("Milestone 2.1 preview browser verification", () => {
 
     await page.reload();
     await expect(page.getByText(email)).toBeVisible();
-    await page.getByRole("button", { name: "Webhooks" }).click();
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "Connections" }).click();
+    await page.getByText("Webhook Connections").click();
     await expect(page.getByText(notificationWebhookSecret)).toHaveCount(0);
 
     const notificationWebhook = webhookCard(page, notificationSlug);
@@ -144,13 +170,15 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         summary: "From browser test"
       })
     ).resolves.toBe(202);
-    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await page.locator(".webhooks-shell").getByRole("button", { name: "Refresh" }).click();
     await expect(notificationWebhook.getByText(/Last triggered: (?!Never)/)).toBeVisible();
     await page.getByRole("button", { name: "Notifications" }).click();
-    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await page.getByRole("button", { name: "Refresh All" }).click();
     await expect(notificationCard(page, webhookNotification)).toBeVisible();
 
-    await page.getByRole("button", { name: "Webhooks" }).click();
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "Connections" }).click();
+    await page.getByText("Webhook Connections").click();
     await notificationWebhook.getByRole("button", { name: "Delete" }).click();
     await expect(webhookCard(page, notificationSlug)).toHaveCount(0);
     await expect(
@@ -177,7 +205,8 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await page.getByRole("button", { name: "Notes" }).click();
     await expect(noteCard(page, webhookNote)).toBeVisible();
 
-    await page.getByRole("button", { name: "Connectors" }).click();
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "Connections" }).click();
     await expect(page.getByRole("button", { name: "Connect Gmail" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Connect Google Calendar" })).toBeVisible();
     await expect(page.getByText("No Gmail accounts connected.")).toBeVisible();
@@ -632,11 +661,16 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByText(user.email)).toBeVisible();
     await expect(notificationCard(page, "Gmail auto refresh message")).toBeVisible();
     expect(eventStreamOpened).toBe(true);
-    await page.getByRole("button", { name: "Connectors" }).click();
+    await expect(page.getByRole("button", { name: "Webhooks" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Connectors" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "Connections" }).click();
     await expect(page.getByText(gmailAccount.displayName)).toBeVisible();
     await expect(page.getByText("Gmail Connections")).toBeVisible();
     await expect(page.getByText("Google Calendar Connections")).toBeVisible();
     await expect(page.getByText("Webhook Connections")).toBeVisible();
+    await expect(page.getByText("Email Sorting Rules")).toHaveCount(0);
+    await page.getByRole("button", { name: "Notification Rules", exact: true }).click();
     await expect(page.getByText("Email Sorting Rules")).toBeVisible();
     await page.getByText("Email Sorting Rules").click();
     await expect(page.getByLabel("Rule name")).toHaveValue("High priority example.com");
@@ -646,6 +680,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByLabel("Rule name").last()).toHaveValue("New email rule");
     await page.getByRole("button", { name: "Save Rules" }).click();
     await expect(page.getByRole("button", { name: "Saving Rules..." })).toHaveCount(0);
+    await page.getByRole("button", { name: "Connections" }).click();
     await expect(
       page
         .getByRole("article")
@@ -674,19 +709,22 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       page.getByText("Reconnect Required. IMAP requires Gmail mail access")
     ).toBeVisible();
     await expect(page.getByLabel("Gmail Ingestion Engine")).toHaveValue("gmail_imap");
-    await expect(page.getByLabel("Enable preview comparison mode")).toBeVisible();
     await expect(page.getByText("Requested Engine: Gmail IMAP (Preview)")).toBeVisible();
     await expect(page.getByText("Active Engine: Gmail API")).toBeVisible();
     await expect(page.getByText("Reason: Reconnect required")).toBeVisible();
     await expect(page.getByText("Reconnect Required: Yes")).toBeVisible();
     await expect(page.getByText("Verified: No")).toBeVisible();
     expect(engineUpdateAttempts).toBe(2);
+    await page.getByRole("button", { name: "Debug" }).click();
+    await page.getByLabel("Debug Mode").check();
+    await page.getByRole("button", { name: "Connections" }).click();
     await page.getByRole("button", { name: "Refresh", exact: true }).click();
     await expect(page.getByLabel("Gmail Ingestion Engine")).toHaveValue("gmail_imap");
     await expect(page.getByText("Requested Engine: Gmail IMAP (Preview)")).toBeVisible();
     await page.reload();
-    await expect(page.getByRole("button", { name: "Connectors" })).toBeVisible();
-    await page.getByRole("button", { name: "Connectors" }).click();
+    await expect(page.getByRole("button", { name: "Settings" })).toBeVisible();
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "Connections" }).click();
     await expect(page.getByLabel("Gmail Ingestion Engine")).toHaveValue("gmail_imap");
     await expect(page.getByText("Requested Engine: Gmail IMAP (Preview)")).toBeVisible();
     await page.getByLabel("Enable preview comparison mode").click();
@@ -698,7 +736,8 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       page.getByRole("button", { name: /Searching|Fetching|Applying rules|Creating notifications/ })
     ).toBeVisible();
     await expect(notificationCard(page, "Gmail synced message")).toBeVisible();
-    await page.getByRole("button", { name: "Connectors" }).click();
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "Connections" }).click();
     await expect(page.getByText("Finished.")).toBeVisible();
     await expect(gmailCard.getByText("Last Sync: Never")).toHaveCount(0);
     await expect(page.getByText("142 messages examined")).toBeVisible();
@@ -751,15 +790,30 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     expect(syncAllRequests).toBe(1);
     await page.getByRole("button", { name: "Notifications" }).click();
     await expect(page.getByText("Email AI: Enabled")).toBeVisible();
-    await expect(page.getByText("Model: gpt-test-mini")).toBeVisible();
     await page.getByLabel("Sort").selectOption("requires_action");
     await expect(notificationCard(page, "Gmail Refresh All message")).toBeVisible();
-    await expect(page.getByText("AI summary: complete").first()).toBeVisible();
+    await expect(page.getByText("Importance: 90").first()).toBeVisible();
+    await notificationCard(page, "Gmail Refresh All message").getByRole("button").first().click();
+    await expect(page.getByText("AI state: complete").first()).toBeVisible();
     await expect(
       page.getByText("High priority rule matched: High priority example.com").first()
     ).toBeVisible();
     await expect(page.getByText("Suggested action: Review").first()).toBeVisible();
-    await expect(page.getByText("Open Gmail").first()).toBeVisible();
+    await expect(page.getByText("Open original").first()).toBeVisible();
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await expect(page.getByRole("button", { name: "Refresh All", exact: true })).toBeVisible();
+    await expect(notificationCard(page, "Gmail Refresh All message")).toBeVisible();
+    const dismissBox = await notificationCard(page, "Gmail Refresh All message")
+      .getByRole("button", { name: "Dismiss" })
+      .boundingBox();
+    expect(dismissBox?.height).toBeGreaterThanOrEqual(40);
+    await page.setViewportSize({ width: 390, height: 720 });
+    await expect(page.getByRole("button", { name: "Refresh All", exact: true })).toBeVisible();
+    await expect(notificationCard(page, "Gmail Refresh All message")).toBeVisible();
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "AI", exact: true }).click();
+    await expect(page.getByText("AI: Enabled")).toBeVisible();
+    await expect(page.getByText("Model: gpt-test-mini")).toBeVisible();
     await page.getByRole("button", { name: "Agenda" }).click();
     await expect(page.getByText("Refresh All calendar event")).toBeVisible();
   });
@@ -1054,6 +1108,11 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByRole("textbox", { name: "Color" })).toBeVisible();
     await expect(page.getByLabel("ICS file")).toHaveAttribute("accept", /text\/calendar/);
     await expect(page.getByRole("button", { name: "Export Local ICS" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Sync Now" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "Debug" }).click();
+    await page.getByLabel("Debug Mode").check();
+    await page.getByRole("button", { name: "Agenda" }).click();
     await page.getByRole("button", { name: "Sync Now" }).click();
     await expect(calendarEventCard(page, "Calendar all-day planning")).toBeVisible();
     await expect(
@@ -1085,7 +1144,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         version: 1
       })
     ];
-    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await page.getByRole("button", { name: "Refresh All" }).click();
     await expect(calendarEventCard(page, "Calendar refresh event")).toBeVisible();
 
     await page.getByLabel("Calendar date").fill("2026-07-15");
@@ -1350,7 +1409,7 @@ function notificationFixture(input: {
       contentHash: "content-hash",
       summary: input.summary,
       category: "action_required",
-      importance: 0.9,
+      importance: 90,
       requiresAction: true,
       suggestedAction: "Review",
       deadline: null,

@@ -1774,9 +1774,8 @@ async function maybeProcessEmailAi(
       notification.version,
       {
         summary: result.summary,
-        severity:
-          result.requiresAction || result.importance >= 0.75 ? "high" : notification.severity,
-        rank: notification.rank + Math.round(result.importance * 50),
+        severity: result.requiresAction || result.importance >= 75 ? "high" : notification.severity,
+        rank: notification.rank + Math.round(result.importance / 2),
         ai: {
           status: "complete",
           model: config.model,

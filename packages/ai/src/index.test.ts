@@ -34,7 +34,7 @@ describe("@dentlink/ai", () => {
       parseEmailAiOutput(
         JSON.stringify({
           summary: "Short summary",
-          importance: 0.8,
+          importance: 80,
           category: "action_required",
           requiresAction: true,
           suggestedAction: "Reply",

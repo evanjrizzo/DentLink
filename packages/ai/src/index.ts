@@ -130,7 +130,7 @@ export function createOpenAIEmailAiClient(input: {
             {
               role: "system",
               content:
-                "Summarize and classify one email for a personal notification dashboard. Return only valid JSON matching the schema."
+                "Summarize and classify one email for a personal notification dashboard. Return only valid JSON matching the schema. Importance is an integer from 0 through 100, where 100 means show immediately and 0 means likely noise."
             },
             {
               role: "user",
@@ -162,7 +162,7 @@ export function createOpenAIEmailAiClient(input: {
                 ],
                 properties: {
                   summary: { type: "string", maxLength: 600 },
-                  importance: { type: "number", minimum: 0, maximum: 1 },
+                  importance: { type: "integer", minimum: 0, maximum: 100 },
                   category: {
                     type: "string",
                     enum: [
@@ -232,8 +232,9 @@ export function parseEmailAiOutput(text: string): Omit<EmailAiResult, "outputTok
   if (
     typeof object.summary !== "string" ||
     typeof object.importance !== "number" ||
+    !Number.isInteger(object.importance) ||
     object.importance < 0 ||
-    object.importance > 1 ||
+    object.importance > 100 ||
     !isEmailAiCategory(category) ||
     typeof object.requiresAction !== "boolean" ||
     typeof object.suggestedAction !== "string" ||

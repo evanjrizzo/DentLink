@@ -1408,7 +1408,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
           aiCalls += 1;
           return {
             summary: "AI says this insurance update needs review.",
-            importance: 0.9,
+            importance: 90,
             category: "action_required" as const,
             requiresAction: true,
             suggestedAction: "Review",

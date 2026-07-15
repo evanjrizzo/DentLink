@@ -29,7 +29,9 @@ import { NotesWorkspace } from "@dentlink/ui";
 
 const initialList: NotesList = { notes: [], folders: [], tags: [] };
 const SESSION_STORAGE_KEY = "dentlink.auth.session.v1";
-type View = "notifications" | "agenda" | "notes" | "webhooks" | "connectors";
+const DEBUG_MODE_STORAGE_KEY = "dentlink.ui.debugMode.v1";
+type View = "notifications" | "agenda" | "notes" | "settings";
+type SettingsTab = "general" | "ai" | "connections" | "rules" | "debug" | "about";
 type CalendarMode = "agenda" | "day" | "week" | "month";
 type GmailSyncStage =
   | "Connecting..."
@@ -104,6 +106,8 @@ export function DentLinkNotesApp(): ReactElement {
   });
   const [lastWebhookSecret, setLastWebhookSecret] = useState<string | null>(null);
   const [view, setView] = useState<View>("notifications");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const [debugMode, setDebugMode] = useState(() => storedDebugMode());
   const [search, setSearch] = useState("");
   const [folderId, setFolderId] = useState<EntityId | null>(null);
   const [tagIds, setTagIds] = useState<EntityId[]>([]);
@@ -119,6 +123,10 @@ export function DentLinkNotesApp(): ReactElement {
   const syncCursor = useRef("0");
 
   const filteredNotes = useMemo(() => notesList.notes, [notesList.notes]);
+
+  useEffect(() => {
+    localStorage.setItem(DEBUG_MODE_STORAGE_KEY, debugMode ? "true" : "false");
+  }, [debugMode]);
 
   useEffect(() => {
     if (!auth) return;
@@ -931,24 +939,20 @@ export function DentLinkNotesApp(): ReactElement {
             Notes
           </button>
           <button
-            className={view === "webhooks" ? "selected" : ""}
-            onClick={() => setView("webhooks")}
+            className={view === "settings" ? "selected" : ""}
+            onClick={() => setView("settings")}
           >
-            Webhooks
-          </button>
-          <button
-            className={view === "connectors" ? "selected" : ""}
-            onClick={() => setView("connectors")}
-          >
-            Connectors
+            Settings
           </button>
         </nav>
-        <button type="button" onClick={() => void refreshAll()} disabled={refreshState.running}>
-          {refreshState.running ? "Refreshing..." : "Refresh All"}
-        </button>
-        <span>{auth.user.email}</span>
+        <span className="account-email">{auth.user.email}</span>
         <button onClick={() => void logout()}>Log out</button>
       </header>
+      <PageHeader
+        title={pageTitle(view)}
+        refreshRunning={refreshState.running}
+        onRefreshAll={refreshAll}
+      />
       {refreshState.message || refreshState.error ? (
         <section className="refresh-status" aria-live="polite">
           <strong>{refreshState.error ?? refreshState.message}</strong>
@@ -976,8 +980,8 @@ export function DentLinkNotesApp(): ReactElement {
           onCreateNotification={createNotification}
           onUpdateNotification={updateNotification}
           onDeleteNotification={deleteNotification}
-          onRefreshNotifications={() => refreshDentLinkData("notifications")}
           onReorderNotifications={reorderNotifications}
+          debugMode={debugMode}
         />
       ) : null}
       {view === "agenda" ? (
@@ -999,6 +1003,7 @@ export function DentLinkNotesApp(): ReactElement {
           onAnnotateEvent={annotateCalendarEvent}
           onImportIcs={importIcs}
           onExportIcs={exportIcs}
+          debugMode={debugMode}
           onRefresh={() => refreshDentLinkData("calendar")}
           onConnectGoogleCalendar={connectGoogleCalendar}
           onSyncGoogleCalendar={syncGoogleCalendar}
@@ -1037,20 +1042,13 @@ export function DentLinkNotesApp(): ReactElement {
           updatingNoteIds={updatingNoteIds}
         />
       ) : null}
-      {view === "webhooks" ? (
-        <WebhooksView
-          webhooks={webhooks}
-          draft={webhookDraft}
-          lastSecret={lastWebhookSecret}
-          onDraftChange={setWebhookDraft}
-          onCreateWebhook={createWebhook}
-          onUpdateWebhook={updateWebhook}
-          onDeleteWebhook={deleteWebhook}
-          onRefreshWebhooks={() => refreshDentLinkData("webhooks")}
-        />
-      ) : null}
-      {view === "connectors" ? (
-        <ConnectorsView
+      {view === "settings" ? (
+        <SettingsView
+          selectedTab={settingsTab}
+          onTabChange={setSettingsTab}
+          debugMode={debugMode}
+          onDebugModeChange={setDebugMode}
+          aiSettings={emailAiSettings}
           accounts={connectorAccounts}
           webhooks={webhooks}
           webhookDraft={webhookDraft}
@@ -1069,6 +1067,7 @@ export function DentLinkNotesApp(): ReactElement {
           gmailSyncStates={gmailSyncStates}
           gmailEngineSaveStates={gmailEngineSaveStates}
           onSaveGmailRules={saveGmailRules}
+          onOpenRules={() => setSettingsTab("rules")}
           onConnectGoogleCalendar={connectGoogleCalendar}
           onReconnectGoogleCalendar={(account) => connectGoogleCalendar(account.id)}
           onSyncGoogleCalendar={syncGoogleCalendar}
@@ -1093,6 +1092,43 @@ function optimisticNote(note: Note, patch: NotePatch, tags: NotesList["tags"]): 
   };
 }
 
+function PageHeader(props: {
+  title: string;
+  refreshRunning: boolean;
+  onRefreshAll: () => Promise<void>;
+}): ReactElement {
+  return (
+    <section className="page-header" aria-label={`${props.title} page controls`}>
+      <h1>{props.title}</h1>
+      <button
+        type="button"
+        onClick={() => void props.onRefreshAll()}
+        disabled={props.refreshRunning}
+      >
+        {props.refreshRunning ? "Refreshing..." : "Refresh All"}
+      </button>
+    </section>
+  );
+}
+
+function pageTitle(view: View): string {
+  switch (view) {
+    case "agenda":
+      return "Agenda";
+    case "notes":
+      return "Notes";
+    case "settings":
+      return "Settings";
+    case "notifications":
+    default:
+      return "Notifications";
+  }
+}
+
+function storedDebugMode(): boolean {
+  return localStorage.getItem(DEBUG_MODE_STORAGE_KEY) === "true";
+}
+
 function NotificationsView(props: {
   notifications: Notification[];
   aiSettings: EmailAiSettings | null;
@@ -1102,112 +1138,154 @@ function NotificationsView(props: {
     patch: Partial<Pick<Notification, "pinned" | "status">>
   ) => Promise<void>;
   onDeleteNotification: (notification: Notification) => Promise<void>;
-  onRefreshNotifications: () => Promise<void>;
   onReorderNotifications: (notifications: Notification[]) => Promise<void>;
+  debugMode: boolean;
 }): ReactElement {
   const [rankingMode, setRankingMode] = useState(false);
   const [sortMode, setSortMode] = useState<NotificationSortMode>("recommended");
-  const [showSuppressed, setShowSuppressed] = useState(false);
+  const [listMode, setListMode] = useState<"active" | "history">("active");
+  const [expandedId, setExpandedId] = useState<EntityId | null>(null);
+  const [showFullBodyIds, setShowFullBodyIds] = useState<EntityId[]>([]);
   const [draft, setDraft] = useState<NotificationInput>({
     title: "",
     summary: "",
     severity: "info"
   });
   const visibleNotifications = props.notifications.filter((notification) =>
-    showSuppressed ? true : notification.status !== "dismissed"
+    listMode === "history"
+      ? notification.status === "dismissed"
+      : notification.status !== "dismissed"
   );
   const sorted = sortNotifications(visibleNotifications, sortMode);
   return (
     <main className="notifications-shell">
-      <div className="note-toolbar">
+      <div className="notification-mode-tabs" role="tablist" aria-label="Notification lists">
         <button
-          className={rankingMode ? "selected" : ""}
-          onClick={() => setRankingMode((enabled) => !enabled)}
+          type="button"
+          className={listMode === "active" ? "selected" : ""}
+          aria-pressed={listMode === "active"}
+          onClick={() => setListMode("active")}
         >
-          Ranking Mode
+          Active
         </button>
-        <button onClick={() => void props.onRefreshNotifications()}>Refresh</button>
-        <label>
-          Sort
-          <select
-            value={sortMode}
-            onChange={(event) => setSortMode(event.currentTarget.value as NotificationSortMode)}
-          >
-            <option value="recommended">Recommended</option>
-            <option value="newest">Newest</option>
-            <option value="oldest">Oldest</option>
-            <option value="high_priority">High priority</option>
-            <option value="requires_action">Requires action</option>
-            <option value="deadline_soon">Deadline soon</option>
-          </select>
-        </label>
-        <label>
-          <input
-            type="checkbox"
-            checked={showSuppressed}
-            onChange={(event) => setShowSuppressed(event.currentTarget.checked)}
-          />{" "}
-          Show dismissed
-        </label>
-      </div>
-      <section className="ai-settings-panel" aria-label="Email AI settings">
-        <strong>Email AI: {props.aiSettings?.enabled ? "Enabled" : "Disabled"}</strong>
-        <span>Model: {props.aiSettings?.model ?? "Not configured"}</span>
-        <span>Requests this month: {props.aiSettings?.requestsThisMonth ?? 0}</span>
-        <span>Failed requests: {props.aiSettings?.failedRequestsThisMonth ?? 0}</span>
-        <span>
-          Estimated cost:{" "}
-          {props.aiSettings?.estimatedCostThisMonth === null ||
-          props.aiSettings?.estimatedCostThisMonth === undefined
-            ? "Not configured"
-            : `$${props.aiSettings.estimatedCostThisMonth.toFixed(4)}`}
-        </span>
-      </section>
-      <form
-        className="note-composer"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!draft.title.trim()) return;
-          void props.onCreateNotification(draft);
-          setDraft({ title: "", summary: "", severity: "info" });
-        }}
-      >
-        <input
-          aria-label="New notification title"
-          placeholder="New notification"
-          value={draft.title}
-          onChange={(event) => setDraft({ ...draft, title: event.currentTarget.value })}
-        />
-        <input
-          aria-label="New notification summary"
-          placeholder="Summary"
-          value={draft.summary ?? ""}
-          onChange={(event) => setDraft({ ...draft, summary: event.currentTarget.value })}
-        />
-        <select
-          aria-label="New notification severity"
-          value={draft.severity}
-          onChange={(event) =>
-            setDraft({
-              ...draft,
-              severity: event.currentTarget.value as NotificationSeverity
-            })
-          }
+        <button
+          type="button"
+          className={listMode === "history" ? "selected" : ""}
+          aria-pressed={listMode === "history"}
+          onClick={() => setListMode("history")}
         >
-          <option value="info">Info</option>
-          <option value="low">Low</option>
-          <option value="medium">Medium</option>
-          <option value="high">High</option>
-        </select>
-        <button type="submit">Add</button>
-      </form>
-      {sorted.length === 0 ? <p>No notifications yet.</p> : null}
+          History
+        </button>
+        {props.debugMode ? (
+          <label className="compact-select">
+            Sort
+            <select
+              value={sortMode}
+              onChange={(event) => setSortMode(event.currentTarget.value as NotificationSortMode)}
+            >
+              <option value="recommended">Recommended</option>
+              <option value="newest">Newest</option>
+              <option value="oldest">Oldest</option>
+              <option value="high_priority">High priority</option>
+              <option value="requires_action">Requires action</option>
+              <option value="deadline_soon">Deadline soon</option>
+            </select>
+          </label>
+        ) : null}
+        {props.debugMode ? (
+          <button
+            className={rankingMode ? "selected" : ""}
+            onClick={() => setRankingMode((enabled) => !enabled)}
+          >
+            Ranking Mode
+          </button>
+        ) : null}
+      </div>
+      {props.debugMode ? (
+        <>
+          <section className="ai-settings-panel" aria-label="Email AI settings">
+            <strong>Email AI: {props.aiSettings?.enabled ? "Enabled" : "Disabled"}</strong>
+            <span>Model: {props.aiSettings?.model ?? "Not configured"}</span>
+            <span>Requests this month: {props.aiSettings?.requestsThisMonth ?? 0}</span>
+            <span>Failed requests: {props.aiSettings?.failedRequestsThisMonth ?? 0}</span>
+            <span>
+              Estimated cost:{" "}
+              {props.aiSettings?.estimatedCostThisMonth === null ||
+              props.aiSettings?.estimatedCostThisMonth === undefined
+                ? "Not configured"
+                : `$${props.aiSettings.estimatedCostThisMonth.toFixed(4)}`}
+            </span>
+          </section>
+          <form
+            className="note-composer"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!draft.title.trim()) return;
+              void props.onCreateNotification(draft);
+              setDraft({ title: "", summary: "", severity: "info" });
+            }}
+          >
+            <input
+              aria-label="New notification title"
+              placeholder="New notification"
+              value={draft.title}
+              onChange={(event) => setDraft({ ...draft, title: event.currentTarget.value })}
+            />
+            <input
+              aria-label="New notification summary"
+              placeholder="Summary"
+              value={draft.summary ?? ""}
+              onChange={(event) => setDraft({ ...draft, summary: event.currentTarget.value })}
+            />
+            <select
+              aria-label="New notification severity"
+              value={draft.severity}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  severity: event.currentTarget.value as NotificationSeverity
+                })
+              }
+            >
+              <option value="info">Info</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+            <button type="submit">Add</button>
+          </form>
+        </>
+      ) : null}
+      {sorted.length === 0 ? (
+        <p>
+          {listMode === "history" ? "No dismissed notifications yet." : "No active notifications."}
+        </p>
+      ) : null}
       {sorted.map((notification, index) => (
-        <article key={notification.id} className={`notification-card ${notification.status}`}>
-          <div className="note-card-top">
-            <strong>{notification.title}</strong>
-            <span>{notification.sourceLabel}</span>
-            <span>{notification.severity}</span>
+        <article
+          key={notification.id}
+          className={`notification-card compact-notification ${notification.status} importance-${importanceBand(notification)}`}
+        >
+          <button
+            type="button"
+            className="notification-summary-button"
+            aria-expanded={expandedId === notification.id}
+            onClick={() =>
+              setExpandedId((current) => (current === notification.id ? null : notification.id))
+            }
+          >
+            <span className="source-badge">{notification.sourceLabel}</span>
+            <strong>
+              {notification.email?.subject || notification.title || "Email notification"}
+            </strong>
+            <span className="notification-card-summary">{notificationSummary(notification)}</span>
+            <span className="importance-pill">Importance: {importanceScore(notification)}</span>
+            <span>{relativeTime(notification.email?.receivedAt ?? notification.createdAt)}</span>
+            {notification.ai?.requiresAction ? (
+              <span className="action-required">Action required</span>
+            ) : null}
+          </button>
+          <div className="notification-touch-actions">
             <button
               onClick={() =>
                 void props.onUpdateNotification(notification, { pinned: !notification.pinned })
@@ -1215,51 +1293,18 @@ function NotificationsView(props: {
             >
               {notification.pinned ? "Pinned" : "Pin"}
             </button>
-          </div>
-          <p>{notification.summary || notification.body}</p>
-          {notification.email ? (
-            <div className="email-notification-details">
-              <span>From: {notification.email.senderDisplayName}</span>
-              <span>Subject: {notification.email.subject}</span>
-              <span>Received: {new Date(notification.email.receivedAt).toLocaleString()}</span>
-              {notification.email.attachments.length > 0 ? (
-                <span>{notification.email.attachments.length} attachment(s)</span>
-              ) : null}
-            </div>
-          ) : null}
-          {notification.ai ? (
-            <div className={`ai-summary ${notification.ai.status}`}>
-              <strong>AI summary: {notification.ai.status}</strong>
-              {notification.ai.summary ? <p>{notification.ai.summary}</p> : null}
-              {notification.ai.status !== "complete" && notification.email?.snippet ? (
-                <p>Fallback snippet: {notification.email.snippet}</p>
-              ) : null}
-              {notification.ai.category ? <span>Category: {notification.ai.category}</span> : null}
-              {notification.ai.requiresAction ? <span>Requires action</span> : null}
-              {notification.ai.suggestedAction ? (
-                <span>Suggested action: {notification.ai.suggestedAction}</span>
-              ) : null}
-              {notification.ai.deadline ? <span>Deadline: {notification.ai.deadline}</span> : null}
-              {notification.ai.reason ? <span>{notification.ai.reason}</span> : null}
-              {notification.ai.errorMessage ? <span>{notification.ai.errorMessage}</span> : null}
-            </div>
-          ) : null}
-          {notification.rule ? (
-            <p className="rule-explanation">{notification.rule.explanation}</p>
-          ) : null}
-          <p className="recommendation-explanation">{recommendationExplanation(notification)}</p>
-          <div className="note-order">
-            {notification.sourceUrl ? (
-              <a href={notification.sourceUrl} target="_blank" rel="noreferrer">
-                Open Gmail
-              </a>
-            ) : null}
             <button
               onClick={() => void props.onUpdateNotification(notification, { status: "done" })}
             >
               Done
             </button>
-            {rankingMode ? (
+            {notification.status === "dismissed" ? (
+              <button
+                onClick={() => void props.onUpdateNotification(notification, { status: "active" })}
+              >
+                Restore
+              </button>
+            ) : (
               <button
                 onClick={() =>
                   void props.onUpdateNotification(notification, { status: "dismissed" })
@@ -1267,24 +1312,126 @@ function NotificationsView(props: {
               >
                 Dismiss
               </button>
-            ) : null}
-            <button
-              disabled={index === 0}
-              onClick={() => void props.onReorderNotifications(move(sorted, index, index - 1))}
-            >
-              Up
-            </button>
-            <button
-              disabled={index === sorted.length - 1}
-              onClick={() => void props.onReorderNotifications(move(sorted, index, index + 1))}
-            >
-              Down
-            </button>
-            <button onClick={() => void props.onDeleteNotification(notification)}>Delete</button>
+            )}
           </div>
+          {expandedId === notification.id ? (
+            <NotificationDetails
+              notification={notification}
+              debugMode={props.debugMode}
+              rankingMode={rankingMode}
+              showFullBody={showFullBodyIds.includes(notification.id)}
+              onToggleFullBody={() =>
+                setShowFullBodyIds((current) =>
+                  current.includes(notification.id)
+                    ? current.filter((id) => id !== notification.id)
+                    : [...current, notification.id]
+                )
+              }
+              onDelete={() => props.onDeleteNotification(notification)}
+              onMoveUp={() => props.onReorderNotifications(move(sorted, index, index - 1))}
+              onMoveDown={() => props.onReorderNotifications(move(sorted, index, index + 1))}
+              canMoveUp={index > 0}
+              canMoveDown={index < sorted.length - 1}
+            />
+          ) : null}
         </article>
       ))}
     </main>
+  );
+}
+
+function NotificationDetails(props: {
+  notification: Notification;
+  debugMode: boolean;
+  rankingMode: boolean;
+  showFullBody: boolean;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+  onToggleFullBody: () => void;
+  onDelete: () => Promise<void>;
+  onMoveUp: () => Promise<void>;
+  onMoveDown: () => Promise<void>;
+}): ReactElement {
+  const notification = props.notification;
+  const hasBody = Boolean(notification.body || notification.email?.snippet);
+  return (
+    <section className="notification-detail-panel" aria-label="Notification details">
+      <div className="detail-grid">
+        <span>Source: {notification.sourceLabel}</span>
+        {notification.email?.senderDisplayName ? (
+          <span>Sender: {notification.email.senderDisplayName}</span>
+        ) : null}
+        {notification.email?.senderAddress ? (
+          <span>Address: {notification.email.senderAddress}</span>
+        ) : null}
+        <span>
+          Received:{" "}
+          {new Date(notification.email?.receivedAt ?? notification.createdAt).toLocaleString()}
+        </span>
+        <span>Importance: {importanceScore(notification)}</span>
+        {notification.ai?.category ? <span>Category: {notification.ai.category}</span> : null}
+        {notification.ai?.suggestedAction ? (
+          <span>Suggested action: {notification.ai.suggestedAction}</span>
+        ) : null}
+        {notification.ai?.deadline ? <span>Deadline: {notification.ai.deadline}</span> : null}
+      </div>
+      <p>{notificationSummary(notification)}</p>
+      {notification.ai?.reason ? <p>{notification.ai.reason}</p> : null}
+      {notification.rule ? (
+        <p>
+          Rule: {notification.rule.ruleName} - {notification.rule.action}
+        </p>
+      ) : null}
+      <div className="notification-detail-actions">
+        {notification.sourceUrl ? (
+          <a href={notification.sourceUrl} target="_blank" rel="noreferrer">
+            Open original
+          </a>
+        ) : null}
+        {hasBody ? (
+          <button type="button" onClick={props.onToggleFullBody}>
+            {props.showFullBody ? "Hide full email" : "Show full email"}
+          </button>
+        ) : null}
+      </div>
+      {props.showFullBody && hasBody ? (
+        <pre className="email-body-preview">{notification.body || notification.email?.snippet}</pre>
+      ) : null}
+      {props.debugMode ? (
+        <section className={`ai-summary ${notification.ai?.status ?? "disabled"}`}>
+          <strong>AI state: {notification.ai?.status ?? "disabled"}</strong>
+          {notification.ai?.model ? <span>Model: {notification.ai.model}</span> : null}
+          {notification.ai?.errorMessage ? <span>{notification.ai.errorMessage}</span> : null}
+          {notification.rule ? <span>{notification.rule.explanation}</span> : null}
+          <span>{recommendationExplanation(notification)}</span>
+        </section>
+      ) : null}
+      {props.debugMode ? (
+        <div className="note-order">
+          {props.rankingMode ? (
+            <>
+              <button
+                type="button"
+                disabled={!props.canMoveUp}
+                onClick={() => void props.onMoveUp()}
+              >
+                Up
+              </button>
+              <button
+                type="button"
+                disabled={!props.canMoveDown}
+                onClick={() => void props.onMoveDown()}
+              >
+                Down
+              </button>
+            </>
+          ) : null}
+          <button type="button" onClick={() => void props.onDelete()}>
+            Delete
+          </button>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -1300,6 +1447,7 @@ function WebhooksView(props: {
   ) => Promise<void>;
   onDeleteWebhook: (webhook: WebhookEndpoint & { ingestUrl: string }) => Promise<void>;
   onRefreshWebhooks: () => Promise<void>;
+  debugMode: boolean;
 }): ReactElement {
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
   async function copyValue(label: string, value: string): Promise<void> {
@@ -1312,9 +1460,11 @@ function WebhooksView(props: {
   }
   return (
     <main className="webhooks-shell">
-      <div className="note-toolbar">
-        <button onClick={() => void props.onRefreshWebhooks()}>Refresh</button>
-      </div>
+      {props.debugMode ? (
+        <div className="note-toolbar">
+          <button onClick={() => void props.onRefreshWebhooks()}>Refresh</button>
+        </div>
+      ) : null}
       <form
         className="note-composer"
         onSubmit={(event) => {
@@ -1373,12 +1523,14 @@ function WebhooksView(props: {
             <span>{webhook.destination}</span>
             <code>{webhook.ingestUrl}</code>
             <span>{webhook.enabled ? "Enabled" : "Disabled"}</span>
-            <span>
-              Last triggered:{" "}
-              {webhook.lastTriggeredAt
-                ? new Date(webhook.lastTriggeredAt).toLocaleString()
-                : "Never"}
-            </span>
+            {props.debugMode ? (
+              <span>
+                Last triggered:{" "}
+                {webhook.lastTriggeredAt
+                  ? new Date(webhook.lastTriggeredAt).toLocaleString()
+                  : "Never"}
+              </span>
+            ) : null}
             <div className="note-order">
               <button type="button" onClick={() => void copyValue("URL", webhook.ingestUrl)}>
                 Copy URL
@@ -1408,6 +1560,7 @@ function CalendarWorkspace(props: {
   source: CalendarSourceFilter;
   draft: CalendarEventInput;
   actionPending: boolean;
+  debugMode: boolean;
   onModeChange: (mode: CalendarMode) => void;
   onDateChange: (date: string) => void;
   onSourceChange: (source: CalendarSourceFilter) => void;
@@ -1447,6 +1600,7 @@ function CalendarWorkspace(props: {
         source={props.source}
         connectedAccounts={connectedAccounts}
         hasCalendarAccount={calendarAccounts.length > 0}
+        debugMode={props.debugMode}
         onModeChange={props.onModeChange}
         onDateChange={props.onDateChange}
         onSourceChange={props.onSourceChange}
@@ -1521,6 +1675,7 @@ function CalendarToolbar(props: {
   source: CalendarSourceFilter;
   connectedAccounts: ConnectorAccount[];
   hasCalendarAccount: boolean;
+  debugMode: boolean;
   onModeChange: (mode: CalendarMode) => void;
   onDateChange: (date: string) => void;
   onSourceChange: (source: CalendarSourceFilter) => void;
@@ -1583,25 +1738,30 @@ function CalendarToolbar(props: {
           <option value="local">DentLink Local</option>
         </select>
       </div>
-      <div className="calendar-toolbar-group calendar-provider-actions" aria-label="Calendar data">
-        <button type="button" onClick={() => void props.onRefresh()}>
-          Refresh
-        </button>
-        {props.connectedAccounts.map((account) => (
-          <button
-            key={account.id}
-            type="button"
-            onClick={() => void props.onSyncGoogleCalendar(account)}
-          >
-            Sync Now
+      {props.debugMode ? (
+        <div
+          className="calendar-toolbar-group calendar-provider-actions"
+          aria-label="Calendar data"
+        >
+          <button type="button" onClick={() => void props.onRefresh()}>
+            Refresh
           </button>
-        ))}
-        {!props.hasCalendarAccount ? (
-          <button type="button" onClick={() => void props.onConnectGoogleCalendar()}>
-            Connect Google Calendar
-          </button>
-        ) : null}
-      </div>
+          {props.connectedAccounts.map((account) => (
+            <button
+              key={account.id}
+              type="button"
+              onClick={() => void props.onSyncGoogleCalendar(account)}
+            >
+              Sync Now
+            </button>
+          ))}
+          {!props.hasCalendarAccount ? (
+            <button type="button" onClick={() => void props.onConnectGoogleCalendar()}>
+              Connect Google Calendar
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -2576,12 +2736,11 @@ function sortNotifications(
 }
 
 function recommendedScore(notification: Notification): number {
-  let score = notification.rank + severityScore(notification.severity) * 20;
+  let score = importanceScore(notification) * 10 + notification.rank;
   if (notification.pinned) score += 1000;
   if (notification.rule?.action === "high_priority") score += 80;
   if (notification.rule?.action === "low_priority") score -= 30;
   if (notification.ai?.requiresAction) score += 60;
-  if (notification.ai?.importance) score += notification.ai.importance * 50;
   if (notification.ai?.deadline) score += Math.max(0, 50 - deadlineScore(notification));
   score += Math.max(0, 30 - notificationAgeHours(notification));
   return score;
@@ -2595,10 +2754,52 @@ function recommendationExplanation(notification: Notification): string {
   if (notification.ai?.requiresAction) parts.push("reply or review requested");
   if (notification.ai?.deadline) parts.push(`deadline ${notification.ai.deadline}`);
   if (notification.ai?.importance !== null && notification.ai?.importance !== undefined) {
-    parts.push(`AI importance ${notification.ai.importance.toFixed(2)}`);
+    parts.push(`importance ${importanceScore(notification)}`);
   }
   if (parts.length === 0) return "Recommended by recency and current order.";
   return `${capitalize(parts.join("; "))}.`;
+}
+
+function notificationSummary(notification: Notification): string {
+  return (
+    notification.ai?.summary ||
+    notification.email?.snippet ||
+    notification.summary ||
+    notification.body ||
+    "No summary available."
+  );
+}
+
+function importanceScore(notification: Notification): number {
+  const value = notification.ai?.importance;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, Math.min(100, Math.round(value <= 1 ? value * 100 : value)));
+  }
+  if (notification.severity === "high") return 85;
+  if (notification.severity === "medium") return 65;
+  if (notification.severity === "low") return 35;
+  return 50;
+}
+
+function importanceBand(notification: Notification): "high" | "medium" | "low" {
+  const score = importanceScore(notification);
+  if (score >= 75) return "high";
+  if (score >= 50) return "medium";
+  return "low";
+}
+
+function relativeTime(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return value;
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return "Just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days} day${days === 1 ? "" : "s"} ago`;
+  return new Date(timestamp).toLocaleDateString();
 }
 
 function severityScore(severity: NotificationSeverity): number {
@@ -2633,7 +2834,12 @@ function ruleTestExplanation(rule: GmailRule, diagnostics: GmailDiagnostics | un
   return `Test rule: evaluates before AI; latest outcome was ${latest.outcome}.`;
 }
 
-function ConnectorsView(props: {
+function SettingsView(props: {
+  selectedTab: SettingsTab;
+  onTabChange: (tab: SettingsTab) => void;
+  debugMode: boolean;
+  onDebugModeChange: (enabled: boolean) => void;
+  aiSettings: EmailAiSettings | null;
   accounts: ConnectorAccount[];
   webhooks: Array<WebhookEndpoint & { ingestUrl: string }>;
   webhookDraft: { name: string; slug: string; destination: WebhookDestination };
@@ -2662,6 +2868,177 @@ function ConnectorsView(props: {
     comparisonMode?: boolean
   ) => Promise<void>;
   onSaveGmailRules: (account: ConnectorAccount, rules: GmailRule[]) => Promise<void>;
+  onOpenRules: () => void;
+  onDisconnectGmail: (account: ConnectorAccount) => Promise<void>;
+  onConnectGoogleCalendar: () => Promise<void>;
+  onReconnectGoogleCalendar: (account: ConnectorAccount) => Promise<void>;
+  onSyncGoogleCalendar: (account: ConnectorAccount) => Promise<void>;
+  onDisconnectGoogleCalendar: (account: ConnectorAccount) => Promise<void>;
+  onRefreshConnectors: () => Promise<void>;
+}): ReactElement {
+  const gmailAccounts = props.accounts.filter((account) => account.connectorKey === "gmail");
+  return (
+    <main className="settings-shell">
+      <nav className="settings-tabs" aria-label="Settings sections">
+        {(
+          [
+            ["general", "General"],
+            ["ai", "AI"],
+            ["connections", "Connections"],
+            ["rules", "Notification Rules"],
+            ["debug", "Debug"],
+            ["about", "About"]
+          ] as const
+        ).map(([tab, label]) => (
+          <button
+            key={tab}
+            type="button"
+            className={props.selectedTab === tab ? "selected" : ""}
+            onClick={() => props.onTabChange(tab)}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+      {props.selectedTab === "general" ? (
+        <section className="settings-panel">
+          <h2>General</h2>
+          <p>DentLink uses backend events and a polling fallback to keep this dashboard current.</p>
+          <p>Use Refresh All for a manual sync across connected services.</p>
+        </section>
+      ) : null}
+      {props.selectedTab === "ai" ? <AiSettingsPanel settings={props.aiSettings} /> : null}
+      {props.selectedTab === "connections" ? (
+        <ConnectorsView
+          accounts={props.accounts}
+          webhooks={props.webhooks}
+          webhookDraft={props.webhookDraft}
+          lastWebhookSecret={props.lastWebhookSecret}
+          gmailDiagnostics={props.gmailDiagnostics}
+          gmailRules={props.gmailRules}
+          gmailSyncStates={props.gmailSyncStates}
+          gmailEngineSaveStates={props.gmailEngineSaveStates}
+          debugMode={props.debugMode}
+          onWebhookDraftChange={props.onWebhookDraftChange}
+          onCreateWebhook={props.onCreateWebhook}
+          onUpdateWebhook={props.onUpdateWebhook}
+          onDeleteWebhook={props.onDeleteWebhook}
+          onConnectGmail={props.onConnectGmail}
+          onReconnectGmail={props.onReconnectGmail}
+          onSyncGmail={props.onSyncGmail}
+          onUpdateGmailEngine={props.onUpdateGmailEngine}
+          onSaveGmailRules={props.onSaveGmailRules}
+          onOpenRules={props.onOpenRules}
+          onDisconnectGmail={props.onDisconnectGmail}
+          onConnectGoogleCalendar={props.onConnectGoogleCalendar}
+          onReconnectGoogleCalendar={props.onReconnectGoogleCalendar}
+          onSyncGoogleCalendar={props.onSyncGoogleCalendar}
+          onDisconnectGoogleCalendar={props.onDisconnectGoogleCalendar}
+          onRefreshConnectors={props.onRefreshConnectors}
+        />
+      ) : null}
+      {props.selectedTab === "rules" ? (
+        <section className="settings-panel">
+          <h2>Notification Rules</h2>
+          {gmailAccounts.length === 0 ? <p>Connect Gmail to manage email sorting rules.</p> : null}
+          {gmailAccounts.map((account) => (
+            <GmailRulesEditor
+              key={account.id}
+              account={account}
+              rules={props.gmailRules[account.id] ?? []}
+              diagnostics={props.gmailDiagnostics[account.id]}
+              onSave={(rules) => props.onSaveGmailRules(account, rules)}
+            />
+          ))}
+        </section>
+      ) : null}
+      {props.selectedTab === "debug" ? (
+        <section className="settings-panel">
+          <h2>Debug</h2>
+          <label className="debug-toggle">
+            <input
+              type="checkbox"
+              checked={props.debugMode}
+              onChange={(event) => props.onDebugModeChange(event.currentTarget.checked)}
+            />{" "}
+            Debug Mode
+          </label>
+          <p>
+            Debug Mode reveals diagnostics, detailed sync histories, sorting controls, ranking
+            controls, and existing manual diagnostic actions.
+          </p>
+        </section>
+      ) : null}
+      {props.selectedTab === "about" ? (
+        <section className="settings-panel">
+          <h2>About</h2>
+          <p>DentLink centralizes notifications, agenda, notes, and connected sources.</p>
+          <p>Gmail IMAP is the primary preview ingestion engine. Gmail API remains available.</p>
+        </section>
+      ) : null}
+    </main>
+  );
+}
+
+function AiSettingsPanel(props: { settings: EmailAiSettings | null }): ReactElement {
+  const settings = props.settings;
+  return (
+    <section className="settings-panel" aria-label="AI settings">
+      <h2>AI</h2>
+      <div className="settings-grid">
+        <span>AI: {settings?.enabled ? "Enabled" : "Disabled"}</span>
+        <span>Model: {settings?.model ?? "Not configured"}</span>
+        <span>Input limit: {settings?.maxInputChars ?? 0} characters</span>
+        <span>Requests this month: {settings?.requestsThisMonth ?? 0}</span>
+        <span>Failed requests: {settings?.failedRequestsThisMonth ?? 0}</span>
+        <span>
+          Estimated cost:{" "}
+          {settings?.estimatedCostThisMonth === null ||
+          settings?.estimatedCostThisMonth === undefined
+            ? "Not configured"
+            : `$${settings.estimatedCostThisMonth.toFixed(4)}`}
+        </span>
+      </div>
+      <p>
+        When enabled, DentLink sends bounded normalized email text, subject, and safe metadata to
+        the configured AI provider after deterministic rules allow notification creation.
+      </p>
+      <p>Tokens, OAuth data, credentials, raw MIME, and attachment contents are never sent.</p>
+    </section>
+  );
+}
+
+function ConnectorsView(props: {
+  accounts: ConnectorAccount[];
+  webhooks: Array<WebhookEndpoint & { ingestUrl: string }>;
+  webhookDraft: { name: string; slug: string; destination: WebhookDestination };
+  lastWebhookSecret: string | null;
+  gmailDiagnostics: Record<EntityId, GmailDiagnostics>;
+  gmailRules: Record<EntityId, GmailRule[]>;
+  gmailSyncStates: Record<EntityId, GmailSyncUiState>;
+  gmailEngineSaveStates: Record<EntityId, GmailEngineSaveState>;
+  debugMode: boolean;
+  onWebhookDraftChange: (draft: {
+    name: string;
+    slug: string;
+    destination: WebhookDestination;
+  }) => void;
+  onCreateWebhook: () => Promise<void>;
+  onUpdateWebhook: (
+    webhook: WebhookEndpoint & { ingestUrl: string },
+    patch: { enabled: boolean }
+  ) => Promise<void>;
+  onDeleteWebhook: (webhook: WebhookEndpoint & { ingestUrl: string }) => Promise<void>;
+  onConnectGmail: () => Promise<void>;
+  onReconnectGmail: (account: ConnectorAccount) => Promise<void>;
+  onSyncGmail: (account: ConnectorAccount) => Promise<void>;
+  onUpdateGmailEngine: (
+    account: ConnectorAccount,
+    engine: "gmail_api" | "gmail_imap",
+    comparisonMode?: boolean
+  ) => Promise<void>;
+  onSaveGmailRules: (account: ConnectorAccount, rules: GmailRule[]) => Promise<void>;
+  onOpenRules: () => void;
   onDisconnectGmail: (account: ConnectorAccount) => Promise<void>;
   onConnectGoogleCalendar: () => Promise<void>;
   onReconnectGoogleCalendar: (account: ConnectorAccount) => Promise<void>;
@@ -2674,9 +3051,11 @@ function ConnectorsView(props: {
     (account) => account.connectorKey === "google-calendar"
   );
   return (
-    <main className="webhooks-shell">
-      <div className="note-toolbar">
-        <button onClick={() => void props.onRefreshConnectors()}>Refresh</button>
+    <section className="connections-settings">
+      <div className="connection-actions">
+        {props.debugMode ? (
+          <button onClick={() => void props.onRefreshConnectors()}>Refresh</button>
+        ) : null}
         <button onClick={() => void props.onConnectGmail()}>Connect Gmail</button>
         <button onClick={() => void props.onConnectGoogleCalendar()}>
           Connect Google Calendar
@@ -2694,10 +3073,12 @@ function ConnectorsView(props: {
               rules={props.gmailRules[account.id] ?? []}
               syncState={props.gmailSyncStates[account.id]}
               engineSaveState={props.gmailEngineSaveStates[account.id]}
+              debugMode={props.debugMode}
               onSync={props.onSyncGmail}
               onReconnect={props.onReconnectGmail}
               onUpdateEngine={props.onUpdateGmailEngine}
               onSaveRules={props.onSaveGmailRules}
+              onOpenRules={props.onOpenRules}
               onDisconnect={props.onDisconnectGmail}
             />
           ))}
@@ -2711,8 +3092,8 @@ function ConnectorsView(props: {
             <article key={account.id} className="notification-card">
               <strong>{account.displayName}</strong>
               <span>Status: {account.status}</span>
-              <span>Health: {account.healthStatus}</span>
-              <span>Sync: {account.syncStatus}</span>
+              {props.debugMode ? <span>Health: {account.healthStatus}</span> : null}
+              {props.debugMode ? <span>Sync: {account.syncStatus}</span> : null}
               <span>
                 Last sync:{" "}
                 {account.lastSyncAt ? new Date(account.lastSyncAt).toLocaleString() : "Never"}
@@ -2747,9 +3128,10 @@ function ConnectorsView(props: {
           onUpdateWebhook={props.onUpdateWebhook}
           onDeleteWebhook={props.onDeleteWebhook}
           onRefreshWebhooks={props.onRefreshConnectors}
+          debugMode={props.debugMode}
         />
       </details>
-    </main>
+    </section>
   );
 }
 
@@ -2759,6 +3141,7 @@ function GmailConnectorCard(props: {
   rules: GmailRule[];
   syncState: GmailSyncUiState | undefined;
   engineSaveState: GmailEngineSaveState | undefined;
+  debugMode: boolean;
   onSync: (account: ConnectorAccount) => Promise<void>;
   onReconnect: (account: ConnectorAccount) => Promise<void>;
   onUpdateEngine: (
@@ -2767,6 +3150,7 @@ function GmailConnectorCard(props: {
     comparisonMode?: boolean
   ) => Promise<void>;
   onSaveRules: (account: ConnectorAccount, rules: GmailRule[]) => Promise<void>;
+  onOpenRules: () => void;
   onDisconnect: (account: ConnectorAccount) => Promise<void>;
 }): ReactElement {
   const selectedEngine =
@@ -2799,8 +3183,8 @@ function GmailConnectorCard(props: {
         <span>Requested Engine: {gmailEngineLabel(selectedEngine)}</span>
         <span>Active Engine: {gmailEngineLabel(activeEngine)}</span>
         <span>Connection Status: {props.account.status}</span>
-        <span>Health: {props.account.healthStatus}</span>
-        <span>Sync: {props.account.syncStatus}</span>
+        {props.debugMode ? <span>Health: {props.account.healthStatus}</span> : null}
+        {props.debugMode ? <span>Sync: {props.account.syncStatus}</span> : null}
         <span>Reconnect Required: {reconnectRequired ? "Yes" : "No"}</span>
         <span>Verified: {engineVerified && !reconnectRequired ? "Yes" : "No"}</span>
         <span>Reason: {reason}</span>
@@ -2820,16 +3204,18 @@ function GmailConnectorCard(props: {
             : "Never"}
         </span>
         <span>Average Sync Time: {formatDuration(engineDiagnostics?.averageMs ?? null)}</span>
-        <span>
-          Latest Comparison Result:{" "}
-          {comparison
-            ? comparison.mismatch
-              ? "Mismatch"
-              : "Identical"
-            : comparisonMode
-              ? "Waiting"
-              : "Off"}
-        </span>
+        {props.debugMode ? (
+          <span>
+            Latest Comparison Result:{" "}
+            {comparison
+              ? comparison.mismatch
+                ? "Mismatch"
+                : "Identical"
+              : comparisonMode
+                ? "Waiting"
+                : "Off"}
+          </span>
+        ) : null}
       </div>
       {props.account.errorMessage ? (
         <p className="connector-warning">
@@ -2861,7 +3247,7 @@ function GmailConnectorCard(props: {
       {props.engineSaveState?.error ? (
         <p className="connector-warning">{props.engineSaveState.error}</p>
       ) : null}
-      {selectedEngine === "gmail_imap" ? (
+      {selectedEngine === "gmail_imap" && props.debugMode ? (
         <label>
           <input
             type="checkbox"
@@ -2897,17 +3283,18 @@ function GmailConnectorCard(props: {
           {syncState.error ?? syncState.stage}
         </p>
       ) : null}
-      <GmailRulesEditor
-        account={props.account}
-        rules={props.rules}
-        diagnostics={props.diagnostics}
-        onSave={(rules) => props.onSaveRules(props.account, rules)}
-      />
-      <GmailDiagnosticsSummary
-        diagnostics={props.diagnostics}
-        degraded={props.account.healthStatus === "degraded"}
-        settings={props.account.settings}
-      />
+      <button type="button" className="secondary-action" onClick={props.onOpenRules}>
+        Manage notification rules
+      </button>
+      {props.debugMode ? (
+        <>
+          <GmailDiagnosticsSummary
+            diagnostics={props.diagnostics}
+            degraded={props.account.healthStatus === "degraded"}
+            settings={props.account.settings}
+          />
+        </>
+      ) : null}
       <div className="note-order">
         <button
           type="button"
@@ -2919,14 +3306,18 @@ function GmailConnectorCard(props: {
         <button type="button" onClick={() => void props.onReconnect(props.account)}>
           Reconnect
         </button>
-        <span className="connector-help">Export Diagnostics</span>
-        <button
-          type="button"
-          aria-label="Export Diagnostics Download JSON"
-          onClick={() => exportGmailDiagnostics(props.account, props.diagnostics)}
-        >
-          Download JSON
-        </button>
+        {props.debugMode ? (
+          <>
+            <span className="connector-help">Export Diagnostics</span>
+            <button
+              type="button"
+              aria-label="Export Diagnostics Download JSON"
+              onClick={() => exportGmailDiagnostics(props.account, props.diagnostics)}
+            >
+              Download JSON
+            </button>
+          </>
+        ) : null}
         <button type="button" onClick={() => void props.onDisconnect(props.account)}>
           Disconnect
         </button>
