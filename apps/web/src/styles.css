@@ -23,10 +23,26 @@
   --radius: 10px;
   --card-radius: 12px;
   --control-height: 44px;
+  --icon-button-size: 44px;
+  --icon-size: 18px;
+  --compact-action-gap: 6px;
   --space-mobile: 12px;
   --space-desktop: 20px;
-  --panel-width: clamp(320px, 34vw, 520px);
-  --sheet-max-height: min(82dvh, 680px);
+  --panel-min-width: 380px;
+  --panel-preferred-width: 40vw;
+  --panel-max-width: 620px;
+  --panel-width: clamp(
+    var(--panel-min-width),
+    var(--panel-preferred-width),
+    var(--panel-max-width)
+  );
+  --panel-main-min-width: 620px;
+  --sheet-max-height: min(86dvh, 720px);
+  --sticky-header-height: 58px;
+  --sticky-footer-height: 64px;
+  --dismiss-action: #b42318;
+  --complete-action: #15803d;
+  --pin-active: #7c3aed;
   --font-sm: 13px;
   --font-base: 15px;
   --font-lg: 22px;
@@ -367,6 +383,7 @@ textarea {
   z-index: 40;
   display: flex;
   justify-content: flex-end;
+  overflow: hidden;
   background: var(--overlay);
 }
 
@@ -375,22 +392,35 @@ textarea {
   align-content: start;
   gap: 14px;
   width: var(--panel-width);
-  max-width: calc(100vw - 24px);
+  min-width: min(var(--panel-min-width), calc(100vw - 24px));
+  max-width: min(var(--panel-max-width), calc(100vw - 24px));
+  height: calc(100dvh - 24px);
   max-height: calc(100dvh - 24px);
   margin: 12px;
   overflow: auto;
+  overflow-x: hidden;
   border: 1px solid var(--border);
   border-radius: var(--card-radius);
   background: var(--surface-bg);
   box-shadow: var(--shadow);
   padding: 16px;
+  container-type: inline-size;
+  overscroll-behavior: contain;
 }
 
 .sheet-header {
+  position: sticky;
+  z-index: 2;
+  top: -16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  min-height: var(--sticky-header-height);
+  margin: -16px -16px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--surface-bg) 96%, transparent);
+  padding: 12px 16px;
 }
 
 .sheet-header h2 {
@@ -508,12 +538,70 @@ textarea {
 .connection-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--compact-action-gap);
   align-items: center;
 }
 
 .notification-touch-actions {
   justify-content: flex-end;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: var(--icon-button-size);
+  width: var(--icon-button-size);
+  min-height: var(--icon-button-size);
+  border-radius: 999px;
+  padding: 0;
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+.icon-button svg {
+  width: var(--icon-size);
+  height: var(--icon-size);
+  flex: 0 0 auto;
+}
+
+.icon-button[aria-pressed="true"] {
+  border-color: var(--pin-active);
+  background: color-mix(in srgb, var(--pin-active) 12%, var(--surface-bg));
+  color: var(--pin-active);
+}
+
+.icon-button.complete {
+  color: var(--complete-action);
+}
+
+.icon-button.dismiss {
+  color: var(--dismiss-action);
+}
+
+.icon-button-text {
+  display: none;
+}
+
+.history-state {
+  display: inline-flex;
+  align-items: center;
+  width: max-content;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 800;
+  padding: 5px 10px;
+}
+
+.history-state.completed {
+  background: color-mix(in srgb, var(--complete-action) 12%, var(--surface-bg));
+  color: var(--complete-action);
+}
+
+.history-state.dismissed {
+  background: color-mix(in srgb, var(--dismiss-action) 10%, var(--surface-bg));
+  color: var(--dismiss-action);
 }
 
 .notification-detail-panel,
@@ -893,6 +981,36 @@ textarea {
   justify-content: end;
 }
 
+.adaptive-panel .form-actions,
+.adaptive-panel .note-order {
+  position: sticky;
+  z-index: 2;
+  bottom: -16px;
+  margin: 0 -16px -16px;
+  border-top: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--surface-bg) 96%, transparent);
+  padding: 12px 16px;
+}
+
+.adaptive-panel .form-actions button[type="submit"],
+.adaptive-panel .sheet-form > button[type="submit"] {
+  min-width: 148px;
+}
+
+.adaptive-panel .sheet-form,
+.adaptive-panel .local-event-form,
+.adaptive-panel .local-event-more-grid,
+.adaptive-panel .note-meta-panel {
+  grid-template-columns: 1fr;
+}
+
+.adaptive-panel input,
+.adaptive-panel select,
+.adaptive-panel textarea {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .file-picker {
   display: grid;
   gap: 6px;
@@ -902,6 +1020,21 @@ textarea {
 .calendar-status,
 .muted-text {
   color: #5a6472;
+}
+
+@container (min-width: 560px) {
+  .adaptive-panel .local-event-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .adaptive-panel .local-event-more-grid,
+  .adaptive-panel .note-meta-panel {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .adaptive-panel .span-2 {
+    grid-column: 1 / -1;
+  }
 }
 
 .agenda-view {
@@ -1301,12 +1434,9 @@ textarea {
   }
 
   .notification-touch-actions {
-    justify-content: stretch;
+    justify-content: flex-end;
   }
 
-  .notification-touch-actions button,
-  .notification-detail-actions button,
-  .notification-detail-actions a,
   .settings-tabs button,
   .connection-actions button {
     flex: 1 1 100%;
@@ -1369,7 +1499,9 @@ textarea {
 
   .adaptive-panel {
     width: 100%;
+    min-width: 0;
     max-width: 100%;
+    height: auto;
     max-height: var(--sheet-max-height);
     margin: 0;
     border-radius: 18px 18px 0 0;
@@ -1377,6 +1509,36 @@ textarea {
 
   .floating-action-button {
     bottom: calc(84px + env(safe-area-inset-bottom));
+  }
+}
+
+@media (max-height: 760px) and (max-width: 1320px) {
+  .adaptive-overlay {
+    align-items: flex-end;
+    justify-content: center;
+  }
+
+  .adaptive-panel {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    height: auto;
+    max-height: var(--sheet-max-height);
+    margin: 0;
+    border-radius: 18px 18px 0 0;
+  }
+}
+
+@media (min-width: 1180px) and (min-height: 780px) {
+  .notification-touch-actions.expanded .icon-button,
+  .notification-detail-actions .icon-button {
+    width: auto;
+    padding: 0 12px;
+  }
+
+  .notification-touch-actions.expanded .icon-button-text,
+  .notification-detail-actions .icon-button-text {
+    display: inline;
   }
 }
 

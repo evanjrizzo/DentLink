@@ -124,6 +124,25 @@ may receive a structured summary, category, importance, suggested action, deadli
 AI failures update AI metadata on the notification and usage counters but do not fail Gmail
 ingestion or change connector health.
 
+Milestone 7 Slice 4.3 keeps the backend notification status model as the source of truth and refines
+client interaction semantics. `status = done` means the user completed the required action and the
+notification moves to History with `completedAt`; `status = dismissed` means the user removed it
+from Active without claiming completion and History shows `dismissedAt`. Restoring either state
+returns the record to Active through the existing versioned notification update API and clears the
+corresponding timestamp in storage. The web client decides whether to show Complete from existing
+metadata only: AI `requiresAction`, non-ignore suggested actions, action-oriented categories,
+high-priority deterministic rules, task-like source labels, or explicit deadlines. Importance alone
+does not make a notification actionable.
+
+The responsive web UI uses one adaptive-surface system for notification details, Notes create/edit,
+Calendar event details, local event creation, and ICS import. Surfaces render as bottom sheets on
+phone/narrow layouts, narrow landscape, and short dashboard-height viewports; they render as
+right-side panels only when the tokenized panel width and remaining main-content width are both
+usable. Panels have sticky headers, independent internal scrolling, compact accessible icon close
+controls, and one-column form layouts by default. Container queries allow two-column form layouts
+only when the panel itself is wide enough, preventing clipped date/time fields on the 1280x720
+touchscreen dashboard.
+
 Milestone 4 adds Google Calendar using the same provider-neutral connector framework. Google
 Calendar OAuth links a calendar connector account, encrypted refresh tokens remain in connector
 credential storage, and synced event instances are normalized into `calendar_events` plus connector

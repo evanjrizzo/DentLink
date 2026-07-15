@@ -264,7 +264,8 @@ capability handling behind the connector abstraction.
 
 ## Milestone 7: Unified Dashboard, Ranking, and AI Assistance
 
-Status: planned (after Milestone 6 is deferred).
+Status: in progress after Milestone 6 is deferred. Slices through 4.3 are implemented on the
+development branch.
 
 Objective
 
@@ -295,6 +296,16 @@ Webhook sections. Slice 4.2 makes the web UI responsive and touch-first across m
 1280x720 dashboard, and desktop, with advanced Notes, Agenda, connection, and diagnostic controls
 behind adaptive sheets, panels, Settings, or Debug Mode. AI summaries default to enabled when an
 OpenAI key is configured and remain user-disableable in Settings.
+
+Slice 4.3 refines daily notification actions and adaptive surfaces. Notification cards expose
+compact contextual actions: Pin/Unpin and Dismiss are always available, source opening appears when
+a source URL exists, and Complete appears only when existing rule, AI, deadline, category, or
+task-type signals mark the item actionable. Complete moves an item to History as completed and
+records completion time; Dismiss moves it to History as dismissed and records dismissal time. Restore
+returns either state to Active and clears the corresponding completion or dismissal marker through
+the existing notification status model. Adaptive panels use tokenized width and height rules,
+choose bottom-sheet mode for phone, narrow landscape, and short 1280x720 layouts, and use wider
+right-side panels only when the panel and remaining main content are both usable.
 
 Scope
 
@@ -391,7 +402,7 @@ not block ingestion.
 
 Requirements:
 
-disabled by default
+enabled by default when an OpenAI key is configured, user-disableable in Settings
 OpenAI API key stored server-side
 provider-neutral AI interface
 configurable model selection

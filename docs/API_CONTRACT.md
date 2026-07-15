@@ -27,8 +27,8 @@ information rather than silently overwriting.
 - `/v1/auth/*`: registration, sign in, sign out, current session, later password reset, later email
   verification, and later device/session revocation.
 - `/v1/sync`: cursor-based incremental sync and mutation acknowledgement.
-- `/v1/notifications/*`: list, source inbox search, mark done, pin, reorder, and Ranking Mode
-  dismiss.
+- `/v1/notifications/*`: list, source inbox search, mark done, pin, reorder, dismiss, restore, and
+  soft delete.
 - `/v1/notes/*`: list, create, update, complete, pin, reorder, search, and conflict-aware edits.
 - `/v1/calendar/*`: views, source filters, local events, annotations, agenda hide, ICS export, and
   future provider sync.
@@ -132,6 +132,13 @@ Notes, sync, history, or conflict contracts.
   a bounded snippet, not attachment binaries. `rule` explains the deterministic rule decision. `ai`
   reports optional summary/classification state as `disabled`, `pending`, `complete`, `failed`, or
   `skipped`.
+- Notification status values keep their existing API representation. `active` appears in the normal
+  Notifications list. `done` means the user completed the required action and storage sets
+  `completedAt`. `dismissed` means the user removed the item from Active without claiming
+  completion and storage sets `dismissedAt`. `deleted` is soft-deleted. Restoring a completed or
+  dismissed item uses `PATCH /v1/notifications/:id` with `status: "active"` and clears the
+  applicable timestamp through the existing storage behavior. Slice 4.3 changed the web action
+  model only; it added no notification endpoint or migration.
 - `GET /v1/ai/settings`: return authenticated user's server-side email AI availability, effective
   enabled state, provider/model, input limit, unavailable reason when applicable, and monthly usage
   counters. It never returns `OPENAI_API_KEY` or provider credentials.

@@ -172,8 +172,14 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
           >
             <div className="sheet-header">
               <h2>Create Note</h2>
-              <button type="button" onClick={() => setComposerOpen(false)}>
-                Close
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="Close create note"
+                title="Close"
+                onClick={() => setComposerOpen(false)}
+              >
+                <span aria-hidden="true">x</span>
               </button>
             </div>
             <form
@@ -317,8 +323,14 @@ function NoteDetailsPanel(
       >
         <div className="sheet-header">
           <h2>Note Details</h2>
-          <button type="button" onClick={props.onClose}>
-            Close
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="Close note details"
+            title="Close"
+            onClick={props.onClose}
+          >
+            <span aria-hidden="true">x</span>
           </button>
         </div>
         <div className="sheet-form">

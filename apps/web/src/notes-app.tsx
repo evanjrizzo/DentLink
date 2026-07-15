@@ -61,6 +61,8 @@ type RefreshState = {
   error: string | null;
 };
 
+type IconName = "check" | "close" | "external" | "pin" | "restore";
+
 const API_BASE_URL = import.meta.env.VITE_DENTLINK_API_BASE_URL ?? "";
 const UI_REFRESH_INTERVAL_MS = 45_000;
 
@@ -1176,8 +1178,8 @@ function NotificationsView(props: {
   });
   const visibleNotifications = props.notifications.filter((notification) =>
     listMode === "history"
-      ? notification.status === "dismissed"
-      : notification.status !== "dismissed"
+      ? notification.status === "dismissed" || notification.status === "done"
+      : notification.status === "active"
   );
   const sorted = sortNotifications(visibleNotifications, sortMode);
   const selectedNotification = sorted.find((item) => item.id === expandedId) ?? null;
@@ -1283,7 +1285,9 @@ function NotificationsView(props: {
       ) : null}
       {sorted.length === 0 ? (
         <p>
-          {listMode === "history" ? "No dismissed notifications yet." : "No active notifications."}
+          {listMode === "history"
+            ? "No completed or dismissed notifications yet."
+            : "No active notifications."}
         </p>
       ) : null}
       {sorted.map((notification) => (
@@ -1310,36 +1314,12 @@ function NotificationsView(props: {
             {notification.ai?.requiresAction ? (
               <span className="action-required">Action required</span>
             ) : null}
+            {listMode === "history" ? <HistoryStateBadge notification={notification} /> : null}
           </button>
-          <div className="notification-touch-actions">
-            <button
-              onClick={() =>
-                void props.onUpdateNotification(notification, { pinned: !notification.pinned })
-              }
-            >
-              {notification.pinned ? "Pinned" : "Pin"}
-            </button>
-            <button
-              onClick={() => void props.onUpdateNotification(notification, { status: "done" })}
-            >
-              Done
-            </button>
-            {notification.status === "dismissed" ? (
-              <button
-                onClick={() => void props.onUpdateNotification(notification, { status: "active" })}
-              >
-                Restore
-              </button>
-            ) : (
-              <button
-                onClick={() =>
-                  void props.onUpdateNotification(notification, { status: "dismissed" })
-                }
-              >
-                Dismiss
-              </button>
-            )}
-          </div>
+          <NotificationQuickActions
+            notification={notification}
+            onUpdateNotification={props.onUpdateNotification}
+          />
         </article>
       ))}
       {selectedNotification ? (
@@ -1356,6 +1336,9 @@ function NotificationsView(props: {
                   ? current.filter((id) => id !== selectedNotification.id)
                   : [...current, selectedNotification.id]
               )
+            }
+            onUpdateNotification={(patch) =>
+              props.onUpdateNotification(selectedNotification, patch)
             }
             onDelete={() => props.onDeleteNotification(selectedNotification)}
             onMoveUp={() =>
@@ -1382,6 +1365,7 @@ function NotificationDetails(props: {
   canMoveDown: boolean;
   onClose: () => void;
   onToggleFullBody: () => void;
+  onUpdateNotification: (patch: Partial<Pick<Notification, "pinned" | "status">>) => Promise<void>;
   onDelete: () => Promise<void>;
   onMoveUp: () => Promise<void>;
   onMoveDown: () => Promise<void>;
@@ -1398,9 +1382,7 @@ function NotificationDetails(props: {
     >
       <div className="sheet-header">
         <h2>Notification</h2>
-        <button type="button" aria-label="Dismiss notification details" onClick={props.onClose}>
-          Done
-        </button>
+        <IconButton label="Close notification details" icon="close" onClick={props.onClose} />
       </div>
       <div className="detail-grid">
         <span>Source: {notification.sourceLabel}</span>
@@ -1422,24 +1404,25 @@ function NotificationDetails(props: {
         {notification.ai?.deadline ? <span>Deadline: {notification.ai.deadline}</span> : null}
       </div>
       <p>{notificationSummary(notification)}</p>
+      {notification.status !== "active" ? <HistoryStateBadge notification={notification} /> : null}
       {notification.ai?.reason ? <p>{notification.ai.reason}</p> : null}
       {notification.rule ? (
         <p>
           Rule: {notification.rule.ruleName} - {notification.rule.action}
         </p>
       ) : null}
-      <div className="notification-detail-actions">
-        {notification.sourceUrl ? (
-          <a href={notification.sourceUrl} target="_blank" rel="noreferrer">
-            Open original
-          </a>
-        ) : null}
-        {hasBody ? (
+      <NotificationQuickActions
+        notification={notification}
+        onUpdateNotification={(_, patch) => props.onUpdateNotification(patch)}
+        expanded
+      />
+      {hasBody ? (
+        <div className="notification-detail-actions">
           <button type="button" onClick={props.onToggleFullBody}>
             {props.showFullBody ? "Hide full email" : "Show full email"}
           </button>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
       {props.showFullBody && hasBody ? (
         <pre className="email-body-preview">{notification.body || notification.email?.snippet}</pre>
       ) : null}
@@ -1478,11 +1461,176 @@ function NotificationDetails(props: {
         </div>
       ) : null}
       <div className="notification-detail-actions">
-        <button type="button" onClick={props.onClose}>
-          Close
-        </button>
+        <IconButton label="Close" icon="close" onClick={props.onClose} />
       </div>
     </section>
+  );
+}
+
+function NotificationQuickActions(props: {
+  notification: Notification;
+  onUpdateNotification: (
+    notification: Notification,
+    patch: Partial<Pick<Notification, "pinned" | "status">>
+  ) => Promise<void>;
+  expanded?: boolean;
+}): ReactElement {
+  const notification = props.notification;
+  const actionable = isActionableNotification(notification);
+  const isHistory = notification.status === "dismissed" || notification.status === "done";
+  return (
+    <div className={`notification-touch-actions ${props.expanded ? "expanded" : ""}`}>
+      <IconButton
+        label={notification.pinned ? "Unpin" : "Pin"}
+        icon="pin"
+        pressed={notification.pinned}
+        onClick={() =>
+          void props.onUpdateNotification(notification, { pinned: !notification.pinned })
+        }
+      />
+      {isHistory ? (
+        <IconButton
+          label="Restore"
+          icon="restore"
+          onClick={() => void props.onUpdateNotification(notification, { status: "active" })}
+        />
+      ) : (
+        <>
+          {actionable ? (
+            <IconButton
+              label="Complete"
+              icon="check"
+              variant="complete"
+              onClick={() => void props.onUpdateNotification(notification, { status: "done" })}
+            />
+          ) : null}
+          <IconButton
+            label="Dismiss"
+            icon="close"
+            variant="dismiss"
+            onClick={() => void props.onUpdateNotification(notification, { status: "dismissed" })}
+          />
+        </>
+      )}
+      {notification.sourceUrl ? (
+        <IconLink
+          label={sourceOpenLabel(notification)}
+          icon="external"
+          href={notification.sourceUrl}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function HistoryStateBadge(props: { notification: Notification }): ReactElement | null {
+  const notification = props.notification;
+  if (notification.status === "done") {
+    return (
+      <span className="history-state completed">
+        Completed {notification.completedAt ? relativeTime(notification.completedAt) : ""}
+      </span>
+    );
+  }
+  if (notification.status === "dismissed") {
+    return (
+      <span className="history-state dismissed">
+        Dismissed {notification.dismissedAt ? relativeTime(notification.dismissedAt) : ""}
+      </span>
+    );
+  }
+  return null;
+}
+
+function IconButton(props: {
+  label: string;
+  icon: IconName;
+  onClick: () => void;
+  pressed?: boolean;
+  variant?: "complete" | "dismiss";
+}): ReactElement {
+  return (
+    <button
+      type="button"
+      className={`icon-button ${props.variant ?? ""}`}
+      aria-label={props.label}
+      title={props.label}
+      aria-pressed={props.pressed}
+      onClick={props.onClick}
+    >
+      <Icon name={props.icon} filled={props.pressed} />
+      <span className="icon-button-text">{props.label}</span>
+    </button>
+  );
+}
+
+function IconLink(props: { label: string; icon: IconName; href: string }): ReactElement {
+  return (
+    <a
+      className="icon-button"
+      aria-label={props.label}
+      title={props.label}
+      href={props.href}
+      target="_blank"
+      rel="noreferrer"
+    >
+      <Icon name={props.icon} />
+      <span className="icon-button-text">{props.label}</span>
+    </a>
+  );
+}
+
+function Icon(props: { name: IconName; filled?: boolean }): ReactElement {
+  const common = {
+    width: "18",
+    height: "18",
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "2",
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true
+  };
+  if (props.name === "pin") {
+    return (
+      <svg {...common} fill={props.filled ? "currentColor" : "none"}>
+        <path d="M12 17v5" />
+        <path d="M7 9l-2 2 8 8 2-2" />
+        <path d="M14 4l6 6" />
+        <path d="M9 9l6-6 6 6-6 6" />
+      </svg>
+    );
+  }
+  if (props.name === "check") {
+    return (
+      <svg {...common}>
+        <path d="M20 6 9 17l-5-5" />
+      </svg>
+    );
+  }
+  if (props.name === "external") {
+    return (
+      <svg {...common}>
+        <path d="M15 3h6v6" />
+        <path d="M10 14 21 3" />
+        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+      </svg>
+    );
+  }
+  if (props.name === "restore") {
+    return (
+      <svg {...common}>
+        <path d="M3 7v6h6" />
+        <path d="M21 17a9 9 0 0 0-15-6.7L3 13" />
+      </svg>
+    );
+  }
+  return (
+    <svg {...common}>
+      <path d="M18 6 6 18" />
+      <path d="m6 6 12 12" />
+    </svg>
   );
 }
 
@@ -1732,9 +1880,11 @@ function CalendarWorkspace(props: {
                     ? "Calendar Files"
                     : "Calendar Actions"}
               </h2>
-              <button type="button" onClick={() => setCalendarAction(null)}>
-                Close
-              </button>
+              <IconButton
+                label="Close calendar actions"
+                icon="close"
+                onClick={() => setCalendarAction(null)}
+              />
             </div>
             {calendarAction === "menu" ? (
               <div className="sheet-action-list">
@@ -2379,9 +2529,7 @@ function EventDetailsPanel(props: {
     >
       <div className="calendar-card-header">
         <h2>{event.title}</h2>
-        <button type="button" onClick={props.onClose}>
-          Close
-        </button>
+        <IconButton label="Close event details" icon="close" onClick={props.onClose} />
       </div>
       <SourceBadge event={event} />
       <dl>
@@ -2883,6 +3031,32 @@ function recommendationExplanation(notification: Notification): string {
   }
   if (parts.length === 0) return "Recommended by recency and current order.";
   return `${capitalize(parts.join("; "))}.`;
+}
+
+function isActionableNotification(notification: Notification): boolean {
+  if (notification.ai?.requiresAction === true) return true;
+  const suggestedAction = notification.ai?.suggestedAction?.trim().toLowerCase();
+  if (
+    suggestedAction &&
+    suggestedAction !== "ignore" &&
+    suggestedAction !== "archive" &&
+    suggestedAction !== "none"
+  ) {
+    return true;
+  }
+  const category = notification.ai?.category ?? notification.rule?.category;
+  if (category && /action|task|approval|reminder|deadline/.test(category)) return true;
+  if (notification.rule?.action === "high_priority") return true;
+  if (notification.ai?.deadline) return true;
+  if (notification.sourceLabel.toLowerCase().includes("task")) return true;
+  return false;
+}
+
+function sourceOpenLabel(notification: Notification): string {
+  const source = notification.sourceLabel.toLowerCase();
+  if (source.includes("calendar")) return "Open event";
+  if (source.includes("gmail")) return "Open original";
+  return "Open source";
 }
 
 function notificationSummary(notification: Notification): string {

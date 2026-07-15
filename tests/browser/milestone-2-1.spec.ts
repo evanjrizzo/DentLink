@@ -78,7 +78,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await settleMutation(page);
     await page.getByLabel(`${tagName} tag for ${firstNote}`).check();
     await settleMutation(page);
-    await page.getByRole("button", { name: "Close" }).click();
+    await page.getByRole("button", { name: "Close note details" }).click();
     await page.getByLabel("Search notes").click();
     await page.locator(".notes-search-field input").fill(firstNote);
     await expect(noteCard(page, firstNote)).toBeVisible();
@@ -92,7 +92,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await page.locator(".note-title").fill(`Stale ${runId}`);
     await expect(page.getByRole("alert")).toContainText("changed on the server");
     await resolveOpenConflict(page);
-    await page.getByRole("button", { name: "Close" }).click();
+    await page.getByRole("button", { name: "Close note details" }).click();
 
     await page.getByRole("button", { name: "Notifications" }).click();
     await expect(page.getByRole("button", { name: "Notifications" })).toBeVisible();
@@ -118,7 +118,9 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await createNotification(page, secondNotification, "high");
     await expect(notificationCard(page, firstNotification)).toBeVisible();
     await notificationCard(page, firstNotification).getByRole("button", { name: "Pin" }).click();
-    await notificationCard(page, firstNotification).getByRole("button", { name: "Done" }).click();
+    await expect(
+      notificationCard(page, firstNotification).getByRole("button", { name: "Complete" })
+    ).toHaveCount(0);
     await page.getByRole("button", { name: "Ranking Mode" }).click();
     await notificationCard(page, secondNotification)
       .getByRole("button", { name: "Dismiss" })
@@ -126,6 +128,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(notificationCard(page, secondNotification)).toHaveCount(0);
     await page.getByRole("button", { name: "History" }).click();
     await expect(notificationCard(page, secondNotification)).toBeVisible();
+    await expect(notificationCard(page, secondNotification).getByText("Dismissed")).toBeVisible();
     await page.getByRole("button", { name: "Active" }).click();
     await page.reload();
     await expect(page.getByText(email)).toBeVisible();
@@ -663,6 +666,38 @@ test.describe("Milestone 2.1 preview browser verification", () => {
         });
         return;
       }
+      if (method === "PATCH" && path.startsWith("/v1/notifications/")) {
+        const notificationId = path.split("/").pop();
+        const patch = request.postDataJSON() as { patch?: { status?: string; pinned?: boolean } };
+        const updatedAt = new Date().toISOString();
+        let updatedNotification: unknown = null;
+        notifications = notifications.map((notification) => {
+          const current = notification as {
+            id?: string;
+            version?: number;
+            status?: string;
+            pinned?: boolean;
+            completedAt?: string | null;
+            dismissedAt?: string | null;
+          };
+          if (current.id !== notificationId) return notification;
+          const status = patch.patch?.status ?? current.status;
+          updatedNotification = {
+            ...current,
+            pinned: patch.patch?.pinned ?? current.pinned,
+            status,
+            completedAt:
+              status === "done" ? updatedAt : status === "active" ? null : current.completedAt,
+            dismissedAt:
+              status === "dismissed" ? updatedAt : status === "active" ? null : current.dismissedAt,
+            updatedAt,
+            version: (current.version ?? 1) + 1
+          };
+          return updatedNotification;
+        });
+        await fulfillJson(route, updatedNotification);
+        return;
+      }
       await route.fulfill({
         status: 404,
         headers: corsHeaders(),
@@ -817,8 +852,8 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       page.getByText("High priority rule matched: High priority example.com").first()
     ).toBeVisible();
     await expect(page.getByText("Suggested action: Review").first()).toBeVisible();
-    await expect(page.getByText("Open original").first()).toBeVisible();
-    await page.getByRole("button", { name: "Close" }).click();
+    await expect(page.getByRole("link", { name: "Open original" }).first()).toBeVisible();
+    await page.getByRole("button", { name: "Close", exact: true }).click();
     await page.setViewportSize({ width: 1280, height: 720 });
     await expect(page.getByRole("button", { name: "Refresh All", exact: true })).toBeVisible();
     await expect(notificationCard(page, "Gmail Refresh All message")).toBeVisible();
@@ -831,6 +866,25 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       page.getByLabel("Mobile primary").getByRole("button", { name: "Notifications" })
     ).toBeVisible();
     await expect(page.getByRole("button", { name: "Refresh All", exact: true })).toBeVisible();
+    await expect(notificationCard(page, "Gmail Refresh All message")).toBeVisible();
+    await expect(
+      notificationCard(page, "Gmail Refresh All message").getByRole("button", {
+        name: "Complete"
+      })
+    ).toBeVisible();
+    await notificationCard(page, "Gmail Refresh All message")
+      .getByRole("button", { name: "Complete" })
+      .click();
+    await expect(notificationCard(page, "Gmail Refresh All message")).toHaveCount(0);
+    await page.getByRole("button", { name: "History" }).click();
+    await expect(notificationCard(page, "Gmail Refresh All message")).toBeVisible();
+    await expect(
+      notificationCard(page, "Gmail Refresh All message").getByText("Completed")
+    ).toBeVisible();
+    await notificationCard(page, "Gmail Refresh All message")
+      .getByRole("button", { name: "Restore" })
+      .click();
+    await page.getByRole("button", { name: "Active" }).click();
     await expect(notificationCard(page, "Gmail Refresh All message")).toBeVisible();
     await page.getByRole("button", { name: "Settings" }).click();
     await page.getByRole("button", { name: "AI", exact: true }).click();
@@ -962,6 +1016,38 @@ test.describe("Milestone 2.1 preview browser verification", () => {
           processed: 2,
           upsertedEvents: 2
         });
+        return;
+      }
+      if (method === "PATCH" && path.startsWith("/v1/notifications/")) {
+        const notificationId = path.split("/").pop();
+        const patch = request.postDataJSON() as { patch?: { status?: string; pinned?: boolean } };
+        const updatedAt = new Date().toISOString();
+        let updatedNotification: unknown = null;
+        notifications = notifications.map((notification) => {
+          const current = notification as {
+            id?: string;
+            version?: number;
+            status?: string;
+            pinned?: boolean;
+            completedAt?: string | null;
+            dismissedAt?: string | null;
+          };
+          if (current.id !== notificationId) return notification;
+          const status = patch.patch?.status ?? current.status;
+          updatedNotification = {
+            ...current,
+            pinned: patch.patch?.pinned ?? current.pinned,
+            status,
+            completedAt:
+              status === "done" ? updatedAt : status === "active" ? null : current.completedAt,
+            dismissedAt:
+              status === "dismissed" ? updatedAt : status === "active" ? null : current.dismissedAt,
+            updatedAt,
+            version: (current.version ?? 1) + 1
+          };
+          return updatedNotification;
+        });
+        await fulfillJson(route, updatedNotification);
         return;
       }
       if (method === "PATCH" && path === "/v1/calendar/events/calendar_event_timed") {
@@ -1136,12 +1222,12 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByRole("combobox", { name: "Recurrence" })).toBeVisible();
     await expect(page.getByRole("textbox", { name: "Category" })).toBeVisible();
     await expect(page.getByRole("textbox", { name: "Color" })).toBeVisible();
-    await page.getByRole("button", { name: "Close" }).click();
+    await page.getByRole("button", { name: "Close calendar actions" }).click();
     await page.getByLabel("Calendar actions").click();
     await page.getByRole("button", { name: "Import ICS" }).click();
     await expect(page.getByLabel("ICS file")).toHaveAttribute("accept", /text\/calendar/);
     await expect(page.getByRole("button", { name: "Export Local ICS" })).toBeVisible();
-    await page.getByRole("button", { name: "Close" }).click();
+    await page.getByRole("button", { name: "Close calendar actions" }).click();
     await expect(page.getByRole("button", { name: "Sync Now" })).toHaveCount(0);
     await page.getByRole("button", { name: "Settings" }).click();
     await page.getByRole("button", { name: "Debug" }).click();
@@ -1264,7 +1350,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     const downloadPromise = page.waitForEvent("download");
     await page.getByRole("button", { name: "Export Local ICS" }).click();
     expect((await downloadPromise).suggestedFilename()).toBe("dentlink-calendar.ics");
-    await page.getByRole("button", { name: "Close" }).click();
+    await page.getByRole("button", { name: "Close calendar actions" }).click();
     await calendarEventCard(page, "Browser local event updated")
       .getByRole("button", { name: "Delete" })
       .click();

@@ -34,15 +34,20 @@ Explanations must be stable enough for users to understand why an item appeared,
 
 ## Controls
 
-Pinned items appear first. Manual ordering is global. Dragging does not create negative feedback. Done does not strongly penalize future items. Dismiss does. AI may adjust only within documented bounds.
+Pinned items appear first. Manual ordering is global. Dragging does not create negative feedback.
+Complete does not strongly penalize future items. Dismiss may contribute negative relevance feedback
+only when ranking-feedback controls record that intent. AI may adjust only within documented bounds.
 
 All fetched email remains searchable even when it is below the promotion threshold.
 
-## Done and dismiss
+## Complete and dismiss
 
-Done means the user handled the item. It moves applicable items to completed history and should not strongly suppress similar future items.
+Complete means the user handled an actionable item. It moves applicable items to completed history
+and should not strongly suppress similar future items.
 
-Dismiss means the item should not have been promoted. It is available only in Ranking Mode on web and desktop, moves the item to dismissed history, and records negative relevance feedback.
+Dismiss means the user no longer wants the item in Active. Normal Dismiss moves the item to
+dismissed history without modifying the provider source. Ranking Mode may expose more detailed
+relevance feedback for dismissals, but the base Dismiss action is a local state change.
 
 Dismiss must not modify provider content. Drag reorder must not create negative relevance feedback.
 

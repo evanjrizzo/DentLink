@@ -114,7 +114,10 @@ updates.
 
 - `notifications`: user-scoped active/done/dismissed/deleted notification records with title,
   summary, body, source metadata, severity, pin state, rank, global order, version, timestamps, and
-  completion/dismissal timestamps.
+  completion/dismissal timestamps. `done` records a handled item through `completed_at`;
+  `dismissed` records an item removed from Active without implying completion through
+  `dismissed_at`. Restoring either state to `active` clears the matching timestamp while preserving
+  the notification's versioned lineage.
 - `webhook_endpoints`: user-scoped named endpoints with unique `(user_id, slug)`, hashed secret
   storage, destination mapping, enabled state, default severity/priority, last-triggered metadata,
   and version.
@@ -272,3 +275,8 @@ empty email/rule metadata.
 processing preferences. Slice 4.2 uses key `email_ai_enabled` to store an explicit AI opt-out. The
 absence of that key means AI follows server availability and defaults to enabled when
 `OPENAI_API_KEY` is configured.
+
+Milestone 7 Slice 4.3 adds no schema migration. Contextual actionability is derived from existing
+notification metadata: AI `requiresAction`, non-ignore suggested actions, action-oriented
+categories, high-priority rule metadata, task-like source labels, or explicit deadlines. Importance
+is a ranking/display signal and does not by itself make a notification actionable.

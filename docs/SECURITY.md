@@ -153,6 +153,13 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   users with no explicit preference. Users may opt out through Settings -> AI, and
   `DENTLINK_AI_ENABLED=false` disables AI globally. Model and input length are configurable with
   `DENTLINK_AI_MODEL` and `DENTLINK_AI_MAX_INPUT_CHARS`.
+- Contextual notification actions are DentLink-local state changes. Complete and Dismiss update the
+  authenticated user's notification record only; they do not archive, delete, reply to, or otherwise
+  mutate Gmail, Google Calendar, webhooks, or future provider source records. Source-opening actions
+  use stored safe source URLs and never expose provider credentials.
+- Adaptive panels and icon actions are accessibility-sensitive UI behavior rather than new trust
+  boundaries. Icon-only actions must keep accessible labels, focus styles, keyboard activation, and
+  non-hover operation so touch and assistive-technology users can invoke the same local API actions.
 
 ## Data minimization
 

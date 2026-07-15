@@ -284,6 +284,12 @@ requests, Notes, Notifications, webhook secret lifecycle, endpoint disabling, en
 last-triggered refresh, and logout behavior. It must not print passwords, bearer tokens, or webhook
 secrets in logs.
 
+Milestone 7 browser coverage also verifies the touch-first shell: top-level navigation, mobile
+bottom navigation, Refresh All, backend-event refresh, contextual Notification actions, History
+restore behavior, Settings-contained Connections/Webhooks, Agenda view controls, local calendar
+creation, ICS import, and Google Calendar read-only behavior. Responsive review for UI slices should
+include approximately 390x844, 844x390, 1280x720, standard desktop, and large desktop viewports.
+
 ## Rollback
 
 - Redeploy a known-good Worker version through Cloudflare or the deployment workflow.

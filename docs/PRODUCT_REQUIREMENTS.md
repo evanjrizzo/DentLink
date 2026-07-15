@@ -10,7 +10,10 @@ Email/password initially, with secure sessions, password reset structure, email 
 
 ## Notifications
 
-Ranked email summaries, webhook notifications, connector alerts, reminders, and future phone notifications. Support done, pin, source opening, global reorder, and Ranking Mode dismiss. Keep fetched email searchable even when not promoted.
+Ranked email summaries, webhook notifications, connector alerts, reminders, and future phone
+notifications. Support contextual Complete for actionable items, Dismiss to remove items from
+Active without implying completion, pin, source opening, global reorder, and Ranking Mode relevance
+controls. Keep fetched email searchable even when not promoted.
 
 Default email scope: inbox plus user-selected folders/labels. Initial import: previous seven days.
 
@@ -38,7 +41,9 @@ Multiple named endpoints per user with secret, enabled state, destination, defau
 
 Web and desktop only initially. Enables dismiss, positive feedback, ranking explanation, and optional structured reason.
 
-Dismiss appears only in Ranking Mode. Done remains available outside Ranking Mode where applicable.
+Normal Dismiss is available as a local History action. Ranking Mode exposes more detailed relevance
+feedback and ranking explanations. Complete remains available outside Ranking Mode only where
+existing metadata makes the notification actionable.
 
 ## Retention
 

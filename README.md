@@ -11,32 +11,37 @@ inspected only as behavioral references.
 
 ## Current status
 
-Milestone 5: authentication, manual Notes, named webhook ingestion, Notifications,
-provider-neutral connector plumbing, Gmail, read-only Google Calendar synchronization, and
-DentLink Local calendar events with ICS import/export.
+Milestone 7 Slice 4.3: authentication, manual Notes, named webhook ingestion, Notifications,
+provider-neutral connector plumbing, Gmail API fallback, preview Gmail IMAP ingestion, read-only
+Google Calendar synchronization, DentLink Local calendar events with ICS import/export, email
+rules, optional AI summaries, live refresh, and the responsive touch-first web UI.
 
 This repository contains the pnpm TypeScript workspace, shared package boundaries, a Worker-style
 API handler, Cloudflare D1 storage adapter, D1 migrations for auth, notes, notifications, and
 webhooks, connector framework tables, encrypted Google credential storage, shared
 auth/note/notification/sync/conflict types, a typed API client, a small sync helper, and a
-responsive web UI shell. It does not yet contain Microsoft 365, Outlook, IMAP, Tauri, Android, push
-notifications, widgets, calendar editing, or AI calls.
+responsive web UI shell. It does not yet contain Microsoft 365, Outlook, production IMAP rollout,
+Tauri, Android, push notifications, widgets, or Google Calendar writeback.
 
 ## Product shape
 
 DentLink has three primary user-facing sections:
 
 - Notifications: ranked externally sourced information, such as email summaries, webhook alerts,
-  connector alerts, reminders, and future phone notifications.
+  connector alerts, reminders, and future phone notifications. Normal cards use contextual compact
+  actions: pin/unpin, dismiss, source open when available, and Complete only for actionable items.
+  Complete means handled and Dismiss means remove from active without implying completion; both move
+  to History and can be restored.
 - Notes: manual or captured tasks and reference notes, with folders, tags, due dates, priorities,
   source links, and completion history.
-- Calendar: unified events from providers, ICS feeds, and DentLink-local entries, with agenda and
-  grid views.
+- Calendar: unified events from providers, ICS files, and DentLink-local entries, with agenda and
+  grid views. Google Calendar provider events remain read-only; DentLink-only annotations and agenda
+  dismissal do not mutate Google Calendar.
 
 ## Planned sources
 
-Gmail, Microsoft 365 Mail, IMAP, Google Calendar, Microsoft 365 Calendar, ICS, named webhooks,
-manual entries, and future local/device agents.
+Gmail API, preview Gmail IMAP, Microsoft 365 Mail, generic IMAP, Google Calendar, Microsoft 365
+Calendar, ICS, named webhooks, manual entries, and future local/device agents.
 
 ## Planned clients
 
@@ -69,7 +74,8 @@ packages/
 - Connector-specific provider payloads do not leak into generic UI components.
 - Platform-specific capabilities live behind web, desktop, Android, or local-agent capability
   layers.
-- AI is optional and provider-neutral.
+- AI is provider-neutral and optional to the user. When `OPENAI_API_KEY` is configured and the
+  server has not disabled AI, summaries default to enabled for users with no explicit preference.
 
 ## Documentation
 
@@ -125,6 +131,10 @@ sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0003_connector_framewor
 sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0004_gmail_connector.sql
 sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0005_google_calendar_connector.sql
 sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0006_calendar_foundation_ics.sql
+sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0007_gmail_sync_diagnostics.sql
+sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0008_gmail_rules_ai.sql
+sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0009_gmail_imap_engine.sql
+sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0010_ai_user_preferences.sql
 sqlite3 /tmp/dentlink_m3_migration_check.db "PRAGMA foreign_key_check;"
 sqlite3 /tmp/dentlink_m3_migration_check.db "PRAGMA integrity_check;"
 ```

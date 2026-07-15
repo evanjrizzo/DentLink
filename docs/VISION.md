@@ -18,7 +18,8 @@ DentLink should feel like one dependable command center rather than another inbo
 
 Users should be able to act quickly:
 
-- mark handled items done
+- mark actionable handled items complete
+- dismiss items from Active without implying completion
 - pin important items
 - open the authoritative source
 - create or edit notes
@@ -55,9 +56,18 @@ Agenda dismissal hides an event from the agenda only. It must not modify the pro
 
 ## Control semantics
 
-Done means the item was handled. It moves applicable items to completed history and does not strongly penalize similar future items.
+Complete means the item was handled. It is shown only when existing signals make a notification
+actionable, such as AI `requiresAction`, a non-ignore suggested action, a task/deadline/reminder
+category, a high-priority deterministic rule, a task-like source, or an explicit deadline. Complete
+moves the item to completed History and does not strongly penalize similar future items.
 
-Dismiss is available only in Ranking Mode on web and desktop. It means the item should not have been promoted, moves it to dismissed history, and records negative relevance feedback. It must not modify the source item.
+Dismiss means the user no longer wants the item in Active. It moves the item to dismissed History
+without claiming the underlying task was handled and must not modify the source item. Ranking Mode
+may still expose more detailed relevance controls, but the normal Dismiss action is a local
+DentLink state change.
+
+Restore returns completed or dismissed History items to Active and clears the corresponding
+completion or dismissal marker when supported by the existing versioned API.
 
 Manual drag ordering changes the user's ordering preference. It must not automatically create negative feedback.
 
