@@ -59,6 +59,7 @@ const GMAIL_IMAP_RECONNECT_MESSAGE =
   "Reconnect Gmail to grant full Gmail mailbox access required for IMAP sync.";
 const GMAIL_RULES_SETTING_KEY = "gmailRulesJson";
 const GMAIL_INGESTION_ENGINE_SETTING_KEY = "gmailIngestionEngine";
+const EMAIL_AI_ENABLED_PREFERENCE_KEY = "email_ai_enabled";
 
 type GmailOperation =
   | "gmail_token_refresh"
@@ -664,17 +665,36 @@ export async function getEmailAiSettings(
   env: GmailRuntimeEnv,
   now: string
 ) {
-  const config = emailAiConfig(env);
+  const config = await emailAiUserConfig(store, userId, env);
   return store.getAiUsageSettings(
     userId,
     {
       enabled: config.enabled,
+      available: config.available,
+      provider: "openai",
       model: config.model,
       maxInputChars: config.maxInputChars,
+      unavailableReason: config.unavailableReason,
       estimatedCostThisMonth: null
     },
     now
   );
+}
+
+export async function updateEmailAiSettings(
+  store: DentLinkStore,
+  userId: EntityId,
+  input: { enabled: boolean },
+  env: GmailRuntimeEnv,
+  now: string
+) {
+  await store.setUserPreference(
+    userId,
+    EMAIL_AI_ENABLED_PREFERENCE_KEY,
+    input.enabled ? "true" : "false",
+    now
+  );
+  return getEmailAiSettings(store, userId, env, now);
 }
 
 export async function updateGmailEngine(
@@ -1280,7 +1300,7 @@ async function ingestNormalizedGmailEmail(
       rank: notificationRankForRule(ruleDecision.action),
       email: emailMetadata,
       rule: ruleMetadata,
-      ai: initialEmailAiMetadata(env, email, now)
+      ai: await initialEmailAiMetadata(store, userId, env, email, now)
     },
     now
   );
@@ -1717,12 +1737,14 @@ function gmailRuleActionLabel(action: GmailRule["action"]): string {
   return "Notify";
 }
 
-function initialEmailAiMetadata(
+async function initialEmailAiMetadata(
+  store: DentLinkStore,
+  userId: EntityId,
   env: GmailRuntimeEnv,
   email: NormalizedGmailEmail,
   now: string
-): Notification["ai"] {
-  const config = emailAiConfig(env);
+): Promise<Notification["ai"]> {
+  const config = await emailAiUserConfig(store, userId, env);
   if (!config.enabled) return notificationAiState("disabled", config.model);
   if (!email.normalizedBody.trim()) return notificationAiState("skipped", config.model, now);
   return notificationAiState("pending", config.model);
@@ -1736,7 +1758,7 @@ async function maybeProcessEmailAi(
   env: GmailRuntimeEnv,
   now: string
 ): Promise<Notification> {
-  const config = emailAiConfig(env);
+  const config = await emailAiUserConfig(store, userId, env);
   if (!config.enabled || notification.ai.status !== "pending") return notification;
   const inputBody = email.normalizedBody.slice(0, config.maxInputChars);
   const contentHash = await emailContentHash({
@@ -1867,21 +1889,40 @@ function notificationAiState(
 
 function emailAiConfig(env: GmailRuntimeEnv): {
   enabled: boolean;
+  available: boolean;
   apiKey: string;
   model: string;
   maxInputChars: number;
+  unavailableReason: string | null;
 } {
   const apiKey = env.OPENAI_API_KEY ?? "";
-  const enabled = env.DENTLINK_AI_ENABLED === "true" && apiKey.length > 0;
+  const globallyDisabled = env.DENTLINK_AI_ENABLED === "false";
+  const available = apiKey.length > 0 && !globallyDisabled;
   const maxInputChars = Number.parseInt(env.DENTLINK_AI_MAX_INPUT_CHARS ?? "", 10);
   return {
-    enabled,
+    enabled: available,
+    available,
     apiKey,
     model: env.DENTLINK_AI_MODEL || DEFAULT_EMAIL_AI_MODEL,
+    unavailableReason:
+      apiKey.length === 0 ? "missing_api_key" : globallyDisabled ? "disabled_by_environment" : null,
     maxInputChars:
       Number.isFinite(maxInputChars) && maxInputChars > 0
         ? Math.min(maxInputChars, 20_000)
         : DEFAULT_EMAIL_AI_MAX_INPUT_CHARS
+  };
+}
+
+async function emailAiUserConfig(
+  store: DentLinkStore,
+  userId: EntityId,
+  env: GmailRuntimeEnv
+): Promise<ReturnType<typeof emailAiConfig>> {
+  const config = emailAiConfig(env);
+  const preference = await store.getUserPreference(userId, EMAIL_AI_ENABLED_PREFERENCE_KEY);
+  return {
+    ...config,
+    enabled: config.available && preference !== "false"
   };
 }
 

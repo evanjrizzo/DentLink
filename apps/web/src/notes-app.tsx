@@ -461,6 +461,15 @@ export function DentLinkNotesApp(): ReactElement {
     }
   }
 
+  async function updateEmailAiEnabled(enabled: boolean): Promise<void> {
+    try {
+      const next = await client.updateEmailAiSettings({ enabled });
+      setEmailAiSettings(next);
+    } catch (caught) {
+      handleFailure(caught);
+    }
+  }
+
   async function deleteNotification(notification: Notification): Promise<void> {
     const previous = notifications;
     setNotifications(notifications.filter((item) => item.id !== notification.id));
@@ -925,29 +934,11 @@ export function DentLinkNotesApp(): ReactElement {
     <>
       <header className="app-header">
         <strong>DentLink</strong>
-        <nav className="app-tabs" aria-label="Primary">
-          <button
-            className={view === "notifications" ? "selected" : ""}
-            onClick={() => setView("notifications")}
-          >
-            Notifications
-          </button>
-          <button className={view === "agenda" ? "selected" : ""} onClick={() => setView("agenda")}>
-            Agenda
-          </button>
-          <button className={view === "notes" ? "selected" : ""} onClick={() => setView("notes")}>
-            Notes
-          </button>
-          <button
-            className={view === "settings" ? "selected" : ""}
-            onClick={() => setView("settings")}
-          >
-            Settings
-          </button>
-        </nav>
+        <AppNavigation view={view} onViewChange={setView} variant="top" />
         <span className="account-email">{auth.user.email}</span>
         <button onClick={() => void logout()}>Log out</button>
       </header>
+      <AppNavigation view={view} onViewChange={setView} variant="bottom" />
       <PageHeader
         title={pageTitle(view)}
         refreshRunning={refreshState.running}
@@ -1049,6 +1040,7 @@ export function DentLinkNotesApp(): ReactElement {
           debugMode={debugMode}
           onDebugModeChange={setDebugMode}
           aiSettings={emailAiSettings}
+          onEmailAiEnabledChange={updateEmailAiEnabled}
           accounts={connectorAccounts}
           webhooks={webhooks}
           webhookDraft={webhookDraft}
@@ -1129,6 +1121,37 @@ function storedDebugMode(): boolean {
   return localStorage.getItem(DEBUG_MODE_STORAGE_KEY) === "true";
 }
 
+function AppNavigation(props: {
+  view: View;
+  onViewChange: (view: View) => void;
+  variant: "top" | "bottom";
+}): ReactElement {
+  const items: Array<{ view: View; label: string }> = [
+    { view: "notifications", label: "Notifications" },
+    { view: "agenda", label: "Agenda" },
+    { view: "notes", label: "Notes" },
+    { view: "settings", label: "Settings" }
+  ];
+  return (
+    <nav
+      className={props.variant === "top" ? "app-tabs" : "mobile-bottom-tabs"}
+      aria-label={props.variant === "top" ? "Primary" : "Mobile primary"}
+    >
+      {items.map((item) => (
+        <button
+          key={item.view}
+          type="button"
+          className={props.view === item.view ? "selected" : ""}
+          aria-current={props.view === item.view ? "page" : undefined}
+          onClick={() => props.onViewChange(item.view)}
+        >
+          <span>{item.label}</span>
+        </button>
+      ))}
+    </nav>
+  );
+}
+
 function NotificationsView(props: {
   notifications: Notification[];
   aiSettings: EmailAiSettings | null;
@@ -1157,6 +1180,8 @@ function NotificationsView(props: {
       : notification.status !== "dismissed"
   );
   const sorted = sortNotifications(visibleNotifications, sortMode);
+  const selectedNotification = sorted.find((item) => item.id === expandedId) ?? null;
+  const selectedIndex = selectedNotification ? sorted.indexOf(selectedNotification) : -1;
   return (
     <main className="notifications-shell">
       <div className="notification-mode-tabs" role="tablist" aria-label="Notification lists">
@@ -1261,7 +1286,7 @@ function NotificationsView(props: {
           {listMode === "history" ? "No dismissed notifications yet." : "No active notifications."}
         </p>
       ) : null}
-      {sorted.map((notification, index) => (
+      {sorted.map((notification) => (
         <article
           key={notification.id}
           className={`notification-card compact-notification ${notification.status} importance-${importanceBand(notification)}`}
@@ -1275,6 +1300,7 @@ function NotificationsView(props: {
             }
           >
             <span className="source-badge">{notification.sourceLabel}</span>
+            <span className="notification-sender">{notificationSender(notification)}</span>
             <strong>
               {notification.email?.subject || notification.title || "Email notification"}
             </strong>
@@ -1314,28 +1340,35 @@ function NotificationsView(props: {
               </button>
             )}
           </div>
-          {expandedId === notification.id ? (
-            <NotificationDetails
-              notification={notification}
-              debugMode={props.debugMode}
-              rankingMode={rankingMode}
-              showFullBody={showFullBodyIds.includes(notification.id)}
-              onToggleFullBody={() =>
-                setShowFullBodyIds((current) =>
-                  current.includes(notification.id)
-                    ? current.filter((id) => id !== notification.id)
-                    : [...current, notification.id]
-                )
-              }
-              onDelete={() => props.onDeleteNotification(notification)}
-              onMoveUp={() => props.onReorderNotifications(move(sorted, index, index - 1))}
-              onMoveDown={() => props.onReorderNotifications(move(sorted, index, index + 1))}
-              canMoveUp={index > 0}
-              canMoveDown={index < sorted.length - 1}
-            />
-          ) : null}
         </article>
       ))}
+      {selectedNotification ? (
+        <div className="adaptive-overlay" role="presentation" onClick={() => setExpandedId(null)}>
+          <NotificationDetails
+            notification={selectedNotification}
+            debugMode={props.debugMode}
+            rankingMode={rankingMode}
+            showFullBody={showFullBodyIds.includes(selectedNotification.id)}
+            onClose={() => setExpandedId(null)}
+            onToggleFullBody={() =>
+              setShowFullBodyIds((current) =>
+                current.includes(selectedNotification.id)
+                  ? current.filter((id) => id !== selectedNotification.id)
+                  : [...current, selectedNotification.id]
+              )
+            }
+            onDelete={() => props.onDeleteNotification(selectedNotification)}
+            onMoveUp={() =>
+              props.onReorderNotifications(move(sorted, selectedIndex, selectedIndex - 1))
+            }
+            onMoveDown={() =>
+              props.onReorderNotifications(move(sorted, selectedIndex, selectedIndex + 1))
+            }
+            canMoveUp={selectedIndex > 0}
+            canMoveDown={selectedIndex >= 0 && selectedIndex < sorted.length - 1}
+          />
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -1347,6 +1380,7 @@ function NotificationDetails(props: {
   showFullBody: boolean;
   canMoveUp: boolean;
   canMoveDown: boolean;
+  onClose: () => void;
   onToggleFullBody: () => void;
   onDelete: () => Promise<void>;
   onMoveUp: () => Promise<void>;
@@ -1355,7 +1389,19 @@ function NotificationDetails(props: {
   const notification = props.notification;
   const hasBody = Boolean(notification.body || notification.email?.snippet);
   return (
-    <section className="notification-detail-panel" aria-label="Notification details">
+    <section
+      className="notification-detail-panel adaptive-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Notification details"
+      onClick={(event) => event.stopPropagation()}
+    >
+      <div className="sheet-header">
+        <h2>Notification</h2>
+        <button type="button" onClick={props.onClose}>
+          Close
+        </button>
+      </div>
       <div className="detail-grid">
         <span>Source: {notification.sourceLabel}</span>
         {notification.email?.senderDisplayName ? (
@@ -1580,6 +1626,7 @@ function CalendarWorkspace(props: {
   onDismissEvent: (event: CalendarEvent) => Promise<void>;
 }): ReactElement {
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
+  const [calendarAction, setCalendarAction] = useState<null | "menu" | "new-event" | "ics">(null);
   const calendarAccounts = props.accounts.filter(
     (account) => account.connectorKey === "google-calendar"
   );
@@ -1612,15 +1659,14 @@ function CalendarWorkspace(props: {
       {calendarAccounts.some((account) => account.errorMessage) ? (
         <p role="alert">{calendarAccounts.find((account) => account.errorMessage)?.errorMessage}</p>
       ) : null}
-      <div className="calendar-management">
-        <LocalEventForm
-          draft={props.draft}
-          pending={props.actionPending}
-          onDraftChange={props.onDraftChange}
-          onCreateLocalEvent={props.onCreateLocalEvent}
-        />
-        <IcsControls onImportIcs={props.onImportIcs} onExportIcs={props.onExportIcs} />
-      </div>
+      <button
+        type="button"
+        className="floating-action-button calendar-add-button"
+        aria-label="Calendar actions"
+        onClick={() => setCalendarAction("menu")}
+      >
+        +
+      </button>
       {props.mode === "agenda" ? (
         <AgendaCalendarView events={visibleEvents} actions={eventActions} />
       ) : null}
@@ -1648,11 +1694,69 @@ function CalendarWorkspace(props: {
         />
       ) : null}
       {selectedEvent ? (
-        <EventDetailsPanel
-          event={selectedEvent}
-          onClose={() => setSelectedEvent(null)}
-          actions={eventActions}
-        />
+        <div
+          className="adaptive-overlay"
+          role="presentation"
+          onClick={() => setSelectedEvent(null)}
+        >
+          <EventDetailsPanel
+            event={selectedEvent}
+            onClose={() => setSelectedEvent(null)}
+            actions={eventActions}
+          />
+        </div>
+      ) : null}
+      {calendarAction ? (
+        <div
+          className="adaptive-overlay"
+          role="presentation"
+          onClick={() => setCalendarAction(null)}
+        >
+          <section
+            className="adaptive-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Calendar actions"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="sheet-header">
+              <h2>
+                {calendarAction === "new-event"
+                  ? "New Local Event"
+                  : calendarAction === "ics"
+                    ? "Calendar Files"
+                    : "Calendar Actions"}
+              </h2>
+              <button type="button" onClick={() => setCalendarAction(null)}>
+                Close
+              </button>
+            </div>
+            {calendarAction === "menu" ? (
+              <div className="sheet-action-list">
+                <button type="button" onClick={() => setCalendarAction("new-event")}>
+                  New Local Event
+                </button>
+                <button type="button" onClick={() => setCalendarAction("ics")}>
+                  Import ICS
+                </button>
+              </div>
+            ) : null}
+            {calendarAction === "new-event" ? (
+              <LocalEventForm
+                draft={props.draft}
+                pending={props.actionPending}
+                onDraftChange={props.onDraftChange}
+                onCreateLocalEvent={async () => {
+                  await props.onCreateLocalEvent();
+                  setCalendarAction(null);
+                }}
+              />
+            ) : null}
+            {calendarAction === "ics" ? (
+              <IcsControls onImportIcs={props.onImportIcs} onExportIcs={props.onExportIcs} />
+            ) : null}
+          </section>
+        </div>
       ) : null}
     </main>
   );
@@ -1845,66 +1949,76 @@ function LocalEventForm(props: {
             }
           />
         </Field>
-        <Field label="Description" id="local-event-description" className="span-2">
-          <textarea
-            id="local-event-description"
-            value={props.draft.description ?? ""}
-            placeholder="Details visible only in DentLink"
-            onChange={(event) =>
-              props.onDraftChange({ ...props.draft, description: event.target.value })
-            }
-          />
-        </Field>
-        <Field label="Recurrence" id="local-event-recurrence">
-          <select
-            id="local-event-recurrence"
-            value={props.draft.recurrenceRule ?? ""}
-            onChange={(event) =>
-              props.onDraftChange({ ...props.draft, recurrenceRule: event.target.value || null })
-            }
-          >
-            <option value="">No recurrence</option>
-            <option value="FREQ=DAILY">Daily</option>
-            <option value="FREQ=WEEKLY">Weekly</option>
-            <option value="FREQ=MONTHLY">Monthly</option>
-          </select>
-        </Field>
-        <Field label="Category" id="local-event-category">
-          <input
-            id="local-event-category"
-            value={props.draft.category ?? ""}
-            placeholder="Clinic"
-            onChange={(event) =>
-              props.onDraftChange({ ...props.draft, category: event.target.value || null })
-            }
-          />
-        </Field>
-        <Field label="Color" id="local-event-color">
-          <input
-            id="local-event-color"
-            type="color"
-            value={props.draft.color ?? "#2f855a"}
-            onChange={(event) => props.onDraftChange({ ...props.draft, color: event.target.value })}
-          />
-        </Field>
-        <Field label="Reminder" id="local-event-reminder">
-          <select
-            id="local-event-reminder"
-            value={String(props.draft.reminderMinutes ?? 15)}
-            onChange={(event) =>
-              props.onDraftChange({
-                ...props.draft,
-                reminderMinutes: Number(event.target.value)
-              })
-            }
-          >
-            <option value="0">At start</option>
-            <option value="5">5 minutes before</option>
-            <option value="15">15 minutes before</option>
-            <option value="30">30 minutes before</option>
-            <option value="60">1 hour before</option>
-          </select>
-        </Field>
+        <details className="local-event-more span-2">
+          <summary>More Options</summary>
+          <div className="local-event-more-grid">
+            <Field label="Description" id="local-event-description" className="span-2">
+              <textarea
+                id="local-event-description"
+                value={props.draft.description ?? ""}
+                placeholder="Details visible only in DentLink"
+                onChange={(event) =>
+                  props.onDraftChange({ ...props.draft, description: event.target.value })
+                }
+              />
+            </Field>
+            <Field label="Recurrence" id="local-event-recurrence">
+              <select
+                id="local-event-recurrence"
+                value={props.draft.recurrenceRule ?? ""}
+                onChange={(event) =>
+                  props.onDraftChange({
+                    ...props.draft,
+                    recurrenceRule: event.target.value || null
+                  })
+                }
+              >
+                <option value="">No recurrence</option>
+                <option value="FREQ=DAILY">Daily</option>
+                <option value="FREQ=WEEKLY">Weekly</option>
+                <option value="FREQ=MONTHLY">Monthly</option>
+              </select>
+            </Field>
+            <Field label="Category" id="local-event-category">
+              <input
+                id="local-event-category"
+                value={props.draft.category ?? ""}
+                placeholder="Clinic"
+                onChange={(event) =>
+                  props.onDraftChange({ ...props.draft, category: event.target.value || null })
+                }
+              />
+            </Field>
+            <Field label="Color" id="local-event-color">
+              <input
+                id="local-event-color"
+                type="color"
+                value={props.draft.color ?? "#2f855a"}
+                onChange={(event) =>
+                  props.onDraftChange({ ...props.draft, color: event.target.value })
+                }
+              />
+            </Field>
+            <Field label="Reminder" id="local-event-reminder">
+              <select
+                id="local-event-reminder"
+                value={String(props.draft.reminderMinutes ?? 15)}
+                onChange={(event) =>
+                  props.onDraftChange({
+                    ...props.draft,
+                    reminderMinutes: Number(event.target.value)
+                  })
+                }
+              >
+                <option value="0">At start</option>
+                <option value="5">5 minutes before</option>
+                <option value="15">15 minutes before</option>
+                <option value="30">30 minutes before</option>
+                <option value="60">1 hour before</option>
+              </select>
+            </Field>
+          </div>
+        </details>
         <div className="form-actions">
           <button type="submit" disabled={props.pending}>
             {props.pending ? "Creating..." : "Create Local Event"}
@@ -2251,7 +2365,13 @@ function EventDetailsPanel(props: {
 }): ReactElement {
   const event = props.event;
   return (
-    <aside className="event-details" aria-label={`Details for ${event.title}`}>
+    <aside
+      className="event-details adaptive-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Details for ${event.title}`}
+      onClick={(clickEvent) => clickEvent.stopPropagation()}
+    >
       <div className="calendar-card-header">
         <h2>{event.title}</h2>
         <button type="button" onClick={props.onClose}>
@@ -2770,6 +2890,15 @@ function notificationSummary(notification: Notification): string {
   );
 }
 
+function notificationSender(notification: Notification): string {
+  return (
+    notification.email?.senderDisplayName?.trim() ||
+    notification.email?.senderAddress?.trim() ||
+    notification.sourceLabel ||
+    "Unknown sender"
+  );
+}
+
 function importanceScore(notification: Notification): number {
   const value = notification.ai?.importance;
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -2840,6 +2969,7 @@ function SettingsView(props: {
   debugMode: boolean;
   onDebugModeChange: (enabled: boolean) => void;
   aiSettings: EmailAiSettings | null;
+  onEmailAiEnabledChange: (enabled: boolean) => Promise<void>;
   accounts: ConnectorAccount[];
   webhooks: Array<WebhookEndpoint & { ingestUrl: string }>;
   webhookDraft: { name: string; slug: string; destination: WebhookDestination };
@@ -2907,7 +3037,12 @@ function SettingsView(props: {
           <p>Use Refresh All for a manual sync across connected services.</p>
         </section>
       ) : null}
-      {props.selectedTab === "ai" ? <AiSettingsPanel settings={props.aiSettings} /> : null}
+      {props.selectedTab === "ai" ? (
+        <AiSettingsPanel
+          settings={props.aiSettings}
+          onEnabledChange={props.onEmailAiEnabledChange}
+        />
+      ) : null}
       {props.selectedTab === "connections" ? (
         <ConnectorsView
           accounts={props.accounts}
@@ -2980,13 +3115,34 @@ function SettingsView(props: {
   );
 }
 
-function AiSettingsPanel(props: { settings: EmailAiSettings | null }): ReactElement {
+function AiSettingsPanel(props: {
+  settings: EmailAiSettings | null;
+  onEnabledChange: (enabled: boolean) => Promise<void>;
+}): ReactElement {
   const settings = props.settings;
+  const unavailable = Boolean(settings && !settings.available);
+  const status = !settings
+    ? "Loading"
+    : unavailable
+      ? `AI unavailable: ${aiUnavailableLabel(settings.unavailableReason)}`
+      : settings.enabled
+        ? "Enabled"
+        : "Disabled";
   return (
     <section className="settings-panel" aria-label="AI settings">
       <h2>AI</h2>
+      <label className="debug-toggle">
+        <input
+          type="checkbox"
+          checked={settings?.enabled ?? true}
+          disabled={!settings || unavailable}
+          onChange={(event) => void props.onEnabledChange(event.currentTarget.checked)}
+        />{" "}
+        AI summaries
+      </label>
       <div className="settings-grid">
-        <span>AI: {settings?.enabled ? "Enabled" : "Disabled"}</span>
+        <span>AI: {status}</span>
+        <span>Provider: {settings?.provider ?? "OpenAI"}</span>
         <span>Model: {settings?.model ?? "Not configured"}</span>
         <span>Input limit: {settings?.maxInputChars ?? 0} characters</span>
         <span>Requests this month: {settings?.requestsThisMonth ?? 0}</span>
@@ -3006,6 +3162,12 @@ function AiSettingsPanel(props: { settings: EmailAiSettings | null }): ReactElem
       <p>Tokens, OAuth data, credentials, raw MIME, and attachment contents are never sent.</p>
     </section>
   );
+}
+
+function aiUnavailableLabel(reason: string | null | undefined): string {
+  if (reason === "missing_api_key") return "OpenAI API key is not configured";
+  if (reason === "disabled_by_environment") return "disabled by server configuration";
+  return reason ?? "provider unavailable";
 }
 
 function ConnectorsView(props: {

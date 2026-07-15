@@ -591,8 +591,11 @@ export type GmailDiagnostics = {
 
 export type EmailAiSettings = {
   enabled: boolean;
+  available: boolean;
+  provider: "openai";
   model: string;
   maxInputChars: number;
+  unavailableReason: string | null;
   requestsThisMonth: number;
   inputCharsThisMonth: number;
   outputTokensThisMonth: number;

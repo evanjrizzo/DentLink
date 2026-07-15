@@ -1,6 +1,38 @@
 :root {
-  color: #1c1f24;
-  background: #f7f8fa;
+  --app-bg: #f5f6f8;
+  --surface-bg: #ffffff;
+  --surface-elevated: #fbfcff;
+  --text-primary: #171a20;
+  --text-secondary: #3f4854;
+  --text-muted: #6b7280;
+  --border: #d8dee8;
+  --border-subtle: #e7ebf2;
+  --accent: #2563eb;
+  --accent-contrast: #ffffff;
+  --success: #15803d;
+  --warning: #b45309;
+  --error: #b42318;
+  --importance-low: #94a3b8;
+  --importance-medium: #2563eb;
+  --importance-high: #b42318;
+  --source-gmail: #1d4ed8;
+  --source-local: #137a3a;
+  --shadow: 0 20px 60px rgb(15 23 42 / 16%);
+  --overlay: rgb(15 23 42 / 28%);
+  --focus-ring: 0 0 0 3px rgb(37 99 235 / 28%);
+  --radius: 10px;
+  --card-radius: 12px;
+  --control-height: 44px;
+  --space-mobile: 12px;
+  --space-desktop: 20px;
+  --panel-width: clamp(320px, 34vw, 520px);
+  --sheet-max-height: min(82dvh, 680px);
+  --font-sm: 13px;
+  --font-base: 15px;
+  --font-lg: 22px;
+  --shadow-strength: 1;
+  color: var(--text-primary);
+  background: var(--app-bg);
   font-family:
     Inter,
     ui-sans-serif,
@@ -17,6 +49,7 @@
 
 body {
   margin: 0;
+  background: var(--app-bg);
 }
 
 button,
@@ -27,18 +60,27 @@ textarea {
 }
 
 button {
-  border: 1px solid #c8ced8;
-  border-radius: 6px;
-  background: #ffffff;
-  color: #1c1f24;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-bg);
+  color: var(--text-primary);
   cursor: pointer;
-  min-height: 44px;
+  min-height: var(--control-height);
   padding: 0 14px;
 }
 
 button.selected,
 button:hover {
-  border-color: #2563eb;
+  border-color: var(--accent);
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 code {
@@ -93,8 +135,8 @@ textarea {
   align-items: center;
   gap: 12px;
   justify-content: space-between;
-  border-bottom: 1px solid #d7dce5;
-  background: #ffffff;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-bg) 92%, transparent);
   padding: 12px 20px;
 }
 
@@ -105,8 +147,12 @@ textarea {
 }
 
 .app-tabs button {
-  min-width: 116px;
+  min-width: 108px;
   font-weight: 700;
+}
+
+.mobile-bottom-tabs {
+  display: none;
 }
 
 .account-email {
@@ -121,8 +167,8 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border-bottom: 1px solid #d7dce5;
-  background: #f8fafc;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-elevated);
   padding: 12px 20px;
 }
 
@@ -137,13 +183,15 @@ textarea {
 }
 
 .refresh-status {
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  margin: 12px 20px 0;
-  border: 1px solid #d7dce5;
-  border-radius: 8px;
-  background: #ffffff;
-  padding: 12px;
+  align-items: center;
+  margin: 10px 20px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--card-radius);
+  background: var(--surface-bg);
+  padding: 8px 10px;
 }
 
 .refresh-results {
@@ -164,6 +212,13 @@ textarea {
   grid-template-columns: 260px minmax(0, 1fr);
   gap: 20px;
   padding: 20px;
+}
+
+.notes-shell-compact {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+  width: min(1180px, 100%);
+  margin: 0 auto;
 }
 
 .notifications-shell,
@@ -226,6 +281,71 @@ textarea {
   gap: 12px;
 }
 
+.notes-compact-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.notes-filter-menu,
+.management-menu {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--card-radius);
+  background: var(--surface-bg);
+  padding: 10px;
+}
+
+.notes-filter-menu > summary,
+.management-menu > summary {
+  min-height: 24px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  border-radius: 999px;
+  background: var(--surface-elevated);
+  color: var(--text-secondary);
+  padding: 0 10px;
+  font-size: var(--font-sm);
+  font-weight: 700;
+}
+
+.notes-search-field {
+  max-width: 520px;
+}
+
+.compact-note-card {
+  padding: 10px 12px;
+}
+
+.compact-note-card .note-card-top {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.note-title-button {
+  display: grid;
+  gap: 2px;
+  min-height: var(--control-height);
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+}
+
+.note-title-button span {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .note-composer {
   display: grid;
   grid-template-columns: 120px minmax(180px, 1fr) 140px auto;
@@ -241,26 +361,97 @@ textarea {
   padding: 14px;
 }
 
+.adaptive-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: flex-end;
+  background: var(--overlay);
+}
+
+.adaptive-panel {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  width: var(--panel-width);
+  max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 24px);
+  margin: 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--card-radius);
+  background: var(--surface-bg);
+  box-shadow: var(--shadow);
+  padding: 16px;
+}
+
+.sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sheet-header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.sheet-form,
+.sheet-action-list {
+  display: grid;
+  gap: 12px;
+}
+
+.sheet-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-weight: 700;
+}
+
+.floating-action-button {
+  position: fixed;
+  right: max(18px, env(safe-area-inset-right));
+  bottom: max(18px, env(safe-area-inset-bottom));
+  z-index: 15;
+  width: 56px;
+  min-height: 56px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 28px;
+  font-weight: 700;
+  box-shadow: var(--shadow);
+}
+
+.calendar-add-button {
+  bottom: max(22px, env(safe-area-inset-bottom));
+}
+
 .compact-notification {
   border-left: 6px solid #94a3b8;
 }
 
 .compact-notification.importance-high {
-  border-left-color: #b42318;
+  border-left-color: var(--importance-high);
 }
 
 .compact-notification.importance-medium {
-  border-left-color: #2563eb;
+  border-left-color: var(--importance-medium);
 }
 
 .compact-notification.importance-low {
-  border-left-color: #94a3b8;
-  background: #fbfcfe;
+  border-left-color: var(--importance-low);
+  background: var(--surface-elevated);
 }
 
 .notification-summary-button {
   display: grid;
-  grid-template-columns: minmax(90px, auto) minmax(160px, 1.2fr) minmax(220px, 2fr) auto auto auto;
+  grid-template-columns:
+    minmax(80px, auto) minmax(130px, 0.9fr) minmax(160px, 1.2fr)
+    minmax(220px, 2fr) auto auto;
   gap: 10px;
   align-items: center;
   border: 0;
@@ -276,8 +467,20 @@ textarea {
 }
 
 .notification-card-summary {
-  color: #384252;
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text-secondary);
   overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.notification-sender {
+  color: var(--text-secondary);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .importance-pill,
@@ -287,7 +490,7 @@ textarea {
   width: max-content;
   border-radius: 999px;
   background: #eef2ff;
-  color: #1d4ed8;
+  color: var(--source-gmail);
   font-size: 13px;
   font-weight: 800;
   padding: 5px 10px;
@@ -620,9 +823,28 @@ textarea {
 
 .local-event-form {
   display: grid;
-  grid-template-columns: minmax(220px, 1.4fr) repeat(3, minmax(150px, 1fr));
+  grid-template-columns: minmax(220px, 1.4fr) repeat(2, minmax(150px, 1fr));
   gap: 12px;
   align-items: end;
+}
+
+.local-event-more {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--card-radius);
+  padding: 10px;
+}
+
+.local-event-more summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.local-event-more-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(150px, 1fr));
+  gap: 12px;
 }
 
 .form-field {
@@ -951,17 +1173,8 @@ textarea {
 }
 
 .event-details {
-  position: fixed;
-  right: 20px;
-  bottom: 20px;
-  z-index: 20;
   display: grid;
   gap: 12px;
-  width: min(420px, calc(100vw - 40px));
-  max-height: calc(100vh - 40px);
-  overflow: auto;
-  box-shadow: 0 24px 70px rgb(15 23 42 / 18%);
-  padding: 16px;
 }
 
 .event-details h2 {
@@ -1021,9 +1234,14 @@ textarea {
 }
 
 @media (max-width: 760px) {
+  body {
+    padding-bottom: calc(72px + env(safe-area-inset-bottom));
+  }
+
   .notifications-shell,
   .webhooks-shell,
-  .settings-shell {
+  .settings-shell,
+  .calendar-shell {
     padding: 12px;
   }
 
@@ -1037,25 +1255,49 @@ textarea {
   }
 
   .app-header {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 8px;
+    display: none;
   }
 
-  .app-tabs,
-  .app-tabs button,
-  .page-header,
-  .page-header button {
-    width: 100%;
+  .mobile-bottom-tabs {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 50;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 4px;
+    border-top: 1px solid var(--border);
+    background: color-mix(in srgb, var(--surface-bg) 94%, transparent);
+    padding: 8px max(8px, env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom))
+      max(8px, env(safe-area-inset-left));
+    box-shadow: 0 -12px 30px rgb(15 23 42 / 10%);
+  }
+
+  .mobile-bottom-tabs button {
+    min-width: 0;
+    padding: 0 6px;
+    font-size: 12px;
+    font-weight: 800;
   }
 
   .page-header {
-    align-items: stretch;
-    flex-direction: column;
+    padding: 10px 12px;
+  }
+
+  .page-header h1 {
+    font-size: 20px;
   }
 
   .notification-summary-button {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr auto;
+  }
+
+  .notification-summary-button .source-badge,
+  .notification-summary-button .notification-sender,
+  .notification-summary-button strong,
+  .notification-summary-button .notification-card-summary {
+    grid-column: 1 / -1;
   }
 
   .notification-touch-actions {
@@ -1075,12 +1317,8 @@ textarea {
     flex-direction: column;
   }
 
-  .calendar-shell {
-    padding: 12px;
-  }
-
-  .calendar-management,
-  .local-event-form {
+  .local-event-form,
+  .local-event-more-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1123,6 +1361,23 @@ textarea {
   .event-details dl {
     grid-template-columns: 1fr;
   }
+
+  .adaptive-overlay {
+    align-items: flex-end;
+    justify-content: center;
+  }
+
+  .adaptive-panel {
+    width: 100%;
+    max-width: 100%;
+    max-height: var(--sheet-max-height);
+    margin: 0;
+    border-radius: 18px 18px 0 0;
+  }
+
+  .floating-action-button {
+    bottom: calc(84px + env(safe-area-inset-bottom));
+  }
 }
 
 @media (min-width: 761px) and (max-width: 1320px) {
@@ -1134,7 +1389,9 @@ textarea {
   }
 
   .notification-summary-button {
-    grid-template-columns: minmax(80px, auto) minmax(180px, 1fr) minmax(260px, 1.5fr) auto auto;
+    grid-template-columns:
+      minmax(80px, auto) minmax(130px, 0.9fr) minmax(180px, 1fr)
+      minmax(260px, 1.5fr) auto;
   }
 
   .action-required {

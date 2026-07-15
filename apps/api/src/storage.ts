@@ -255,9 +255,20 @@ export interface DentLinkStore {
   ): Promise<void>;
   getAiUsageSettings(
     userId: EntityId,
-    config: Pick<EmailAiSettings, "enabled" | "model" | "maxInputChars" | "estimatedCostThisMonth">,
+    config: Pick<
+      EmailAiSettings,
+      | "enabled"
+      | "available"
+      | "provider"
+      | "model"
+      | "maxInputChars"
+      | "unavailableReason"
+      | "estimatedCostThisMonth"
+    >,
     now: string
   ): Promise<EmailAiSettings>;
+  getUserPreference(userId: EntityId, key: string): Promise<string | null>;
+  setUserPreference(userId: EntityId, key: string, value: string, now: string): Promise<void>;
   createWebhookEndpoint(
     userId: EntityId,
     input: WebhookEndpointInput,
@@ -327,6 +338,7 @@ export class MemoryDentLinkStore implements DentLinkStore {
       updatedAt: string;
     }
   >();
+  private userPreferences = new Map<string, { userId: EntityId; key: string; value: string }>();
   private webhooks = new Map<EntityId, WebhookEndpoint & { secretHash: string }>();
   private webhookDeliveries: Array<{
     id: EntityId;
@@ -1261,7 +1273,16 @@ export class MemoryDentLinkStore implements DentLinkStore {
 
   async getAiUsageSettings(
     userId: EntityId,
-    config: Pick<EmailAiSettings, "enabled" | "model" | "maxInputChars" | "estimatedCostThisMonth">,
+    config: Pick<
+      EmailAiSettings,
+      | "enabled"
+      | "available"
+      | "provider"
+      | "model"
+      | "maxInputChars"
+      | "unavailableReason"
+      | "estimatedCostThisMonth"
+    >,
     now: string
   ): Promise<EmailAiSettings> {
     const month = now.slice(0, 7);
@@ -1280,6 +1301,20 @@ export class MemoryDentLinkStore implements DentLinkStore {
           ? rows.reduce((sum, row) => sum + (row.estimatedCostMicros ?? 0), 0) / 1_000_000
           : null
     };
+  }
+
+  async getUserPreference(userId: EntityId, key: string): Promise<string | null> {
+    return this.userPreferences.get(`${userId}:${key}`)?.value ?? null;
+  }
+
+  async setUserPreference(
+    userId: EntityId,
+    key: string,
+    value: string,
+    now: string
+  ): Promise<void> {
+    void now;
+    this.userPreferences.set(`${userId}:${key}`, { userId, key, value });
   }
 
   async createWebhookEndpoint(

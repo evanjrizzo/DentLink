@@ -291,7 +291,10 @@ moving provider polling into the browser.
 Slice 4 adds user-manageable email sorting rules, normalized IMAP email metadata, optional
 server-side OpenAI summarization/classification, AI usage accounting, explainable notification
 sorting modes, and a more organized Connections view with collapsible Gmail, Google Calendar, and
-Webhook sections.
+Webhook sections. Slice 4.2 makes the web UI responsive and touch-first across mobile, the
+1280x720 dashboard, and desktop, with advanced Notes, Agenda, connection, and diagnostic controls
+behind adaptive sheets, panels, Settings, or Debug Mode. AI summaries default to enabled when an
+OpenAI key is configured and remain user-disableable in Settings.
 
 Scope
 
@@ -382,8 +385,9 @@ Phase 4: Optional AI Processing
 Introduce an optional provider-neutral AI layer.
 
 Implemented in Slice 4 for Gmail IMAP notifications as an optional post-rule enrichment step. AI is
-disabled unless server-side configuration supplies an OpenAI key and enables the feature. Failures
-are recorded on the notification and do not block ingestion.
+available when server-side configuration supplies an OpenAI key and defaults to enabled unless the
+user opts out or the server explicitly disables AI. Failures are recorded on the notification and do
+not block ingestion.
 
 Requirements:
 

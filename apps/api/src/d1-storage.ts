@@ -1840,7 +1840,16 @@ export class D1DentLinkStore implements DentLinkStore {
 
   async getAiUsageSettings(
     userId: EntityId,
-    config: Pick<EmailAiSettings, "enabled" | "model" | "maxInputChars" | "estimatedCostThisMonth">,
+    config: Pick<
+      EmailAiSettings,
+      | "enabled"
+      | "available"
+      | "provider"
+      | "model"
+      | "maxInputChars"
+      | "unavailableReason"
+      | "estimatedCostThisMonth"
+    >,
     now: string
   ): Promise<EmailAiSettings> {
     const monthStart = `${now.slice(0, 7)}-01`;
@@ -1869,6 +1878,32 @@ export class D1DentLinkStore implements DentLinkStore {
           ? config.estimatedCostThisMonth
           : row.estimated_cost_micros / 1_000_000
     };
+  }
+
+  async getUserPreference(userId: EntityId, key: string): Promise<string | null> {
+    const row = await this.db
+      .prepare("SELECT value FROM user_preferences WHERE user_id = ? AND key = ?")
+      .bind(userId, key)
+      .first<{ value: string }>();
+    return row?.value ?? null;
+  }
+
+  async setUserPreference(
+    userId: EntityId,
+    key: string,
+    value: string,
+    now: string
+  ): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT INTO user_preferences (user_id, key, value, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(user_id, key) DO UPDATE SET
+           value = excluded.value,
+           updated_at = excluded.updated_at`
+      )
+      .bind(userId, key, value, now, now)
+      .run();
   }
 
   async createWebhookEndpoint(

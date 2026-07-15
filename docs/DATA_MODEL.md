@@ -267,3 +267,8 @@ Normalized email body text is retained in Gmail source-record normalized metadat
 text for notification fallback and optional summarization. Attachment binary content is not stored.
 Older notifications without these metadata columns are surfaced with `ai.status = disabled` and
 empty email/rule metadata.
+
+`migrations/0010_ai_user_preferences.sql` adds `user_preferences` for small user-scoped UI and
+processing preferences. Slice 4.2 uses key `email_ai_enabled` to store an explicit AI opt-out. The
+absence of that key means AI follows server availability and defaults to enabled when
+`OPENAI_API_KEY` is configured.

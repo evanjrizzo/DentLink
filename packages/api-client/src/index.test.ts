@@ -85,8 +85,11 @@ describe("@dentlink/api-client", () => {
         return new Response(
           JSON.stringify({
             enabled: false,
+            available: false,
+            provider: "openai",
             model: "gpt-4.1-mini",
             maxInputChars: 6000,
+            unavailableReason: "missing_api_key",
             requestsThisMonth: 0,
             inputCharsThisMonth: 0,
             outputTokensThisMonth: 0,
@@ -100,7 +103,39 @@ describe("@dentlink/api-client", () => {
 
     await expect(client.getEmailAiSettings()).resolves.toMatchObject({
       enabled: false,
+      available: false,
       model: "gpt-4.1-mini"
+    });
+  });
+
+  it("patches email AI enabled preference", async () => {
+    const client = new DentLinkApiClient({
+      fetchImpl: async (url, init) => {
+        expect(url).toBe("/v1/ai/settings");
+        expect(init?.method).toBe("PATCH");
+        expect(init?.body).toBe(JSON.stringify({ enabled: false }));
+        return new Response(
+          JSON.stringify({
+            enabled: false,
+            available: true,
+            provider: "openai",
+            model: "gpt-4.1-mini",
+            maxInputChars: 6000,
+            unavailableReason: null,
+            requestsThisMonth: 0,
+            inputCharsThisMonth: 0,
+            outputTokensThisMonth: 0,
+            failedRequestsThisMonth: 0,
+            estimatedCostThisMonth: null
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    });
+
+    await expect(client.updateEmailAiSettings({ enabled: false })).resolves.toMatchObject({
+      enabled: false,
+      available: true
     });
   });
 });

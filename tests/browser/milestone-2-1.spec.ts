@@ -40,44 +40,59 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     const tagName = `Tag ${runId}`;
     const firstNote = `Task ${runId}`;
     const secondNote = `Reference ${runId}`;
+    await page.getByText("Filters").click();
+    await page.getByText("Manage folders and tags").click();
     await page.getByLabel("New folder name").fill(folderName);
     await page.getByRole("button", { name: "Add" }).first().click();
-    await expect(page.getByRole("button", { name: folderName })).toBeVisible();
+    await expect(page.getByLabel("Folder filter")).toContainText(folderName);
     await page.getByLabel("New tag name").fill(tagName);
     await page.getByRole("button", { name: "Add" }).nth(1).click();
     await expect(page.getByText(tagName)).toBeVisible();
 
+    await page.getByLabel("Create note").click();
     await page.getByLabel("New note title").fill(firstNote);
-    await page.getByRole("button", { name: "Add" }).nth(2).click();
+    await page.getByRole("button", { name: "Create", exact: true }).click();
     await expect(noteCard(page, firstNote)).toBeVisible();
+    await page.getByLabel("Create note").click();
     await page.getByLabel("New note title").fill(secondNote);
-    await page.locator(".note-composer select").first().selectOption("reference");
-    await page.getByRole("button", { name: "Add" }).nth(2).click();
+    await page
+      .getByRole("dialog", { name: "Create note" })
+      .getByLabel("Type")
+      .selectOption("reference");
+    await page.getByRole("button", { name: "Create", exact: true }).click();
     await expect(noteCard(page, secondNote)).toBeVisible();
 
     await noteCard(page, firstNote).getByLabel("Pin note").click();
     await settleMutation(page);
     await noteCard(page, firstNote).getByLabel(`Mark ${firstNote} done`).check();
     await settleMutation(page);
-    await noteCard(page, firstNote).getByLabel(`Priority for ${firstNote}`).selectOption("high");
-    await settleMutation(page);
     await noteCard(page, firstNote)
-      .getByLabel(`Folder for ${firstNote}`)
-      .selectOption({ label: folderName });
+      .getByRole("button", { name: new RegExp(firstNote) })
+      .click();
+    await page.getByText("More Options").click();
+    await page.getByLabel(`Priority for ${firstNote}`).selectOption("high");
     await settleMutation(page);
-    await noteCard(page, firstNote).getByLabel(`Due date for ${firstNote}`).fill("2026-08-15");
+    await page.getByLabel(`Folder for ${firstNote}`).selectOption({ label: folderName });
     await settleMutation(page);
-    await noteCard(page, firstNote).getByLabel(`${tagName} tag for ${firstNote}`).check();
+    await page.getByLabel(`Due date for ${firstNote}`).fill("2026-08-15");
     await settleMutation(page);
-    await page.getByLabel("Search").fill(firstNote);
+    await page.getByLabel(`${tagName} tag for ${firstNote}`).check();
+    await settleMutation(page);
+    await page.getByRole("button", { name: "Close" }).click();
+    await page.getByLabel("Search notes").click();
+    await page.locator(".notes-search-field input").fill(firstNote);
     await expect(noteCard(page, firstNote)).toBeVisible();
     await expect(noteCard(page, secondNote)).toHaveCount(0);
-    await page.getByLabel("Search").fill("");
+    await page.locator(".notes-search-field input").fill("");
 
     await makeNoteConflict(page, firstNote, "Server-side conflict title");
-    await noteCard(page, firstNote).locator(".note-title").fill(`Stale ${runId}`);
+    await noteCard(page, firstNote)
+      .getByRole("button", { name: new RegExp(firstNote) })
+      .click();
+    await page.locator(".note-title").fill(`Stale ${runId}`);
     await expect(page.getByRole("alert")).toContainText("changed on the server");
     await resolveOpenConflict(page);
+    await page.getByRole("button", { name: "Close" }).click();
 
     await page.getByRole("button", { name: "Notifications" }).click();
     await expect(page.getByRole("button", { name: "Notifications" })).toBeVisible();
@@ -117,7 +132,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await page.getByRole("button", { name: "Notifications" }).click();
     await expect(notificationCard(page, firstNotification)).toBeVisible();
     await notificationCard(page, firstNotification).getByRole("button").first().click();
-    await notificationCard(page, firstNotification).getByRole("button", { name: "Delete" }).click();
+    await page.getByRole("button", { name: "Delete" }).click();
     await expect(notificationCard(page, firstNotification)).toHaveCount(0);
 
     await page.getByRole("button", { name: "Settings" }).click();
@@ -349,8 +364,11 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       if (method === "GET" && path === "/v1/ai/settings") {
         await fulfillJson(route, {
           enabled: true,
+          available: true,
+          provider: "openai",
           model: "gpt-test-mini",
           maxInputChars: 6000,
+          unavailableReason: null,
           requestsThisMonth: 1,
           inputCharsThisMonth: 1200,
           outputTokensThisMonth: 42,
@@ -800,6 +818,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     ).toBeVisible();
     await expect(page.getByText("Suggested action: Review").first()).toBeVisible();
     await expect(page.getByText("Open original").first()).toBeVisible();
+    await page.getByRole("button", { name: "Close" }).click();
     await page.setViewportSize({ width: 1280, height: 720 });
     await expect(page.getByRole("button", { name: "Refresh All", exact: true })).toBeVisible();
     await expect(notificationCard(page, "Gmail Refresh All message")).toBeVisible();
@@ -808,6 +827,9 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       .boundingBox();
     expect(dismissBox?.height).toBeGreaterThanOrEqual(40);
     await page.setViewportSize({ width: 390, height: 720 });
+    await expect(
+      page.getByLabel("Mobile primary").getByRole("button", { name: "Notifications" })
+    ).toBeVisible();
     await expect(page.getByRole("button", { name: "Refresh All", exact: true })).toBeVisible();
     await expect(notificationCard(page, "Gmail Refresh All message")).toBeVisible();
     await page.getByRole("button", { name: "Settings" }).click();
@@ -1098,16 +1120,28 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByText(user.email)).toBeVisible();
     await page.getByRole("button", { name: "Agenda" }).click();
     await expect(page.getByText("No events in this range.")).toBeVisible();
+    await expect(page.getByRole("textbox", { name: /^Title/ })).toHaveCount(0);
+    await expect(page.getByLabel("ICS file")).toHaveCount(0);
+    await page.getByLabel("Calendar actions").click();
+    await expect(page.getByRole("button", { name: "New Local Event" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Import ICS" })).toBeVisible();
+    await page.getByRole("button", { name: "New Local Event" }).click();
     await expect(page.getByRole("textbox", { name: /^Title/ })).toBeVisible();
     await expect(page.getByRole("textbox", { name: /^Start/ })).toBeVisible();
     await expect(page.getByRole("textbox", { name: /^End/ })).toBeVisible();
     await expect(page.getByRole("textbox", { name: "Location" })).toBeVisible();
+    await expect(page.getByText("More Options")).toBeVisible();
+    await page.getByText("More Options").click();
     await expect(page.getByRole("textbox", { name: "Description" })).toBeVisible();
     await expect(page.getByRole("combobox", { name: "Recurrence" })).toBeVisible();
     await expect(page.getByRole("textbox", { name: "Category" })).toBeVisible();
     await expect(page.getByRole("textbox", { name: "Color" })).toBeVisible();
+    await page.getByRole("button", { name: "Close" }).click();
+    await page.getByLabel("Calendar actions").click();
+    await page.getByRole("button", { name: "Import ICS" }).click();
     await expect(page.getByLabel("ICS file")).toHaveAttribute("accept", /text\/calendar/);
     await expect(page.getByRole("button", { name: "Export Local ICS" })).toBeVisible();
+    await page.getByRole("button", { name: "Close" }).click();
     await expect(page.getByRole("button", { name: "Sync Now" })).toHaveCount(0);
     await page.getByRole("button", { name: "Settings" }).click();
     await page.getByRole("button", { name: "Debug" }).click();
@@ -1187,6 +1221,8 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       .click();
     await expect(calendarEventCard(page, "Calendar timed consult")).toHaveCount(0);
     await page.getByRole("combobox", { name: "Source" }).selectOption("local");
+    await page.getByLabel("Calendar actions").click();
+    await page.getByRole("button", { name: "New Local Event" }).click();
     await page.getByRole("textbox", { name: /^Title/ }).fill("Browser local event");
     await page.getByRole("textbox", { name: "Location" }).fill("Room 3");
     await page.getByRole("button", { name: "Create Local Event" }).click();
@@ -1215,6 +1251,8 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     ).toBeVisible();
 
     await page.getByRole("combobox", { name: "Source" }).selectOption("local");
+    await page.getByLabel("Calendar actions").click();
+    await page.getByRole("button", { name: "Import ICS" }).click();
     await page.getByLabel("ICS file").setInputFiles({
       name: "browser-import.ics",
       mimeType: "text/calendar",
@@ -1226,6 +1264,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     const downloadPromise = page.waitForEvent("download");
     await page.getByRole("button", { name: "Export Local ICS" }).click();
     expect((await downloadPromise).suggestedFilename()).toBe("dentlink-calendar.ics");
+    await page.getByRole("button", { name: "Close" }).click();
     await calendarEventCard(page, "Browser local event updated")
       .getByRole("button", { name: "Delete" })
       .click();
@@ -1237,7 +1276,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(
       page.getByLabel("Calendar view").getByRole("button", { name: "Agenda", exact: true })
     ).toBeVisible();
-    await expect(page.getByRole("textbox", { name: /^Title/ })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: /^Title/ })).toHaveCount(0);
   });
 });
 

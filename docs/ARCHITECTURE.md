@@ -118,10 +118,11 @@ provider-neutral AI enrichment after rule evaluation. IMAP messages are normaliz
 metadata plus bounded plain text, with text/plain preferred and cleaned HTML text used only as a
 fallback. Rules can match sender, domain, recipients, subject, labels, unread state, attachment
 presence, automated senders, mailing-list signals, body text, and always/never notify flags before a
-Notification is created. If AI is enabled server-side, non-suppressed notifications may receive a
-structured summary, category, importance, suggested action, deadline, and explanation. AI failures
-update AI metadata on the notification and usage counters but do not fail Gmail ingestion or change
-connector health.
+Notification is created. If an OpenAI key is configured server-side, AI is available and defaults
+to enabled for users unless they explicitly opt out in Settings -> AI. Non-suppressed notifications
+may receive a structured summary, category, importance, suggested action, deadline, and explanation.
+AI failures update AI metadata on the notification and usage counters but do not fail Gmail
+ingestion or change connector health.
 
 Milestone 4 adds Google Calendar using the same provider-neutral connector framework. Google
 Calendar OAuth links a calendar connector account, encrypted refresh tokens remain in connector

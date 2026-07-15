@@ -132,8 +132,12 @@ Notes, sync, history, or conflict contracts.
   a bounded snippet, not attachment binaries. `rule` explains the deterministic rule decision. `ai`
   reports optional summary/classification state as `disabled`, `pending`, `complete`, `failed`, or
   `skipped`.
-- `GET /v1/ai/settings`: return authenticated user's server-side email AI status and monthly usage
+- `GET /v1/ai/settings`: return authenticated user's server-side email AI availability, effective
+  enabled state, provider/model, input limit, unavailable reason when applicable, and monthly usage
   counters. It never returns `OPENAI_API_KEY` or provider credentials.
+- `PATCH /v1/ai/settings`: persist the authenticated user's explicit AI enabled/disabled
+  preference. New users and existing users with no preference default to enabled when
+  `OPENAI_API_KEY` is configured and the server has not disabled AI.
 - `GET /v1/webhooks`: list authenticated user's named webhook endpoints. Responses include
   `ingestUrl` but never include the endpoint secret or secret hash.
 - `POST /v1/webhooks`: create a named webhook endpoint. The response returns the generated webhook
@@ -283,11 +287,12 @@ before optional AI. Suppressed messages create source records with `notification
 DentLink Notification; created Notifications copy matched rule metadata into the source record and
 notification metadata.
 
-Optional email AI processing runs only when configured server-side with `DENTLINK_AI_ENABLED=true`
-and `OPENAI_API_KEY`. It uses `DENTLINK_AI_MODEL` and `DENTLINK_AI_MAX_INPUT_CHARS` when set. AI
-receives bounded normalized subject, sender, labels, timestamp, and body text only after
-deterministic rules have allowed notification creation. Invalid, timed-out, or rate-limited AI
-output records `ai.status = failed` and preserves the notification and Gmail connector health.
+Optional email AI processing runs when `OPENAI_API_KEY` is configured and the user has not disabled
+AI in Settings -> AI. `DENTLINK_AI_ENABLED=false` disables AI globally; otherwise users default to
+enabled. It uses `DENTLINK_AI_MODEL` and `DENTLINK_AI_MAX_INPUT_CHARS` when set. AI receives bounded
+normalized subject, sender, labels, timestamp, and body text only after deterministic rules have
+allowed notification creation. Invalid, timed-out, or rate-limited AI output records
+`ai.status = failed` and preserves the notification and Gmail connector health.
 
 The Worker also runs scheduled Gmail synchronization every five minutes for connected, idle Gmail
 accounts. Scheduled sync uses the account's selected ingestion engine. `gmail_api` accounts use the

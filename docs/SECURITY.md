@@ -117,9 +117,10 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   DentLink never sends OAuth data, credentials, full raw MIME, attachment binary content, or hidden
   headers to AI providers. Email bodies are not written to normal logs, diagnostics exports, or the
   browser diagnostics surface. AI provider keys must be configured only as Worker secrets; the
-  `/v1/ai/settings` response returns enabled/model/usage state but never returns provider keys.
-  Invalid, timed-out, or rate-limited AI responses are stored as safe AI failure metadata while the
-  notification remains visible with deterministic fallback content.
+  `/v1/ai/settings` response returns availability, effective enabled state, provider/model, safe
+  unavailable reason, and usage state but never returns provider keys. Invalid, timed-out, or
+  rate-limited AI responses are stored as safe AI failure metadata while the notification remains
+  visible with deterministic fallback content.
 - Milestone 4 Google Calendar synchronization uses the read-only Calendar scope, stores normalized
   event metadata and provider identifiers, and does not create, edit, delete, RSVP to, or manage
   attendees on Google Calendar events. Calendar refresh tokens use the same AES-GCM encrypted
@@ -148,9 +149,10 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   override explicit user rules, or produce unbounded ranking changes.
 - Record provider, model, prompt or rule version, timestamp, confidence where available, source
   item, and usage metadata.
-- Email AI is disabled unless `DENTLINK_AI_ENABLED=true` and `OPENAI_API_KEY` are configured
-  server-side. Model and input length are configurable with `DENTLINK_AI_MODEL` and
-  `DENTLINK_AI_MAX_INPUT_CHARS`.
+- Email AI is available when `OPENAI_API_KEY` is configured server-side and defaults to enabled for
+  users with no explicit preference. Users may opt out through Settings -> AI, and
+  `DENTLINK_AI_ENABLED=false` disables AI globally. Model and input length are configurable with
+  `DENTLINK_AI_MODEL` and `DENTLINK_AI_MAX_INPUT_CHARS`.
 
 ## Data minimization
 

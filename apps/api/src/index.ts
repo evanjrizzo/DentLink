@@ -19,6 +19,7 @@ import {
   startGmailOAuth,
   syncConnectedGmailAccounts,
   syncGmailAccount,
+  updateEmailAiSettings,
   updateGmailEngine,
   updateGmailRules,
   type GmailApiClient,
@@ -570,6 +571,17 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     if (method === "GET" && path === "/v1/ai/settings") {
       return json(await getEmailAiSettings(store, auth.user.id, env, now));
     }
+    if (method === "PATCH" && path === "/v1/ai/settings") {
+      return json(
+        await updateEmailAiSettings(
+          store,
+          auth.user.id,
+          parseEmailAiSettingsPatch(await readJson(request)),
+          env,
+          now
+        )
+      );
+    }
     if (method === "POST" && path === "/v1/notifications") {
       return json(
         await store.createNotification(
@@ -1028,6 +1040,17 @@ function isConflict(value: unknown): value is NoteConflict {
     "expectedVersion" in value &&
     "actualVersion" in value
   );
+}
+
+function parseEmailAiSettingsPatch(value: unknown): { enabled: boolean } {
+  if (!value || typeof value !== "object") {
+    throw new ValidationError("invalid_ai_settings", "AI settings payload is invalid");
+  }
+  const enabled = (value as { enabled?: unknown }).enabled;
+  if (typeof enabled !== "boolean") {
+    throw new ValidationError("invalid_ai_settings", "AI enabled must be a boolean");
+  }
+  return { enabled };
 }
 
 async function readJson(request: Request): Promise<unknown> {

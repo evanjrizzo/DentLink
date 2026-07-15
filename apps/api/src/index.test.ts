@@ -71,6 +71,10 @@ const milestone7AiSchemaPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../migrations/0009_email_sorting_ai.sql"
 );
+const aiPreferencesSchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0010_ai_user_preferences.sql"
+);
 
 type StoreFixture = {
   name: string;
@@ -102,7 +106,8 @@ const fixtures: StoreFixture[] = [
         milestone5SchemaPath,
         milestone7SchemaPath,
         milestone7RulesSchemaPath,
-        milestone7AiSchemaPath
+        milestone7AiSchemaPath,
+        aiPreferencesSchemaPath
       ]);
       return {
         store: new D1DentLinkStore(db),
@@ -1400,7 +1405,6 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     let aiCalls = 0;
     const env = {
       ...gmailTestEnv(fakeGmailClient(), fakeGmailImapClient()),
-      DENTLINK_AI_ENABLED: "true",
       OPENAI_API_KEY: "test-openai-key",
       DENTLINK_AI_MODEL: "gpt-test-mini",
       emailAiClient: {
@@ -1467,6 +1471,8 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     );
     expect(settings).toMatchObject({
       enabled: true,
+      available: true,
+      provider: "openai",
       model: "gpt-test-mini",
       requestsThisMonth: 1,
       failedRequestsThisMonth: 0
@@ -1474,10 +1480,78 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     expect(JSON.stringify(settings)).not.toMatch(/test-openai-key|Plain text/);
   });
 
+  it("persists an explicit per-user AI opt-out while leaving AI available", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-imap-ai-optout@example.com");
+    let aiCalls = 0;
+    const env = {
+      ...gmailTestEnv(fakeGmailClient(), fakeGmailImapClient()),
+      OPENAI_API_KEY: "test-openai-key",
+      emailAiClient: {
+        async summarizeEmail() {
+          aiCalls += 1;
+          return {
+            summary: "Should not run.",
+            importance: 90,
+            category: "other" as const,
+            requiresAction: false,
+            suggestedAction: "Ignore",
+            deadline: null,
+            reason: "Opted out.",
+            outputTokens: 1
+          };
+        }
+      }
+    };
+    const updated = await requestJson(
+      store,
+      "PATCH",
+      "/v1/ai/settings",
+      { enabled: false },
+      owner.session.token,
+      200,
+      env
+    );
+    expect(updated).toMatchObject({ enabled: false, available: true });
+    const linked = await connectImapGmailForTest(store, owner, env);
+    await requestJson(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(aiCalls).toBe(0);
+    const notifications = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(notifications.notifications[0]?.ai).toMatchObject({ status: "disabled" });
+  });
+
   it("creates IMAP notifications with fallback content when AI is disabled", async () => {
     const { store } = createStore();
     const owner = await register(store, "gmail-imap-no-ai@example.com");
     const env = gmailTestEnv(fakeGmailClient(), fakeGmailImapClient());
+    const settings = await requestJson(
+      store,
+      "GET",
+      "/v1/ai/settings",
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(settings).toMatchObject({
+      enabled: false,
+      available: false,
+      unavailableReason: "missing_api_key"
+    });
     const linked = await connectImapGmailForTest(store, owner, env);
     await requestJson(
       store,

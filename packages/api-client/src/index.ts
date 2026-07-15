@@ -400,6 +400,13 @@ export class DentLinkApiClient {
     return this.request<EmailAiSettings>("/v1/ai/settings");
   }
 
+  async updateEmailAiSettings(input: { enabled: boolean }): Promise<EmailAiSettings> {
+    return this.request<EmailAiSettings>("/v1/ai/settings", {
+      method: "PATCH",
+      body: input
+    });
+  }
+
   async createNotification(input: NotificationInput): Promise<Notification> {
     return this.request<Notification>("/v1/notifications", { method: "POST", body: input });
   }
