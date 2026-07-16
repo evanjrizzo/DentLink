@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactEle
 
 import { DentLinkApiClient, DentLinkApiError } from "@dentlink/api-client";
 import type {
+  AssistantChatSource,
   AuthSession,
   CalendarEvent,
   CalendarEventInput,
@@ -33,7 +34,14 @@ const initialList: NotesList = { notes: [], folders: [], tags: [] };
 const SESSION_STORAGE_KEY = "dentlink.auth.session.v1";
 const DEBUG_MODE_STORAGE_KEY = "dentlink.ui.debugMode.v1";
 const APPEARANCE_STORAGE_KEY = "dentlink.appearance.v1";
-type View = "notifications" | "agenda" | "notes" | "settings";
+type View = "home" | "notifications" | "agenda" | "notes" | "settings";
+type AssistantMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  sources: AssistantChatSource[];
+  error?: boolean;
+};
 type SettingsTab = "general" | "appearance" | "ai" | "connections" | "rules" | "debug" | "about";
 type CalendarMode = "agenda" | "day" | "week" | "month";
 type GmailSyncStage =
@@ -214,7 +222,7 @@ type AppearanceBrandingSettings = {
 type IconName = "check" | "close" | "external" | "pin" | "restore";
 
 const API_BASE_URL = import.meta.env.VITE_DENTLINK_API_BASE_URL ?? "";
-const UI_REFRESH_INTERVAL_MS = 45_000;
+const UI_REFRESH_INTERVAL_MS = 60_000;
 const DEFAULT_IMPORTANCE_INSTRUCTION =
   "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.";
 const MAX_PROMPT_CHARS = 2000;
@@ -266,8 +274,11 @@ export function DentLinkNotesApp(): ReactElement {
     destination: "notification" as WebhookDestination
   });
   const [lastWebhookSecret, setLastWebhookSecret] = useState<string | null>(null);
-  const [view, setView] = useState<View>("notifications");
+  const [view, setView] = useState<View>("home");
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
+  const [assistantDraft, setAssistantDraft] = useState("");
+  const [assistantRunning, setAssistantRunning] = useState(false);
   const [debugMode, setDebugMode] = useState(() => storedDebugMode());
   const [appearance, setAppearance] = useState<AppearancePreferences>(() => storedAppearance());
   const [search, setSearch] = useState("");
@@ -282,6 +293,8 @@ export function DentLinkNotesApp(): ReactElement {
   const webhooksRequest = useRef(0);
   const connectorsRequest = useRef(0);
   const refreshPromise = useRef<Promise<void> | null>(null);
+  const connectorSyncPromise = useRef<Promise<ConnectorSyncAllResult | null> | null>(null);
+  const refreshAllRunning = useRef(false);
   const eventsAbort = useRef<AbortController | null>(null);
   const syncCursor = useRef("0");
   const noteMutations = useRef(new Map<EntityId, QueuedNoteMutation>());
@@ -472,6 +485,7 @@ export function DentLinkNotesApp(): ReactElement {
     setRefreshState((current) => ({ ...current, lastAttemptAt: new Date().toISOString() }));
     const work = (async () => {
       try {
+        if (reason === "poll") await syncConnectedServicesSilently();
         await Promise.all([
           loadConnectors(),
           loadNotifications(),
@@ -500,7 +514,8 @@ export function DentLinkNotesApp(): ReactElement {
   }
 
   async function refreshAll(): Promise<void> {
-    if (refreshState.running) return;
+    if (refreshState.running || refreshAllRunning.current) return;
+    refreshAllRunning.current = true;
     setError(null);
     setRefreshState({
       running: true,
@@ -544,7 +559,34 @@ export function DentLinkNotesApp(): ReactElement {
         lastAttemptAt: new Date().toISOString()
       });
       setError(message);
+    } finally {
+      refreshAllRunning.current = false;
     }
+  }
+
+  async function syncConnectedServicesSilently(): Promise<ConnectorSyncAllResult | null> {
+    if (refreshAllRunning.current) return null;
+    if (connectorSyncPromise.current) return connectorSyncPromise.current;
+    const work = client
+      .syncAllConnectors()
+      .then((result) => {
+        setRefreshState((current) => ({ ...current, result, error: null }));
+        return result;
+      })
+      .catch((caught: unknown) => {
+        void caught;
+        setRefreshState((current) => ({
+          ...current,
+          error: current.error,
+          lastAttemptAt: new Date().toISOString()
+        }));
+        return null;
+      })
+      .finally(() => {
+        connectorSyncPromise.current = null;
+      });
+    connectorSyncPromise.current = work;
+    return work;
   }
 
   function startChangeStream(token: string, attempt: number): void {
@@ -1021,7 +1063,7 @@ export function DentLinkNotesApp(): ReactElement {
       setGmailSyncStage(account.id, "Finished.", false);
       if (result.createdNotifications > 0) setView("notifications");
     } catch (caught) {
-      const message = gmailSyncMessageFor(caught, gmailActiveEngine(account.settings));
+      const message = gmailSyncMessageFor(caught, gmailActiveEngine(account));
       setGmailSyncStates((current) => ({
         ...current,
         [account.id]: { stage: "Finished.", running: false, error: message }
@@ -1047,11 +1089,19 @@ export function DentLinkNotesApp(): ReactElement {
       ...current,
       [account.id]: { engine, comparisonMode, saving: true, error: null }
     }));
+    setConnectorAccounts((current) =>
+      mergeConnectorAccount(current, withRequestedGmailEngine(account, engine, comparisonMode))
+    );
     try {
       setError(null);
       const updated = await saveGmailEngineSelection(account, engine, comparisonMode);
-      setConnectorAccounts((current) => mergeConnectorAccount(current, updated));
-      setGmailEngineSaveStates((current) => withoutKey(current, account.id));
+      setConnectorAccounts((current) =>
+        mergeConnectorAccount(current, withRequestedGmailEngine(updated, engine, comparisonMode))
+      );
+      setGmailEngineSaveStates((current) => ({
+        ...current,
+        [account.id]: { engine, comparisonMode, saving: false, error: null }
+      }));
       await refreshGmailDiagnostics(account.id);
     } catch (caught) {
       if (caught instanceof DentLinkApiError && caught.code === "version_mismatch") {
@@ -1060,8 +1110,16 @@ export function DentLinkNotesApp(): ReactElement {
           const latest = latestAccounts.find((item) => item.id === account.id);
           if (!latest) throw caught;
           const updated = await saveGmailEngineSelection(latest, engine, comparisonMode);
-          setConnectorAccounts((current) => mergeConnectorAccount(current, updated));
-          setGmailEngineSaveStates((current) => withoutKey(current, account.id));
+          setConnectorAccounts((current) =>
+            mergeConnectorAccount(
+              current,
+              withRequestedGmailEngine(updated, engine, comparisonMode)
+            )
+          );
+          setGmailEngineSaveStates((current) => ({
+            ...current,
+            [account.id]: { engine, comparisonMode, saving: false, error: null }
+          }));
           await refreshGmailDiagnostics(account.id);
           return;
         } catch (retryError) {
@@ -1247,6 +1305,52 @@ export function DentLinkNotesApp(): ReactElement {
     void loadCalendarEvents(calendarDate, nextSource);
   }
 
+  async function askAssistant(message: string): Promise<void> {
+    const trimmed = message.trim();
+    if (!trimmed || assistantRunning) return;
+    const userMessage: AssistantMessage = {
+      id: localMessageId(),
+      role: "user",
+      content: trimmed,
+      sources: []
+    };
+    setAssistantDraft("");
+    setAssistantRunning(true);
+    setAssistantMessages((current) => [...current, userMessage]);
+    try {
+      const response = await client.askAssistant({
+        message: trimmed,
+        timezone: effectiveTimezone
+      });
+      setAssistantMessages((current) => [
+        ...current,
+        {
+          id: localMessageId(),
+          role: "assistant",
+          content: response.answer,
+          sources: response.sources
+        }
+      ]);
+    } catch (caught) {
+      const content =
+        caught instanceof DentLinkApiError
+          ? caught.message
+          : "Assistant request failed. Try again after the next refresh.";
+      setAssistantMessages((current) => [
+        ...current,
+        {
+          id: localMessageId(),
+          role: "assistant",
+          content,
+          sources: [],
+          error: true
+        }
+      ]);
+    } finally {
+      setAssistantRunning(false);
+    }
+  }
+
   async function logout(): Promise<void> {
     try {
       await client.logout();
@@ -1276,6 +1380,8 @@ export function DentLinkNotesApp(): ReactElement {
       setSearch("");
       setFolderId(null);
       setTagIds([]);
+      setAssistantMessages([]);
+      setAssistantDraft("");
     }
   }
 
@@ -1428,6 +1534,29 @@ export function DentLinkNotesApp(): ReactElement {
           {error}
         </p>
       ) : null}
+      {view === "home" ? (
+        <HomeView
+          notifications={notifications}
+          calendarEvents={calendarEventsWithNotes}
+          notes={notesList.notes}
+          sourceColors={appearance.sourceColors}
+          webhooks={webhooks}
+          messages={assistantMessages}
+          draft={assistantDraft}
+          running={assistantRunning}
+          onDraftChange={setAssistantDraft}
+          onSubmit={askAssistant}
+          onUpdateNotification={updateNotification}
+          onCreateNote={createNote}
+          onUpdateNote={updateNote}
+          onOpenNotifications={() => setView("notifications")}
+          onOpenCalendar={() => setView("agenda")}
+          onOpenNotes={(noteId) => {
+            if (noteId) setOpenNoteId(noteId);
+            setView("notes");
+          }}
+        />
+      ) : null}
       {view === "notifications" ? (
         <NotificationsView
           notifications={notifications}
@@ -1574,6 +1703,407 @@ function optimisticNote(note: Note, patch: NotePatch, tags: NotesList["tags"]): 
   };
 }
 
+function HomeView(props: {
+  notifications: Notification[];
+  calendarEvents: CalendarEvent[];
+  notes: Note[];
+  sourceColors: Record<string, string>;
+  webhooks: Array<WebhookEndpoint & { ingestUrl: string }>;
+  messages: AssistantMessage[];
+  draft: string;
+  running: boolean;
+  onDraftChange: (value: string) => void;
+  onSubmit: (message: string) => Promise<void>;
+  onUpdateNotification: (
+    notification: Notification,
+    patch: Partial<Pick<Notification, "pinned" | "status">>
+  ) => Promise<void>;
+  onCreateNote: (input: NoteInput) => Promise<void>;
+  onUpdateNote: (note: Note, patch: NotePatch) => Promise<void>;
+  onOpenNotifications: () => void;
+  onOpenCalendar: () => void;
+  onOpenNotes: (noteId?: EntityId) => void;
+}): ReactElement {
+  const threadRef = useRef<HTMLDivElement | null>(null);
+  const followThreadRef = useRef(true);
+  const [quickNoteTitle, setQuickNoteTitle] = useState("");
+  const today = todayKey();
+  const activeNotifications = sortNotifications(
+    props.notifications.filter((notification) => notification.status === "active"),
+    "recommended"
+  ).slice(0, 5);
+  const todayEvents = props.calendarEvents
+    .filter((event) => eventOccursOnDate(event, today))
+    .sort(compareEventsByStart)
+    .slice(0, 5);
+  const nextEvent =
+    [...props.calendarEvents]
+      .filter((event) => event.status === "active" && event.startAt >= new Date().toISOString())
+      .sort(compareEventsByStart)[0] ?? null;
+  const dueNotes = dueHomeNotes(props.notes, today).slice(0, 5);
+  const reviewItems = homeReviewItems(props.notifications).slice(0, 5);
+  const promptSuggestions = homePromptSuggestions({
+    activeNotifications: activeNotifications.length,
+    dueNotes: dueNotes.length,
+    todayEvents: todayEvents.length,
+    reviewItems: reviewItems.length
+  });
+
+  useEffect(() => {
+    const thread = threadRef.current;
+    if (!thread || !followThreadRef.current) return;
+    thread.scrollTo({ top: thread.scrollHeight, behavior: "smooth" });
+  }, [props.messages.length, props.running]);
+
+  function updateThreadFollow(): void {
+    const thread = threadRef.current;
+    if (!thread) return;
+    const distanceFromBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight;
+    followThreadRef.current = distanceFromBottom < 80;
+  }
+
+  return (
+    <main className="home-shell">
+      <section className="home-main" aria-label="Home overview">
+        <section className="home-band today-band" aria-label="Today">
+          <div className="home-section-header">
+            <h2>Today</h2>
+            <button type="button" onClick={props.onOpenCalendar}>
+              Open Agenda
+            </button>
+          </div>
+          <div className="today-summary-grid">
+            <HomeMetric label="Events" value={todayEvents.length} />
+            <HomeMetric label="Due Notes" value={dueNotes.length} />
+            <HomeMetric label="Active" value={activeNotifications.length} />
+          </div>
+          {nextEvent ? (
+            <button type="button" className="next-event-button" onClick={props.onOpenCalendar}>
+              <span>Next</span>
+              <strong>{nextEvent.title}</strong>
+              <small>{formatEventStart(nextEvent)}</small>
+            </button>
+          ) : (
+            <p className="home-empty">No upcoming events loaded.</p>
+          )}
+          <div className="home-row-list">
+            {todayEvents.map((event) => (
+              <button
+                type="button"
+                key={event.id}
+                className="home-event-row"
+                style={eventAccentStyle(event, props.sourceColors)}
+                onClick={props.onOpenCalendar}
+              >
+                <span>{event.allDay ? "All day" : formatEventTime(event)}</span>
+                <strong>{event.title}</strong>
+                <small>{sourceLabel(event)}</small>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="home-band" aria-label="Priority inbox">
+          <div className="home-section-header">
+            <h2>Priority Inbox</h2>
+            <button type="button" onClick={props.onOpenNotifications}>
+              Open Notifications
+            </button>
+          </div>
+          {activeNotifications.length === 0 ? (
+            <p className="home-empty">No active notifications.</p>
+          ) : null}
+          <div className="home-row-list">
+            {activeNotifications.map((notification) => (
+              <article
+                key={notification.id}
+                className={`home-notification-row importance-${importanceBand(notification)}`}
+                style={notificationAccentStyle(notification, props.sourceColors, props.webhooks)}
+              >
+                <button type="button" onClick={props.onOpenNotifications}>
+                  <span>{notificationSender(notification)}</span>
+                  <strong>{notification.email?.subject || notification.title}</strong>
+                  <small>{notificationSummary(notification)}</small>
+                </button>
+                <NotificationQuickActions
+                  notification={notification}
+                  onUpdateNotification={props.onUpdateNotification}
+                />
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="home-band" aria-label="Due notes">
+          <div className="home-section-header">
+            <h2>Due Notes</h2>
+            <button type="button" onClick={() => props.onOpenNotes()}>
+              Open Notes
+            </button>
+          </div>
+          <form
+            className="quick-capture"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const title = quickNoteTitle.trim();
+              if (!title) return;
+              void props.onCreateNote({
+                kind: "task",
+                title,
+                priority: "medium",
+                dueAt: `${today}T23:59:00.000Z`
+              });
+              setQuickNoteTitle("");
+            }}
+          >
+            <input
+              aria-label="Quick task"
+              value={quickNoteTitle}
+              maxLength={72}
+              placeholder="Quick task"
+              onChange={(event) => setQuickNoteTitle(event.currentTarget.value)}
+            />
+            <button type="submit" disabled={quickNoteTitle.trim().length === 0}>
+              Add
+            </button>
+          </form>
+          {dueNotes.length === 0 ? (
+            <p className="home-empty">No notes due today or overdue.</p>
+          ) : null}
+          <div className="home-row-list">
+            {dueNotes.map((note) => (
+              <article key={note.id} className={`home-note-row priority-${note.priority}`}>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={note.status === "done"}
+                    onChange={() =>
+                      void props.onUpdateNote(note, {
+                        status: note.status === "done" ? "active" : "done"
+                      })
+                    }
+                  />
+                  <span>
+                    <strong>{note.title}</strong>
+                    <small>{homeNoteDueLabel(note, today)}</small>
+                  </span>
+                </label>
+                <button type="button" onClick={() => props.onOpenNotes(note.id)}>
+                  Open
+                </button>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="home-band" aria-label="Needs review">
+          <div className="home-section-header">
+            <h2>Needs Review</h2>
+            <button type="button" onClick={props.onOpenNotifications}>
+              Review
+            </button>
+          </div>
+          {reviewItems.length === 0 ? (
+            <p className="home-empty">Nothing waiting for review.</p>
+          ) : null}
+          <div className="home-row-list">
+            {reviewItems.map((item) => (
+              <button
+                type="button"
+                key={item.id}
+                className="home-review-row"
+                onClick={props.onOpenNotifications}
+              >
+                <span>{item.reason}</span>
+                <strong>{item.title}</strong>
+                <small>{item.detail}</small>
+              </button>
+            ))}
+          </div>
+        </section>
+      </section>
+
+      <section className="assistant-panel" aria-label="Assistant">
+        <header className="assistant-header">
+          <h2>DentLink Assistant</h2>
+          <div className="assistant-prompts" aria-label="Suggested prompts">
+            {promptSuggestions.map((prompt) => (
+              <button
+                type="button"
+                key={prompt}
+                disabled={props.running}
+                onClick={() => void props.onSubmit(prompt)}
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
+        </header>
+        <div
+          ref={threadRef}
+          className="assistant-thread"
+          aria-live="polite"
+          onScroll={updateThreadFollow}
+        >
+          {props.messages.length === 0 ? (
+            <div className="assistant-example" aria-label="Example assistant exchange">
+              <article className="assistant-message user">
+                <p>What needs my attention today?</p>
+              </article>
+              <article className="assistant-message assistant">
+                <p>
+                  Ask about today, newest notifications, overdue notes, or what changed recently.
+                </p>
+              </article>
+            </div>
+          ) : (
+            props.messages.map((message) => (
+              <article
+                key={message.id}
+                className={`assistant-message ${message.role}${message.error ? " error" : ""}`}
+              >
+                <p>{message.content}</p>
+                {message.sources.length > 0 ? (
+                  <div className="assistant-sources" aria-label="Sources">
+                    {message.sources.map((source) => (
+                      <a
+                        key={source.id}
+                        href={source.sourceUrl ?? undefined}
+                        target={source.sourceUrl ? "_blank" : undefined}
+                        rel={source.sourceUrl ? "noreferrer" : undefined}
+                        className="assistant-source"
+                        aria-disabled={source.sourceUrl ? undefined : true}
+                      >
+                        <span>{assistantSourceLabel(source.kind)}</span>
+                        <strong>{source.title}</strong>
+                        <small>
+                          {source.timestamp
+                            ? new Date(source.timestamp).toLocaleString()
+                            : source.subtitle}
+                        </small>
+                      </a>
+                    ))}
+                  </div>
+                ) : null}
+              </article>
+            ))
+          )}
+          {props.running ? (
+            <article
+              className="assistant-message assistant-thinking"
+              aria-label="Assistant thinking"
+            >
+              <span />
+              <span />
+              <span />
+            </article>
+          ) : null}
+        </div>
+        <form
+          className="assistant-composer"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void props.onSubmit(props.draft);
+          }}
+        >
+          <textarea
+            value={props.draft}
+            maxLength={MAX_PROMPT_CHARS}
+            onChange={(event) => props.onDraftChange(event.currentTarget.value)}
+            placeholder="Ask DentLink"
+            aria-label="Ask DentLink"
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void props.onSubmit(props.draft);
+              }
+            }}
+          />
+          <button type="submit" disabled={props.running || props.draft.trim().length === 0}>
+            {props.running ? "Sending" : "Send"}
+          </button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function HomeMetric(props: { label: string; value: number }): ReactElement {
+  return (
+    <div className="home-metric">
+      <strong>{props.value}</strong>
+      <span>{props.label}</span>
+    </div>
+  );
+}
+
+function dueHomeNotes(notes: Note[], today: string): Note[] {
+  return notes
+    .filter((note) => note.status === "active" && note.dueAt && note.dueAt.slice(0, 10) <= today)
+    .sort((left, right) => {
+      if (left.pinned !== right.pinned) return Number(right.pinned) - Number(left.pinned);
+      return (
+        (left.dueAt ?? "").localeCompare(right.dueAt ?? "") ||
+        notePriorityScore(right.priority) - notePriorityScore(left.priority) ||
+        left.title.localeCompare(right.title)
+      );
+    });
+}
+
+function notePriorityScore(priority: Note["priority"]): number {
+  if (priority === "high") return 3;
+  if (priority === "medium") return 2;
+  if (priority === "low") return 1;
+  return 0;
+}
+
+function homeNoteDueLabel(note: Note, today: string): string {
+  if (!note.dueAt) return "No due date";
+  const dueDate = note.dueAt.slice(0, 10);
+  if (dueDate < today) return `Overdue ${formatMonthDay(dueDate)}`;
+  if (dueDate === today) return "Due today";
+  return `Due ${formatMonthDay(dueDate)}`;
+}
+
+function homeReviewItems(
+  notifications: Notification[]
+): Array<{ id: EntityId; title: string; reason: string; detail: string }> {
+  return notifications
+    .filter(
+      (notification) =>
+        notification.status === "suppressed" ||
+        notification.ai?.status === "failed" ||
+        notification.ai?.status === "skipped"
+    )
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+    .map((notification) => ({
+      id: notification.id,
+      title: notification.email?.subject || notification.title || "Notification",
+      reason:
+        notification.status === "suppressed"
+          ? "Below threshold"
+          : notification.ai?.status === "failed"
+            ? "AI failed"
+            : "AI skipped",
+      detail: notificationSummary(notification)
+    }));
+}
+
+function homePromptSuggestions(counts: {
+  activeNotifications: number;
+  dueNotes: number;
+  todayEvents: number;
+  reviewItems: number;
+}): string[] {
+  const prompts = ["What needs my attention today?"];
+  if (counts.activeNotifications > 0) prompts.push("Summarize my newest notifications");
+  if (counts.dueNotes > 0) prompts.push("What notes are overdue?");
+  if (counts.todayEvents > 0) prompts.push("What do I have going on today?");
+  if (counts.reviewItems > 0) prompts.push("What should I review?");
+  prompts.push("What changed since the last sync?");
+  return prompts.slice(0, 4);
+}
+
 function PageHeader(props: {
   title: string;
   refreshRunning: boolean;
@@ -1584,7 +2114,7 @@ function PageHeader(props: {
     <section className="page-header" aria-label={`${props.title} page controls`}>
       <h1>{props.title}</h1>
       <span className={`refresh-indicator ${props.refreshState.live}`}>
-        Live: {props.refreshState.live}
+        Auto sync: {props.refreshState.live}
         {props.refreshState.nextPollAt
           ? ` · next ${new Date(props.refreshState.nextPollAt).toLocaleTimeString()}`
           : ""}
@@ -1649,6 +2179,8 @@ function PlusIcon(): ReactElement {
 
 function pageTitle(view: View, settingsTab?: SettingsTab): string {
   switch (view) {
+    case "home":
+      return "Home";
     case "agenda":
       return "Agenda";
     case "notes":
@@ -1977,6 +2509,16 @@ function clampNumber(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
 }
 
+function localMessageId(): string {
+  return crypto.randomUUID ? crypto.randomUUID() : `message_${Date.now()}_${Math.random()}`;
+}
+
+function assistantSourceLabel(kind: AssistantChatSource["kind"]): string {
+  if (kind === "email") return "Email";
+  if (kind === "notification") return "Notification";
+  return "Calendar";
+}
+
 function applyAppearanceToDocument(appearance: AppearancePreferences): void {
   const root = document.documentElement;
   const preset =
@@ -2061,6 +2603,7 @@ function AppNavigation(props: {
   variant: "top" | "bottom";
 }): ReactElement {
   const items: Array<{ view: View; label: string }> = [
+    { view: "home", label: "Home" },
     { view: "notifications", label: "Notifications" },
     { view: "agenda", label: "Agenda" },
     { view: "notes", label: "Notes" },
@@ -2573,11 +3116,12 @@ function Icon(props: { name: IconName; filled?: boolean }): ReactElement {
     "aria-hidden": true
   };
   if (props.name === "pin") {
+    const path = props.filled
+      ? "M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2Z"
+      : "M14 4v8.83L15.17 14H8.83L10 12.83V4h4Zm3-2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2V4h1V2Z";
     return (
-      <svg {...common} fill={props.filled ? "currentColor" : "none"}>
-        <path d="M15.5 3.5 20.5 8.5" />
-        <path d="M8 14 3.5 18.5" />
-        <path d="M7 8.5 11.5 4 20 12.5 15.5 17 7 8.5Z" />
+      <svg {...common} fill="currentColor" stroke="none">
+        <path d={path} />
       </svg>
     );
   }
@@ -4082,12 +4626,6 @@ function mergeConnectorAccount(
   return found ? merged : [...merged, updated];
 }
 
-function withoutKey<T>(record: Record<EntityId, T>, key: EntityId): Record<EntityId, T> {
-  const next = { ...record };
-  delete next[key];
-  return next;
-}
-
 function exportGmailDiagnostics(
   account: ConnectorAccount,
   diagnostics: GmailDiagnostics | undefined
@@ -4101,11 +4639,11 @@ function exportGmailDiagnostics(
       status: account.status,
       healthStatus: account.healthStatus,
       syncStatus: account.syncStatus,
-      requestedEngine: gmailSelectedEngine(settings),
-      activeEngine: gmailActiveEngine(settings),
+      requestedEngine: gmailSelectedEngine(account),
+      activeEngine: gmailActiveEngine(account),
       reconnectRequired: settings.gmailReconnectRequired === true,
       verified:
-        gmailActiveEngine(settings) === "gmail_imap"
+        gmailActiveEngine(account) === "gmail_imap"
           ? settings.gmailImapGranted === true
           : settings.gmailReadonlyGranted !== false
     },
@@ -4116,6 +4654,7 @@ function exportGmailDiagnostics(
     diagnostics: diagnostics
       ? {
           summary: diagnostics.summary,
+          syncAttempts: diagnostics.attempts,
           recentOutcomes: diagnostics.messages.slice(0, 25).map((message) => ({
             outcome: message.outcome,
             reason: message.reason,
@@ -5936,9 +6475,8 @@ function GmailConnectorCard(props: {
   onOpenRules: () => void;
   onDisconnect: (account: ConnectorAccount) => Promise<void>;
 }): ReactElement {
-  const selectedEngine =
-    props.engineSaveState?.engine ?? gmailSelectedEngine(props.account.settings);
-  const activeEngine = gmailActiveEngine(props.account.settings);
+  const selectedEngine = props.engineSaveState?.engine ?? gmailSelectedEngine(props.account);
+  const activeEngine = gmailActiveEngine(props.account);
   const comparisonMode =
     props.engineSaveState?.comparisonMode ??
     props.account.settings.gmailImapComparisonMode === true;
@@ -5979,7 +6517,10 @@ function GmailConnectorCard(props: {
               ? new Date(props.account.lastSyncAt).toLocaleString()
               : "Never"}
         </span>
-        <span>Next Scheduled Sync: {nextScheduledSyncLabel(engineDiagnostics?.lastSyncAt)}</span>
+        <span>
+          Next Scheduled Sync:{" "}
+          {nextScheduledSyncLabel(engineDiagnostics?.lastSyncAt ?? props.account.lastSyncAt)}
+        </span>
         <span>
           Last Successful Sync:{" "}
           {engineDiagnostics?.lastSuccessfulAt
@@ -6374,6 +6915,11 @@ function GmailDiagnosticsSummary(props: {
   if (!props.diagnostics && !incremental && !imap && !engineDiagnostics) return null;
   const summary = props.diagnostics?.summary;
   const recentMessages = props.diagnostics?.messages.slice(0, 8) ?? [];
+  const recentAttempts = props.diagnostics?.attempts.slice(0, 10) ?? [];
+  const latestOutcomeAt = latestProcessedAt(recentMessages);
+  const latestSyncAt = engineDiagnostics?.lastSyncAt ?? null;
+  const syncAfterLatestOutcome =
+    latestSyncAt && latestOutcomeAt && Date.parse(latestSyncAt) > Date.parse(latestOutcomeAt);
   return (
     <section className="gmail-diagnostics" aria-label="Gmail sync diagnostics">
       {engineDiagnostics ? (
@@ -6451,9 +6997,65 @@ function GmailDiagnosticsSummary(props: {
           Successfully processed messages were still imported.
         </p>
       ) : null}
+      {recentAttempts.length > 0 ? (
+        <details open>
+          <summary>Recent Gmail sync attempts</summary>
+          <div className="diagnostics-table-wrap">
+            <table className="diagnostics-table">
+              <thead>
+                <tr>
+                  <th>Started</th>
+                  <th>Trigger</th>
+                  <th>Engine</th>
+                  <th>Status</th>
+                  <th>Duration</th>
+                  <th>Counts</th>
+                  <th>Error</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentAttempts.map((attempt) => (
+                  <tr key={attempt.id}>
+                    <td>{new Date(attempt.startedAt).toLocaleString()}</td>
+                    <td>{attempt.trigger}</td>
+                    <td>{syncAttemptEngineLabel(attempt.engine)}</td>
+                    <td>{attempt.status}</td>
+                    <td>{formatDuration(attempt.durationMs)}</td>
+                    <td>
+                      {attempt.summary
+                        ? `${attempt.summary.discovered} found, ${attempt.summary.examined} checked, ${attempt.summary.created} created, ${attempt.summary.failed} failed`
+                        : "No counts"}
+                    </td>
+                    <td>
+                      {attempt.errorCode
+                        ? `${attempt.errorCode}: ${attempt.errorMessage ?? "No message"}`
+                        : "None"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      ) : null}
       {recentMessages.length > 0 ? (
         <details>
-          <summary>Recent Gmail processing outcomes</summary>
+          <summary>Latest Gmail message processing outcomes</summary>
+          <div className="gmail-diagnostics-grid diagnostics-recency">
+            <span>
+              Latest Sync Check: {latestSyncAt ? new Date(latestSyncAt).toLocaleString() : "Never"}
+            </span>
+            <span>
+              Latest Message Outcome:{" "}
+              {latestOutcomeAt ? new Date(latestOutcomeAt).toLocaleString() : "None"}
+            </span>
+          </div>
+          {syncAfterLatestOutcome ? (
+            <p className="connector-note">
+              Gmail has checked since the latest message outcome. No newer eligible messages were
+              recorded in diagnostics.
+            </p>
+          ) : null}
           <div className="diagnostics-table-wrap">
             <table className="diagnostics-table">
               <thead>
@@ -6486,6 +7088,19 @@ function GmailDiagnosticsSummary(props: {
       ) : null}
     </section>
   );
+}
+
+function latestProcessedAt(messages: GmailDiagnostics["messages"]): string | null {
+  return messages.reduce<string | null>((latest, message) => {
+    if (!message.processedAt) return latest;
+    if (!latest) return message.processedAt;
+    return Date.parse(message.processedAt) > Date.parse(latest) ? message.processedAt : latest;
+  }, null);
+}
+
+function syncAttemptEngineLabel(engine: GmailDiagnostics["attempts"][number]["engine"]): string {
+  if (engine === "unknown") return "Unknown";
+  return gmailEngineLabel(engine);
 }
 
 function GmailOperationPanel(props: {
@@ -6533,18 +7148,52 @@ function GmailSummaryGrid(props: {
   );
 }
 
-function gmailSelectedEngine(settings: ConnectorAccount["settings"]): "gmail_api" | "gmail_imap" {
-  return settings.gmailRequestedIngestionEngine === "gmail_imap" ||
+type GmailEngine = "gmail_api" | "gmail_imap";
+type GmailEngineAccount = ConnectorAccount & {
+  requestedEngine?: GmailEngine;
+  activeEngine?: GmailEngine;
+};
+
+export function gmailSelectedEngineForTest(account: GmailEngineAccount): GmailEngine {
+  return gmailSelectedEngine(account);
+}
+
+function gmailSelectedEngine(account: GmailEngineAccount): GmailEngine {
+  const settings = account.settings;
+  return account.requestedEngine === "gmail_imap" ||
+    settings.gmailRequestedIngestionEngine === "gmail_imap" ||
+    account.activeEngine === "gmail_imap" ||
     settings.gmailIngestionEngine === "gmail_imap"
     ? "gmail_imap"
     : "gmail_api";
 }
 
-function gmailActiveEngine(settings: ConnectorAccount["settings"]): "gmail_api" | "gmail_imap" {
-  return settings.gmailIngestionEngine === "gmail_imap" ? "gmail_imap" : "gmail_api";
+function gmailActiveEngine(account: GmailEngineAccount): GmailEngine {
+  if (account.activeEngine === "gmail_imap") return "gmail_imap";
+  return account.settings.gmailIngestionEngine === "gmail_imap" ? "gmail_imap" : "gmail_api";
 }
 
-function gmailEngineLabel(engine: "gmail_api" | "gmail_imap"): string {
+function withRequestedGmailEngine(
+  account: ConnectorAccount,
+  engine: GmailEngine,
+  comparisonMode: boolean
+): ConnectorAccount {
+  return {
+    ...account,
+    requestedEngine: engine,
+    settings: {
+      ...account.settings,
+      gmailRequestedIngestionEngine: engine,
+      gmailImapComparisonMode: comparisonMode,
+      gmailReconnectRequired:
+        engine === "gmail_imap" && account.settings.gmailIngestionEngine !== "gmail_imap"
+          ? true
+          : account.settings.gmailReconnectRequired
+    }
+  } as ConnectorAccount;
+}
+
+function gmailEngineLabel(engine: GmailEngine): string {
   return engine === "gmail_imap" ? "Gmail IMAP (Preview)" : "Gmail API";
 }
 
@@ -6554,9 +7203,15 @@ function formatDuration(durationMs: number | null): string {
   return `${(durationMs / 1000).toFixed(1)} s`;
 }
 
-function nextScheduledSyncLabel(lastSyncAt: string | null | undefined): string {
+export function nextScheduledSyncLabel(
+  lastSyncAt: string | null | undefined,
+  now = new Date()
+): string {
   if (!lastSyncAt) return "Within 5 minutes after activation";
-  const next = new Date(new Date(lastSyncAt).getTime() + 5 * 60 * 1000);
+  const lastSyncTime = new Date(lastSyncAt).getTime();
+  if (!Number.isFinite(lastSyncTime)) return "Within 5 minutes after activation";
+  const next = new Date(lastSyncTime + 5 * 60 * 1000);
+  if (next.getTime() <= now.getTime()) return "Due now";
   return next.toLocaleString();
 }
 

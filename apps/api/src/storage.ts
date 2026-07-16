@@ -13,6 +13,7 @@ import type {
   ConnectorCredential,
   ConnectorCredentialKind,
   ConnectorOAuthState,
+  ConnectorSyncAttempt,
   ConnectorSourceRecord,
   ConnectorSourceRecordInput,
   CurrentSession,
@@ -152,6 +153,15 @@ export interface DentLinkStore {
     userId: EntityId,
     accountId: EntityId
   ): Promise<ConnectorSourceRecord[]>;
+  createConnectorSyncAttempt(
+    userId: EntityId,
+    input: Omit<ConnectorSyncAttempt, "id" | "userId">
+  ): Promise<ConnectorSyncAttempt>;
+  listConnectorSyncAttempts(
+    userId: EntityId,
+    accountId: EntityId,
+    limit?: number
+  ): Promise<ConnectorSyncAttempt[]>;
   createConnectorOAuthState(
     userId: EntityId,
     input: {
@@ -327,6 +337,7 @@ export class MemoryDentLinkStore implements DentLinkStore {
   private tags = new Map<EntityId, Tag>();
   private connectorAccounts = new Map<EntityId, ConnectorAccount>();
   private connectorSourceRecords = new Map<EntityId, ConnectorSourceRecord>();
+  private connectorSyncAttempts = new Map<EntityId, ConnectorSyncAttempt>();
   private connectorOAuthStates = new Map<string, ConnectorOAuthState>();
   private connectorCredentials = new Map<EntityId, ConnectorCredential>();
   private calendarEvents = new Map<EntityId, CalendarEvent>();
@@ -866,6 +877,34 @@ export class MemoryDentLinkStore implements DentLinkStore {
       .filter((record) => record.userId === userId && record.accountId === accountId)
       .sort((left, right) => left.receivedAt.localeCompare(right.receivedAt))
       .map(copyConnectorSourceRecord);
+  }
+
+  async createConnectorSyncAttempt(
+    userId: EntityId,
+    input: Omit<ConnectorSyncAttempt, "id" | "userId">
+  ): Promise<ConnectorSyncAttempt> {
+    const account = await this.getConnectorAccount(userId, input.accountId);
+    if (!account) throw new StoreError("not_found", "Connector account not found");
+    const attempt: ConnectorSyncAttempt = {
+      ...input,
+      id: this.nextId("sync-attempt"),
+      userId
+    };
+    this.connectorSyncAttempts.set(attempt.id, copyConnectorSyncAttempt(attempt));
+    return copyConnectorSyncAttempt(attempt);
+  }
+
+  async listConnectorSyncAttempts(
+    userId: EntityId,
+    accountId: EntityId,
+    limit = 50
+  ): Promise<ConnectorSyncAttempt[]> {
+    const boundedLimit = Math.min(Math.max(Math.floor(limit), 1), 200);
+    return [...this.connectorSyncAttempts.values()]
+      .filter((attempt) => attempt.userId === userId && attempt.accountId === accountId)
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt))
+      .slice(0, boundedLimit)
+      .map(copyConnectorSyncAttempt);
   }
 
   async createConnectorOAuthState(
@@ -1895,6 +1934,14 @@ function copyConnectorSourceRecord(record: ConnectorSourceRecord): ConnectorSour
       string,
       unknown
     >
+  };
+}
+
+function copyConnectorSyncAttempt(attempt: ConnectorSyncAttempt): ConnectorSyncAttempt {
+  return {
+    ...attempt,
+    summary: attempt.summary ? { ...attempt.summary } : null,
+    details: JSON.parse(JSON.stringify(attempt.details)) as Record<string, unknown>
   };
 }
 

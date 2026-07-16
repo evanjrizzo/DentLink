@@ -621,6 +621,27 @@ export type GmailSyncSummary = {
   failed: number;
 };
 
+export type ConnectorSyncAttemptTrigger = "manual" | "scheduled" | "refresh_all" | "backfill";
+
+export type ConnectorSyncAttemptStatus = "success" | "partial" | "failed" | "skipped";
+
+export type ConnectorSyncAttempt = {
+  id: EntityId;
+  userId: EntityId;
+  accountId: EntityId;
+  connectorKey: string;
+  trigger: ConnectorSyncAttemptTrigger;
+  engine: "gmail_api" | "gmail_imap" | "unknown";
+  status: ConnectorSyncAttemptStatus;
+  startedAt: IsoDateTime;
+  completedAt: IsoDateTime;
+  durationMs: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+  summary: GmailSyncSummary | null;
+  details: Record<string, unknown>;
+};
+
 export type GmailDiagnosticMessage = {
   messageId: EntityId;
   outcome: Extract<
@@ -644,6 +665,7 @@ export type GmailDiagnostics = {
   account: ConnectorAccount;
   summary: GmailSyncSummary;
   messages: GmailDiagnosticMessage[];
+  attempts: ConnectorSyncAttempt[];
 };
 
 export type EmailAiSettings = {
@@ -680,6 +702,32 @@ export type EmailAiReprocessResult = {
     code: string;
     message: string;
   }>;
+};
+
+export type AssistantChatRequest = {
+  message: string;
+  timezone?: string;
+};
+
+export type AssistantChatSource = {
+  id: EntityId;
+  kind: "email" | "calendar_event" | "notification";
+  title: string;
+  subtitle: string;
+  timestamp: IsoDateTime | null;
+  sourceUrl: string | null;
+};
+
+export type AssistantChatResponse = {
+  answer: string;
+  sources: AssistantChatSource[];
+  ai: {
+    status: "complete";
+    provider: "openai";
+    model: string;
+    promptVersion: string;
+    outputTokens: number | null;
+  };
 };
 
 export type GoogleCalendarSyncResult = {

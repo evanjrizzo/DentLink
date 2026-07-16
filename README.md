@@ -11,10 +11,11 @@ inspected only as behavioral references.
 
 ## Current status
 
-Milestone 7 Slice 4.3: authentication, manual Notes, named webhook ingestion, Notifications,
+Milestone 7 Slice 4.4: authentication, manual Notes, named webhook ingestion, Notifications,
 provider-neutral connector plumbing, Gmail API fallback, preview Gmail IMAP ingestion, read-only
-Google Calendar synchronization, DentLink Local calendar events with ICS import/export, email
-rules, optional AI summaries, live refresh, and the responsive touch-first web UI.
+Google Calendar synchronization, DentLink Local calendar events with ICS import/export, email rules,
+optional AI summaries, read-only Home assistant, live refresh, and the responsive touch-first web
+UI.
 
 This repository contains the pnpm TypeScript workspace, shared package boundaries, a Worker-style
 API handler, Cloudflare D1 storage adapter, D1 migrations for auth, notes, notifications, and
@@ -25,8 +26,10 @@ Tauri, Android, push notifications, widgets, or Google Calendar writeback.
 
 ## Product shape
 
-DentLink has three primary user-facing sections:
+DentLink has four primary user-facing sections:
 
+- Home: a unified landing page with a read-only assistant that can answer from bounded DentLink
+  email and calendar context when AI is configured.
 - Notifications: ranked externally sourced information, such as email summaries, webhook alerts,
   connector alerts, reminders, and future phone notifications. Normal cards use contextual compact
   actions: pin/unpin, dismiss, source open when available, and Complete only for actionable items.
@@ -131,10 +134,12 @@ sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0003_connector_framewor
 sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0004_gmail_connector.sql
 sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0005_google_calendar_connector.sql
 sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0006_calendar_foundation_ics.sql
-sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0007_gmail_sync_diagnostics.sql
-sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0008_gmail_rules_ai.sql
-sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0009_gmail_imap_engine.sql
+sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0007_gmail_ingestion_outcomes.sql
+sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0008_gmail_rules.sql
+sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0009_email_sorting_ai.sql
 sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0010_ai_user_preferences.sql
+sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0011_notification_suppressed_status.sql
+sqlite3 /tmp/dentlink_m3_migration_check.db < migrations/0012_connector_sync_attempts.sql
 sqlite3 /tmp/dentlink_m3_migration_check.db "PRAGMA foreign_key_check;"
 sqlite3 /tmp/dentlink_m3_migration_check.db "PRAGMA integrity_check;"
 ```

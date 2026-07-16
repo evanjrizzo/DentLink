@@ -8,6 +8,7 @@ import type {
   CalendarEventsList,
   CalendarIcsImportResult,
   CalendarSourceFilter,
+  AssistantChatResponse,
   ConflictResponse,
   ConnectorAccount,
   ConnectorAccountInput,
@@ -450,6 +451,16 @@ export class DentLinkApiClient {
     accountId?: EntityId | null;
   }): Promise<EmailAiReprocessResult> {
     return this.request<EmailAiReprocessResult>("/v1/ai/reprocess", {
+      method: "POST",
+      body: input
+    });
+  }
+
+  async askAssistant(input: {
+    message: string;
+    timezone?: string;
+  }): Promise<AssistantChatResponse> {
+    return this.request<AssistantChatResponse>("/v1/assistant/chat", {
       method: "POST",
       body: input
     });

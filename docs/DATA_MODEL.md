@@ -119,13 +119,14 @@ updates.
 
 `migrations/0002_notifications_webhooks.sql` extends the durable schema:
 
-- `notifications`: user-scoped active/done/dismissed/suppressed/deleted notification records with title,
-  summary, body, source metadata, severity, pin state, rank, global order, version, timestamps, and
-  completion/dismissal timestamps. `done` records a handled item through `completed_at`;
-  `dismissed` records an item removed from Active without implying completion through
-  `dismissed_at`. `suppressed` records a stored/searchable item whose independent AI importance
-  score is below the user's notification threshold. Restoring these states to `active` clears the
-  matching timestamp where applicable while preserving the notification's versioned lineage.
+- `notifications`: user-scoped active/done/dismissed/suppressed/deleted notification records with
+  title, summary, body, source metadata, severity, pin state, rank, global order, version,
+  timestamps, and completion/dismissal timestamps. `done` records a handled item through
+  `completed_at`; `dismissed` records an item removed from Active without implying completion
+  through `dismissed_at`. `suppressed` records a stored/searchable item whose independent AI
+  importance score is below the user's notification threshold. Restoring these states to `active`
+  clears the matching timestamp where applicable while preserving the notification's versioned
+  lineage.
 - `webhook_endpoints`: user-scoped named endpoints with unique `(user_id, slug)`, hashed secret
   storage, destination mapping, enabled state, default severity/priority, last-triggered metadata,
   and version.
@@ -261,12 +262,18 @@ settings under `gmailRulesJson`; provider credentials remain in `connector_crede
 rule ID, name, action, and category are copied into normalized Gmail source-record metadata so a
 created or suppressed notification can be audited without storing raw email bodies.
 
+Gmail IMAP accounts also store safe cursor metadata in connector account settings:
+`gmailLastImapUidValidity` and `gmailLastImapUid`. The IMAP engine uses these values to search for
+newer INBOX UIDs first and falls back to the rolling recent-window scan if UIDVALIDITY is missing or
+changes. The cursor advances only after IMAP syncs without per-message failures. Gmail source-record
+normalized metadata may include safe `imap_uid` and `imap_uid_validity` values for diagnostics.
+
 `migrations/0009_email_sorting_ai.sql` adds optional email enrichment metadata without changing the
 notification ownership model:
 
-- `notifications.email_metadata_json`: provider-neutral normalized email metadata used by Gmail
-  IMAP notifications, including sender, recipients, subject, received timestamp, unread state,
-  attachment metadata, body hash, source link, and safe fallback snippet.
+- `notifications.email_metadata_json`: provider-neutral normalized email metadata used by Gmail IMAP
+  notifications, including sender, recipients, subject, received timestamp, unread state, attachment
+  metadata, body hash, source link, and safe fallback snippet.
 - `notifications.rule_metadata_json`: the deterministic rule decision that caused a notification to
   be shown, prioritized, tagged, categorized, or explained.
 - `notifications.ai_metadata_json`: optional AI processing state, model, prompt version, content
@@ -299,3 +306,14 @@ Milestone 7 Slice 4.3 adds no schema migration. Contextual actionability is deri
 notification metadata: AI `requiresAction`, non-ignore suggested actions, action-oriented
 categories, high-priority rule metadata, task-like source labels, or explicit deadlines. Importance
 is a ranking/display signal and does not by itself make a notification actionable.
+
+`migrations/0012_connector_sync_attempts.sql` adds durable per-attempt connector sync logging. Gmail
+manual Sync Now, Refresh All, scheduled sync, backfill, skipped fresh-lock attempts, partial
+attempts, and failed attempts append user-scoped rows to `connector_sync_attempts`.
+
+Each row stores account ID, connector key, trigger, active engine, status, start/completion time,
+duration, safe error code/message, aggregate Gmail counts where available, and JSON details. Details
+may include safe message IDs, outcome reasons, cursor-presence booleans, active/requested engine,
+credential status, reconnect-required state, fresh-lock reference time, age, stale-lock threshold,
+IMAP UID cursor details, comparison metrics, and failure names. It must not store OAuth tokens,
+refresh tokens, provider credentials, raw MIME, email bodies, or attachment binaries.

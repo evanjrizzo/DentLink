@@ -3,245 +3,191 @@
 ## Current Branch
 
 - Branch: `development`
-- Latest committed work before Milestone 4: `e0e3500 fix: refresh gmail notifications after sync`
-- Current worktree contains uncommitted Milestone 4 changes.
-- There is one odd pre-existing untracked file named `h gmail notifications after sync"...` with
-  escape characters. It was present before Milestone 4 work and was intentionally left untouched.
+- Latest observed commit: `8ccfae8 Fix calendar browser test selector`.
+- Worktree was clean before the current cleanup and Notes UI work.
 
-## Completed Recent Work
+## Current Product State
 
-### Gmail Post-Sync UI Fix
+- Current documented implementation state: Milestone 7 Slice 4.4.
+- Implemented major capabilities:
+  - Email/password auth, server-side sessions, user-isolated Notes, folders, tags, history,
+    conflicts, optimistic note mutations, and cursor sync.
+  - Notifications, History, named webhooks, one-time webhook secrets, and webhook delivery
+    recording.
+  - Provider-neutral connector account/source-record framework.
+  - Gmail OAuth, Gmail API synchronization, diagnostics, per-message ingestion outcomes, duplicate
+    prevention, deterministic Gmail rules, scheduled Gmail sync, diagnostic backfill, and preview
+    Gmail IMAP engine selection.
+  - Metadata-only authenticated event stream, polling fallback, visibility refresh, and `sync-all`
+    refresh orchestration.
+  - Optional provider-neutral OpenAI email summarization/classification after deterministic rules,
+    user AI settings, user importance preferences, usage accounting, and suppressed notification
+    status.
+  - Read-only Home assistant that answers from bounded DentLink Gmail source-record and calendar
+    context when AI is configured.
+  - Read-only Google Calendar connector.
+  - DentLink Local calendar events, source-filtered agenda/day/week/month views, provider-event
+    annotations, and ICS import/export.
+  - Responsive touch-first web UI with adaptive bottom sheets/right panels.
+  - Contextual notification actions: Pin/Unpin and Dismiss generally available, source Open only
+    when supported, and Complete only for actionable notifications.
 
-- Root cause: after Gmail `Sync Now`, connector metadata and notifications could refresh, but the
-  user stayed on the Connectors tab; Connectors Refresh also refreshed only connector metadata.
-- Fix:
-  - Added explicit connector + notification refresh after Gmail sync.
-  - Refresh from Connectors now also refreshes Notifications.
-  - If Gmail sync creates notifications, the UI switches to Notifications immediately.
-  - Added Playwright coverage for controlled Gmail sync and Refresh without full page reload.
-- Commit present: `e0e3500 fix: refresh gmail notifications after sync`.
+## Current Home Assistant Change
 
-### Milestone 4: Google Calendar Connector
+- The web app now has a top-level `Home` tab and uses it as the default signed-in view.
+- Home now combines a glanceable Today strip, Priority Inbox, Due Notes, Needs Review, quick task
+  capture, contextual assistant prompt chips, and a responsive assistant chat panel. Connector
+  health remains in Settings rather than Home.
+- `POST /v1/assistant/chat` is a stateless authenticated endpoint. It resolves user identity
+  server-side, gathers bounded normalized Gmail source-record context and upcoming calendar events,
+  and calls the provider-neutral AI boundary.
+- The assistant response returns text plus source references for emails and calendar events. Chat
+  history is transient browser state only.
+- The assistant is read-only in this slice. It does not send email, mutate providers, complete or
+  dismiss notifications, create notes, update calendar events, or write connector state.
+- Missing `OPENAI_API_KEY` or `DENTLINK_AI_ENABLED=false` returns a stable assistant error instead
+  of falling through to an internal error.
+- Follow-up fix: Home assistant now shows a thinking indicator while a request is in flight.
+  Pressing Enter sends immediately, while Shift+Enter inserts a newline.
+- Follow-up fix: assistant email retrieval treats "latest", "newest", "recent", and "new messages"
+  as received-time queries instead of sender/subject search terms. "Latest 5" now limits context to
+  the five newest deduplicated email records before calling AI.
+- Follow-up fix: assistant context now includes normalized Notifications as first-class context.
+  Notifications and email are sent newest-first, calendar events are sent earliest-upcoming first,
+  and backend response source previews are sorted before returning to the web client.
+- Follow-up fix: assistant answers are now prompted to stay concise, source card IDs are capped at
+  five, and latest/new/recent notification or email questions without an explicit count receive only
+  the five newest context items by default.
+- Follow-up fix: the Home assistant transcript auto-scrolls to new messages while the user is at the
+  bottom, but stops following when the transcript is manually scrolled upward.
+- Follow-up fix: assistant context now includes bounded static DentLink usage guidance so "how do I
+  use DentLink" questions can be answered without relying on notification, Gmail, or calendar data.
+- Follow-up fix: assistant answers now normalize inline numbered and bulleted lists so repeated
+  markers render on separate lines for readability.
 
-- Implemented Google Calendar as a provider connector using the existing connector framework.
-- Scope stayed read-only:
-  - No Google event creation.
-  - No Google event editing.
-  - No Google event deletion.
-  - No RSVP.
-  - No attendee management.
-  - No Microsoft, Outlook, IMAP, AI, mobile, desktop, widgets, push notifications, or scheduled
-    background sync.
+## Current Cleanup
 
-## Milestone 4 Architecture
+- `README.md` migration replay commands were corrected to match the actual migration filenames:
+  - `0007_gmail_ingestion_outcomes.sql`
+  - `0008_gmail_rules.sql`
+  - `0009_email_sorting_ai.sql`
+  - `0010_ai_user_preferences.sql`
+  - `0011_notification_suppressed_status.sql`
+- This memory file was refreshed from its obsolete Milestone 4 handoff state.
 
-- Added shared Google helper module:
-  - `apps/api/src/google.ts`
-  - Centralizes Google OAuth token exchange, OAuth state creation, safe return URLs, and AES-GCM
-    refresh-token encryption/decryption.
-- Refactored Gmail to use shared Google helpers while preserving Gmail behavior.
-- Added Google Calendar provider module:
-  - `apps/api/src/google-calendar.ts`
-  - Uses `https://www.googleapis.com/auth/calendar.readonly`.
-  - Discovers primary calendar during OAuth callback.
-  - Stores encrypted refresh tokens in `connector_credentials`.
-  - Stores connector metadata in `connector_accounts`.
-  - Stores provider metadata in `connector_source_records`.
-  - Normalizes provider events into `calendar_events`.
-- Google Calendar remains source of truth. DentLink stores normalized agenda copies and local
-  dismissal state only.
+## Current Notes UI Change
 
-## Milestone 4 API
+- The shared Notes workspace now includes a `Show completed notes` checkbox in Filters.
+- Completed notes are visible by default.
+- Clearing the checkbox hides notes with `status = "done"` from the visible Notes lists and folder
+  group counts without deleting or mutating them.
+- When completed notes are visible, active notes sort before completed notes within the same folder
+  or visible list.
+- Note completion checkboxes on cards are larger and touch-friendlier.
 
-Added:
+## Current Settings Connections Fix
 
-- `POST /v1/connectors/google-calendar/start`
-- `GET /v1/connectors/google-calendar/callback`
-- `POST /v1/connectors/google-calendar/:accountId/sync`
-- `POST /v1/connectors/google-calendar/:accountId/disconnect`
-- `GET /v1/calendar/events`
-- `PATCH /v1/calendar/events/:eventId`
+- Settings -> Connections Gmail cards now compute Next Scheduled Sync from the engine diagnostic
+  timestamp with account `lastSyncAt` as a fallback.
+- If the expected five-minute scheduled window is already in the past, the card shows `Due now`
+  instead of displaying a stale past timestamp.
+- The web header countdown is now an explicit one-minute auto-sync timer. Each visible timer tick
+  calls backend `sync-all` for connected supported services before reloading Notifications and other
+  DentLink data; the header label says `Auto sync` instead of `Live`.
+- Invalid or missing sync timestamps still show `Within 5 minutes after activation`.
+- Gmail diagnostics now distinguish the latest sync check from the latest per-message processing
+  outcome. If a newer sync check finds no newer eligible messages, Connections shows an explanatory
+  note instead of implying processing is stale.
+- Durable Gmail sync-attempt logging is implemented through `connector_sync_attempts` and migration
+  `0012_connector_sync_attempts.sql`. Manual Sync Now, Refresh All, scheduled sync, backfill,
+  skipped fresh-lock attempts, partial attempts, and failed attempts append safe diagnostic rows.
+- Scheduled fresh-lock skips are logged as `skipped` attempts with safe lock reference time and lock
+  age details so delayed cron cycles can be distinguished from missing sync activity.
+- Refresh All and manual Gmail sync treat an orphaned `syncing` lock as stale after 60 seconds,
+  while scheduled sync keeps the five-minute stale window. This gives user-initiated refreshes a
+  faster recovery path when a previous Gmail poll was interrupted after marking the account
+  `syncing`.
+- Refresh All reports a fresh Gmail `sync_in_progress` lock as a skipped connector instead of a
+  failed connector while still appending the durable skipped attempt log.
+- Gmail IMAP sync now stores the last observed INBOX UID and UIDVALIDITY on the connector account.
+  When UIDVALIDITY still matches, subsequent IMAP polls search only for UIDs newer than the stored
+  UID. If UIDVALIDITY is missing or changes, sync falls back to the rolling recent-window scan. The
+  cursor advances only when the IMAP sync has no per-message failures. Source records store safe
+  IMAP UID metadata for diagnostics.
+- Settings -> Connections shows recent Gmail sync attempts and the diagnostics JSON export includes
+  the full safe attempt rows. Attempt logs include trigger, engine, status, timestamps, duration,
+  counts, safe error code/message, and safe details; they must not include OAuth tokens, refresh
+  tokens, raw email bodies, MIME parts, or attachment binaries.
+- Gmail API sync now requests full message payloads and extracts bounded text/plain or cleaned HTML
+  body text for normalized source records and optional AI. Previously, Gmail API messages were
+  metadata-only and therefore produced `ai.status = skipped` even when the original email had a
+  body. IMAP sync already parsed MIME bodies.
+- Settings -> Connections keeps the just-saved Gmail requested engine in local UI state after a
+  successful save. This prevents the ingestion engine select from visually snapping back to Gmail
+  API while IMAP is requested but still awaiting reconnect/permission verification.
+- Follow-up hardening: the Gmail engine selector now optimistically writes the requested engine into
+  the local connector account immediately and prefers the API's explicit `requestedEngine` field
+  over the active engine. This keeps the select on IMAP even while Active Engine remains Gmail API
+  until reconnect verifies the mail scope.
 
-Behavior:
+## Current Gmail Timing Observation
 
-- `POST /v1/connectors/accounts` rejects `connectorKey: "google-calendar"` with
-  `google_calendar_oauth_required`.
-- Calendar event patch accepts only local agenda status changes:
-  - `active`
-  - `dismissed`
-- All routes are authenticated except OAuth callback.
-- All owned data paths derive user identity from validated server session.
+- After the IMAP UID cursor deployment, new dual-recipient Gmail tests were created in DentLink
+  roughly 40 to 55 seconds after Gmail receipt, dominated by the one-minute auto-sync cadence.
+- Actual UID-incremental Gmail IMAP sync work is now typically sub-second for duplicate checks and
+  roughly 2.5 to 4.5 seconds when creating a notification.
+- The latest observed successful UID-incremental attempts discovered and fetched one newer UID per
+  account, skipped Gmail API comparison, appended durable attempt logs, and left both Gmail accounts
+  `idle`.
 
-## Milestone 4 Data Model And Migration
+## Known Deferred Work
 
-- Added `CalendarEvent`, `CalendarEventsList`, `CalendarEventPatch`, and
-  `GoogleCalendarSyncResult` shared types.
-- Added sync changes for `calendar_event` upserts/deletes.
-- Added migration:
-  - `migrations/0005_google_calendar_connector.sql`
-- Migration creates:
-  - `calendar_events`
-  - indexes for user/time, user/account, provider identity
-  - updated `sync_changes` constraint allowing `calendar_event`
-- Calendar events are unique by `(connector_account_id, provider_event_id)`.
-- Local dismissal updates `calendar_events.status` and `dismissed_at`; it does not modify Google.
+- Rich unified Dashboard widgets around the Home assistant.
+- Full cross-source ranking and ranking explanations across Notifications, Notes, and Calendar.
+- Microsoft 365, Outlook, and production generic IMAP rollout.
+- Google Calendar writeback/provider event editing.
+- Tauri desktop, Android app, Android widget, push notifications, and provider mutation actions such
+  as email archive/reply or calendar RSVP.
 
-## Milestone 4 UI
+## Validation Notes
 
-- Added `Agenda` tab in `apps/web/src/notes-app.tsx`.
-- Agenda shows:
-  - chronological events
-  - all-day indicator
-  - start/end times
-  - location
-  - calendar/source label
-  - Open in Google Calendar link
-  - Refresh
-  - Sync Now
-  - local Dismiss
-- Connectors tab now supports Google Calendar:
-  - Connect Google Calendar
-  - Reconnect
-  - Sync Now
-  - Disconnect
-  - Last sync/status/health/error display
-- After Google Calendar Sync Now, events refresh immediately and the UI switches to Agenda when
-  events were upserted.
+- Standard local validation command remains:
 
-## Milestone 4 Tests
-
-- API storage contract tests run against memory and D1-compatible adapters.
-- Added API coverage for:
-  - Google Calendar OAuth start/callback
-  - hashed state behavior through callback consumption
-  - encrypted credential storage
-  - primary calendar discovery
-  - timed events
-  - all-day events
-  - cancelled events
-  - idempotent incremental sync
-  - source records
-  - local dismissal
-  - sync changes
-  - disconnect
-  - cross-user isolation
-- Updated connector SDK tests to allow Gmail and Google Calendar while still rejecting Outlook/IMAP.
-- Updated smoke script:
-  - Calendar OAuth start controlled response
-  - agenda list
-  - OAuth-only account creation enforcement
-- Added Playwright controlled Calendar coverage:
-  - mocked connected Calendar account
-  - Sync Now
-  - agenda rendering without page reload
-  - all-day/timed event rendering
-  - normal Refresh retrieves newly available event
-  - Open in Google Calendar link
-  - local dismissal
-
-## Milestone 4 Documentation
-
-Updated:
-
-- `README.md`
-- `docs/ARCHITECTURE.md`
-- `docs/API_CONTRACT.md`
-- `docs/DATA_MODEL.md`
-- `docs/SECURITY.md`
-- `docs/DEPLOYMENT.md`
-- `docs/ROADMAP.md`
-
-Key docs:
-
-- Google Calendar uses read-only scope:
-  `https://www.googleapis.com/auth/calendar.readonly`
-- Required redirect URI:
-  `https://dentlink-api-preview.evanjrizzo.workers.dev/v1/connectors/google-calendar/callback`
-- Worker non-secret var added:
-  `GOOGLE_CALENDAR_REDIRECT_URI`
-- Worker secrets remain:
-  - `GOOGLE_CLIENT_ID`
-  - `GOOGLE_CLIENT_SECRET`
-  - `GMAIL_CREDENTIAL_ENCRYPTION_KEY`
-
-## Validation Already Performed
-
-- Baseline before Milestone 4:
-  - `pnpm validate`: passed
-  - `git diff --check`: passed
-- During/final Milestone 4:
-  - `pnpm --filter @dentlink/api test`: passed, 26 tests
-  - `pnpm validate`: passed
-  - `git diff --check`: passed
-  - SQLite migration replay through `0005`: passed
-  - `PRAGMA foreign_key_check`: no output
-  - `PRAGMA integrity_check`: `ok`
-  - `pnpm db:migrate:local`: passed, applied `0005_google_calendar_connector.sql`
-  - Worker dry-run preview: passed
-  - `pnpm db:migrate:preview`: passed, applied `0005_google_calendar_connector.sql`
-  - `pnpm deploy:preview`: passed
-  - preview Worker URL: `https://dentlink-api-preview.evanjrizzo.workers.dev`
-  - preview Worker version ID: `755bb9a1-874e-4b3b-8d4e-5a385fa50420`
-  - preview web build with preview API URL: passed
-  - `pnpm deploy:web:preview`: passed
-  - preview Pages deployment URL: `https://158f7a53.dentlink-web-preview.pages.dev`
-  - stable preview web URL tested: `https://dentlink-web-preview.pages.dev`
-  - remote smoke test: passed
-  - preview Playwright: passed, 3 tests
-- Remote D1 `PRAGMA integrity_check` was attempted but Cloudflare rejected it with
-  `not authorized: SQLITE_AUTH`.
-
-## Current Git Status Summary
-
-Modified:
-
-- `README.md`
-- `wrangler.toml`
-- `apps/api/src/d1-storage.ts`
-- `apps/api/src/gmail.ts`
-- `apps/api/src/index.test.ts`
-- `apps/api/src/index.ts`
-- `apps/api/src/storage.ts`
-- `apps/api/src/validation.ts`
-- `apps/web/src/notes-app.tsx`
-- `apps/web/src/styles.css`
-- `docs/API_CONTRACT.md`
-- `docs/ARCHITECTURE.md`
-- `docs/DATA_MODEL.md`
-- `docs/DEPLOYMENT.md`
-- `docs/ROADMAP.md`
-- `docs/SECURITY.md`
-- `packages/api-client/src/index.ts`
-- `packages/connector-sdk/src/index.test.ts`
-- `packages/connector-sdk/src/index.ts`
-- `packages/item-model/src/index.ts`
-- `scripts/smoke-api.mjs`
-- `tests/browser/milestone-2-1.spec.ts`
-
-Added:
-
-- `MEMORY.md`
-- `apps/api/src/google.ts`
-- `apps/api/src/google-calendar.ts`
-- `migrations/0005_google_calendar_connector.sql`
-
-Untracked pre-existing odd file:
-
-- `h gmail notifications after sync"...` with terminal escape characters.
-
-## Recommended Commit Message
-
-```text
-feat: implement milestone 4 google calendar connector
+```bash
+pnpm validate
 ```
 
-## Recommended Next Milestone
+- Focused checks that are useful after this cleanup:
 
-Milestone 5 should implement Calendar foundation and ICS/local calendar support:
+```bash
+pnpm --filter @dentlink/ui typecheck
+pnpm --filter @dentlink/web typecheck
+pnpm --filter @dentlink/web test
+git diff --check
+```
 
-- DentLink-local calendar events
-- ICS import/export
-- annotations
-- source filters
-- richer calendar views
-- no provider writeback unless explicitly scoped
+## Session Handoff 2026-07-16
+
+- Latest deployed API preview after Gmail API body extraction:
+  `https://dentlink-api-preview.evanjrizzo.workers.dev`, version
+  `6120fbe0-6cdd-46d9-be60-6a18c0219541`.
+- Latest deployed web preview after Gmail engine selector hardening:
+  `https://6eb81c43.dentlink-web-preview.pages.dev`.
+- Gmail API messages now fetch `format=full`, extract bounded text/plain or cleaned HTML body text,
+  and avoid attachment bodies. This fixes new Gmail API notifications that previously showed
+  `ai.status = skipped` despite real email bodies.
+- Existing skipped Gmail API notifications created before the body extraction fix still do not have
+  stored body text. Repairing those requires a future refetch/backfill path that updates source
+  records and reprocesses AI.
+- IMAP engine switching should keep the dropdown on Gmail IMAP immediately after selection, even
+  while Active Engine remains Gmail API until reconnect verifies the `https://mail.google.com/`
+  scope. If it still snaps back for JP, check whether the web build is
+  `https://6eb81c43.dentlink-web-preview.pages.dev` and capture the selector error text under the
+  control; that would indicate the PUT is failing in his browser session.
+- Last focused validation run:
+  - `pnpm --filter @dentlink/api typecheck`
+  - `pnpm --filter @dentlink/api test` — 90 passed
+  - `pnpm --filter @dentlink/web typecheck`
+  - `pnpm --filter @dentlink/web test` — 3 passed
+  - `git diff --check`
+  - `pnpm smoke:api https://dentlink-api-preview.evanjrizzo.workers.dev`

@@ -46,9 +46,14 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
   const [folderDraftName, setFolderDraftName] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
   const [draggedNoteId, setDraggedNoteId] = useState<EntityId | null>(null);
+  const [showCompletedNotes, setShowCompletedNotes] = useState(true);
   const sortedNotes = useMemo(() => [...props.notes].sort(compareNotes), [props.notes]);
+  const visibleNotes = useMemo(
+    () => sortedNotes.filter((note) => showCompletedNotes || note.status !== "done"),
+    [showCompletedNotes, sortedNotes]
+  );
   const searchActive = props.search.trim().length > 0;
-  const displayedNotes = sortedNotes.filter((note) =>
+  const displayedNotes = visibleNotes.filter((note) =>
     props.selectedFolderId === null
       ? true
       : props.selectedFolderId === UNFILED_FOLDER_ID
@@ -56,10 +61,10 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
         : note.folderId === props.selectedFolderId
   );
   const editingNote = sortedNotes.find((note) => note.id === editingNoteId) ?? null;
-  const unfiledNotes = sortedNotes.filter((note) => !note.folderId);
+  const unfiledNotes = visibleNotes.filter((note) => !note.folderId);
   const folderGroups = props.folders.map((folder) => ({
     folder,
-    notes: sortedNotes.filter((note) => note.folderId === folder.id)
+    notes: visibleNotes.filter((note) => note.folderId === folder.id)
   }));
   const searchResultFolderIds = useMemo(() => {
     if (!searchActive) return [];
@@ -103,6 +108,14 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
           </label>
           <details className="notes-filter-menu">
             <summary>Filters</summary>
+            <label className="check-row notes-toggle-row">
+              <input
+                type="checkbox"
+                checked={showCompletedNotes}
+                onChange={(event) => setShowCompletedNotes(event.currentTarget.checked)}
+              />
+              <span>Show completed notes</span>
+            </label>
             <label className="field">
               <span>Folder</span>
               <select
@@ -171,7 +184,7 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
               className={props.selectedFolderId === null ? "selected" : ""}
               onClick={() => props.onFolderChange(null)}
             >
-              All Notes <strong>{sortedNotes.length}</strong>
+              All Notes <strong>{visibleNotes.length}</strong>
             </button>
             <form
               className="inline-form compact-folder-create"
@@ -612,6 +625,7 @@ function NoteCard(
     >
       <div className="note-card-top">
         <input
+          className="note-complete-checkbox"
           aria-label={`Mark ${note.title} done`}
           type="checkbox"
           checked={note.status === "done"}
@@ -859,21 +873,12 @@ function NoteDetailsPanel(
 }
 
 function PushPinIcon(props: { filled: boolean }): ReactElement {
+  const path = props.filled
+    ? "M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2Z"
+    : "M14 4v8.83L15.17 14H8.83L10 12.83V4h4Zm3-2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2V4h1V2Z";
   return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill={props.filled ? "currentColor" : "none"}
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M15.5 3.5 20.5 8.5" />
-      <path d="M8 14 3.5 18.5" />
-      <path d="M7 8.5 11.5 4 20 12.5 15.5 17 7 8.5Z" />
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d={path} />
     </svg>
   );
 }
@@ -1009,6 +1014,10 @@ function graphemeLength(value: string): number {
 
 function compareNotes(left: Note, right: Note): number {
   if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+  if (left.status !== right.status) {
+    if (left.status === "done") return 1;
+    if (right.status === "done") return -1;
+  }
   return left.globalOrder - right.globalOrder;
 }
 

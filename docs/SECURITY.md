@@ -101,8 +101,11 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   being treated as a healthy ingestion result.
 - Gmail diagnostics are scoped to the authenticated owner of the connector account. The diagnostics
   endpoint returns aggregate counts, provider message IDs, safe processing reasons, processed
-  timestamps, source record IDs, and linked DentLink notification IDs only; it does not expose raw
-  email bodies, MIME parts, attachments, OAuth tokens, or provider credentials.
+  timestamps, source record IDs, linked DentLink notification IDs, and durable sync-attempt
+  summaries only; it does not expose raw email bodies, MIME parts, attachments, OAuth tokens, or
+  provider credentials. Sync-attempt details are limited to safe connector state, trigger, engine,
+  counts, outcome IDs/reasons, cursor-presence booleans, lock age/reference timestamps, comparison
+  metrics, and safe error code/messages.
 - The DentLink event stream is authenticated with the same bearer session model as the JSON API. It
   emits only metadata about DentLink-owned changes, such as change type, source, account ID, and
   revision. It never pushes email bodies, calendar descriptions, raw provider payloads, OAuth data,
@@ -121,6 +124,13 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   unavailable reason, and usage state but never returns provider keys. Invalid, timed-out, or
   rate-limited AI responses are stored as safe AI failure metadata while the notification remains
   visible with deterministic fallback content.
+- The read-only assistant endpoint sends only bounded, server-selected DentLink context to the AI
+  provider: normalized notification fields, normalized Gmail source-record fields, and upcoming
+  calendar event fields for the authenticated user, plus static product usage guidance. It does not
+  send provider credentials, OAuth tokens, raw MIME, attachment binaries, hidden headers, cross-user
+  data, or connector diagnostics. Source content is treated as untrusted prompt context, and
+  assistant output is not allowed to mutate Gmail, Google Calendar, notifications, notes, connector
+  accounts, or provider state.
 - Milestone 4 Google Calendar synchronization uses the read-only Calendar scope, stores normalized
   event metadata and provider identifiers, and does not create, edit, delete, RSVP to, or manage
   attendees on Google Calendar events. Calendar refresh tokens use the same AES-GCM encrypted
@@ -153,6 +163,9 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   users with no explicit preference. Users may opt out through Settings -> AI, and
   `DENTLINK_AI_ENABLED=false` disables AI globally. Model and input length are configurable with
   `DENTLINK_AI_MODEL` and `DENTLINK_AI_MAX_INPUT_CHARS`.
+- The assistant uses the same administrator-configured OpenAI key and `DENTLINK_AI_ENABLED` global
+  disable switch. It is read-only and stateless in the first implementation; persistent transcripts,
+  tools that take action, or provider writeback require a later approval and auditing design.
 - Contextual notification actions are DentLink-local state changes. Complete and Dismiss update the
   authenticated user's notification record only; they do not archive, delete, reply to, or otherwise
   mutate Gmail, Google Calendar, webhooks, or future provider source records. Source-opening actions

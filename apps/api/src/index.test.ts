@@ -9,6 +9,7 @@ import { D1DentLinkStore } from "./d1-storage";
 import type { GoogleCalendarApiClient } from "./google-calendar";
 import {
   createGoogleGmailClient,
+  syncGmailAccount,
   syncConnectedGmailAccounts,
   type GmailApiClient,
   type GmailImapClient
@@ -19,6 +20,7 @@ import { MemoryDentLinkStore, StoreError, type DentLinkStore } from "./storage";
 
 import type {
   ApiErrorBody,
+  AssistantChatResponse,
   AuthSession,
   ConnectorAccount,
   ConnectorSourceRecord,
@@ -84,6 +86,10 @@ const notificationSuppressedSchemaPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../migrations/0011_notification_suppressed_status.sql"
 );
+const connectorSyncAttemptsSchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0012_connector_sync_attempts.sql"
+);
 
 type StoreFixture = {
   name: string;
@@ -117,7 +123,8 @@ const fixtures: StoreFixture[] = [
         milestone7RulesSchemaPath,
         milestone7AiSchemaPath,
         aiPreferencesSchemaPath,
-        notificationSuppressedSchemaPath
+        notificationSuppressedSchemaPath,
+        connectorSyncAttemptsSchemaPath
       ]);
       return {
         store: new D1DentLinkStore(db),
@@ -1361,6 +1368,8 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       gmailExpectedMessages: 2,
       gmailActualNotifications: 1,
       gmailMissingMessageDifference: 1,
+      gmailLastImapUidValidity: "999",
+      gmailLastImapUid: "11",
       gmailLastComparisonApiDiscovered: 1,
       gmailLastComparisonImapDiscovered: 2,
       gmailLastComparisonMismatch: true
@@ -1382,6 +1391,8 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       provider: "gmail",
       provider_item_id: "x-gm-msgid:imap-gm-1",
       message_id: "<imap-message@example.test>",
+      imap_uid: "10",
+      imap_uid_validity: "999",
       has_attachment: true,
       connector_account: linked.account.id
     });
@@ -1395,7 +1406,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       200,
       env
     );
-    expect(repeat.summary).toMatchObject({ discovered: 2, examined: 1, created: 0, duplicate: 1 });
+    expect(repeat.summary).toMatchObject({ discovered: 0, examined: 0, created: 0, duplicate: 0 });
   });
 
   it("runs deterministic rules before IMAP Gmail notification creation", async () => {
@@ -1573,6 +1584,98 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       failedRequestsThisMonth: 0
     });
     expect(JSON.stringify(settings)).not.toMatch(/test-openai-key|Plain text/);
+  });
+
+  it("extracts Gmail API message bodies before optional AI processing", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-api-ai@example.com");
+    let aiCalls = 0;
+    const gmailClient: GmailApiClient = {
+      ...fakeGmailClient(),
+      async getMessage(_accessToken, messageId) {
+        expect(messageId).toBe("gmail-message-1");
+        return {
+          id: "gmail-message-1",
+          threadId: "gmail-thread-1",
+          historyId: "101",
+          internalDate: "1783980000000",
+          labelIds: ["INBOX", "UNREAD"],
+          payload: {
+            mimeType: "multipart/alternative",
+            headers: [
+              { name: "From", value: "Tester <tester@example.test>" },
+              { name: "Subject", value: "Written body" },
+              { name: "Date", value: "Tue, 14 Jul 2026 10:00:00 -0400" },
+              { name: "Message-ID", value: "<written-body@example.test>" }
+            ],
+            parts: [
+              {
+                mimeType: "text/plain",
+                body: { data: gmailBodyData("Please review the written body from Gmail API.") }
+              },
+              {
+                mimeType: "text/html",
+                body: { data: gmailBodyData("<p>HTML fallback</p>") }
+              }
+            ]
+          }
+        };
+      }
+    };
+    const env = {
+      ...gmailTestEnv(gmailClient),
+      OPENAI_API_KEY: "test-openai-key",
+      emailAiClient: {
+        async summarizeEmail(
+          input: Parameters<NonNullable<ApiEnv["emailAiClient"]>["summarizeEmail"]>[0]
+        ) {
+          aiCalls += 1;
+          expect(input.body).toContain("written body from Gmail API");
+          return {
+            summary: "AI summarized the Gmail API body.",
+            importance: 88,
+            category: "action_required" as const,
+            requiresAction: true,
+            suggestedAction: "Review",
+            deadline: null,
+            reason: "The fetched Gmail API body requested review.",
+            outputTokens: 21
+          };
+        }
+      }
+    };
+    const linked = await connectGmailForTest(store, owner, env);
+    await requestJson(
+      store,
+      "POST",
+      `/v1/connectors/gmail/${linked.id}/sync`,
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(aiCalls).toBe(1);
+    const records = await requestJson<{ records: ConnectorSourceRecord[] }>(
+      store,
+      "GET",
+      `/v1/connectors/accounts/${linked.id}/source-records`,
+      undefined,
+      owner.session.token
+    );
+    expect(records.records[0]?.normalizedPayload).toMatchObject({
+      normalized_body: "Please review the written body from Gmail API."
+    });
+    const notifications = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(notifications.notifications[0]).toMatchObject({
+      summary: "AI summarized the Gmail API body.",
+      ai: { status: "complete", requiresAction: true }
+    });
   });
 
   it("persists an explicit per-user AI opt-out while leaving AI available", async () => {
@@ -1798,6 +1901,426 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       env
     );
     expect(aiInputs).toHaveLength(1);
+  });
+
+  it("answers assistant questions with owned Gmail and calendar context", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "assistant-owner@example.com");
+    const other = await register(store, "assistant-other@example.com");
+    const now = "2026-07-16T14:00:00.000Z";
+    const ownerAccount = await store.createConnectorAccount(
+      owner.user.id,
+      {
+        connectorKey: "gmail",
+        displayName: "Personal Gmail",
+        settings: { googleEmail: "owner@example.test" },
+        credentialRef: "owner_credential",
+        credentialStatus: "configured"
+      },
+      now
+    );
+    const otherAccount = await store.createConnectorAccount(
+      other.user.id,
+      {
+        connectorKey: "gmail",
+        displayName: "Other Gmail",
+        settings: { googleEmail: "other@example.test" },
+        credentialRef: "other_credential",
+        credentialStatus: "configured"
+      },
+      now
+    );
+    const ownerRecord = await store.createConnectorSourceRecord(
+      owner.user.id,
+      {
+        accountId: ownerAccount.id,
+        sourceExternalId: "owner-message-1",
+        sourceType: "email",
+        payloadHash: "owner-hash",
+        normalizedPayload: {
+          provider: "gmail",
+          sender: "Chris Biancone <chris@example.test>",
+          sender_address: "chris@example.test",
+          subject: "Permit update",
+          received_at: "2026-07-16T13:25:00.000Z",
+          snippet: "The permit was approved.",
+          normalized_body: "The permit was approved and the next filing is due tomorrow.",
+          permalink: "https://mail.google.com/mail/u/0/#inbox/owner-message-1"
+        }
+      },
+      now
+    );
+    await store.createConnectorSourceRecord(
+      other.user.id,
+      {
+        accountId: otherAccount.id,
+        sourceExternalId: "other-message-1",
+        sourceType: "email",
+        payloadHash: "other-hash",
+        normalizedPayload: {
+          provider: "gmail",
+          sender: "Chris Biancone <private-other@example.test>",
+          sender_address: "private-other@example.test",
+          subject: "Other user's private email",
+          received_at: "2026-07-16T13:30:00.000Z",
+          normalized_body: "This must not be visible."
+        }
+      },
+      now
+    );
+    const event = await store.createLocalCalendarEvent(
+      owner.user.id,
+      {
+        title: "Implant consult",
+        description: "Review chart",
+        startAt: "2026-07-17T15:00:00.000Z",
+        endAt: "2026-07-17T15:30:00.000Z",
+        timezone: "America/New_York",
+        location: "Operatory 2"
+      },
+      now
+    );
+    let sawContext = false;
+    const env: Partial<ApiEnv> = {
+      OPENAI_API_KEY: "test-key",
+      assistantAiClient: {
+        async answer(input) {
+          sawContext = true;
+          expect(input.question).toContain("Chris");
+          expect(input.context.emails).toHaveLength(1);
+          expect(input.context.emails[0]).toMatchObject({
+            senderAddress: "chris@example.test",
+            subject: "Permit update"
+          });
+          expect(JSON.stringify(input.context)).not.toContain("private-other@example.test");
+          expect(input.context.calendarEvents).toEqual(
+            expect.arrayContaining([expect.objectContaining({ title: "Implant consult" })])
+          );
+          return {
+            answer: "Chris said the permit was approved. You also have Implant consult tomorrow.",
+            sourceIds: [ownerRecord.id, event.id],
+            outputTokens: 42
+          };
+        }
+      }
+    };
+
+    const response = await requestJson<AssistantChatResponse>(
+      store,
+      "POST",
+      "/v1/assistant/chat",
+      { message: "What was the last thing Chris Biancone sent me?", timezone: "America/New_York" },
+      owner.session.token,
+      200,
+      env
+    );
+    expect(sawContext).toBe(true);
+    expect(response.answer).toContain("permit was approved");
+    expect(response.sources.map((source) => source.id)).toEqual([ownerRecord.id, event.id]);
+    expect(response.ai).toMatchObject({
+      status: "complete",
+      model: "gpt-4.1-mini",
+      promptVersion: "assistant-readonly-v1"
+    });
+  });
+
+  it("treats latest email questions as received-time queries instead of subject searches", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "assistant-latest@example.com");
+    const now = "2026-07-16T16:00:00.000Z";
+    const account = await store.createConnectorAccount(
+      owner.user.id,
+      {
+        connectorKey: "gmail",
+        displayName: "Personal Gmail",
+        settings: { googleEmail: "owner@example.test" },
+        credentialRef: "credential",
+        credentialStatus: "configured"
+      },
+      now
+    );
+    const created: ConnectorSourceRecord[] = [];
+    for (const [index, receivedAt] of [
+      "2026-07-16T15:05:00.000Z",
+      "2026-07-16T15:04:00.000Z",
+      "2026-07-16T15:03:00.000Z",
+      "2026-07-16T15:02:00.000Z",
+      "2026-07-16T15:01:00.000Z",
+      "2026-07-13T06:39:18.000Z"
+    ].entries()) {
+      created.push(
+        await store.createConnectorSourceRecord(
+          owner.user.id,
+          {
+            accountId: account.id,
+            sourceExternalId: `message-${index}`,
+            sourceType: "email",
+            payloadHash: `hash-${index}`,
+            normalizedPayload: {
+              provider: "gmail",
+              sender: `Sender ${index} <sender${index}@example.test>`,
+              sender_address: `sender${index}@example.test`,
+              subject: index === 5 ? "Here's your latest Credit Summary" : `Inbox item ${index}`,
+              received_at: receivedAt,
+              snippet: `Snippet ${index}`,
+              normalized_body: `Body ${index}`
+            }
+          },
+          now
+        )
+      );
+    }
+    const env: Partial<ApiEnv> = {
+      OPENAI_API_KEY: "test-key",
+      assistantAiClient: {
+        async answer(input) {
+          expect(input.context.emails.map((email) => email.subject)).toEqual([
+            "Inbox item 0",
+            "Inbox item 1",
+            "Inbox item 2",
+            "Inbox item 3",
+            "Inbox item 4"
+          ]);
+          expect(JSON.stringify(input.context)).not.toContain("Credit Summary");
+          return {
+            answer: "Here are the latest 5.",
+            sourceIds: created.slice(0, 5).map((record) => record.id),
+            outputTokens: 12
+          };
+        }
+      }
+    };
+
+    const response = await requestJson<AssistantChatResponse>(
+      store,
+      "POST",
+      "/v1/assistant/chat",
+      { message: "just give me the latest 5", timezone: "America/New_York" },
+      owner.session.token,
+      200,
+      env
+    );
+    expect(response.sources.map((source) => source.title)).toEqual([
+      "Inbox item 0",
+      "Inbox item 1",
+      "Inbox item 2",
+      "Inbox item 3",
+      "Inbox item 4"
+    ]);
+  });
+
+  it("passes latest notifications newest-first and sorts notification previews newest-first", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "assistant-notifications@example.com");
+    const older = await store.createNotification(
+      owner.user.id,
+      {
+        title: "Older notification",
+        summary: "Older",
+        source: "system",
+        sourceLabel: "System"
+      },
+      "2026-07-16T12:00:00.000Z"
+    );
+    const newest = await store.createNotification(
+      owner.user.id,
+      {
+        title: "Newest notification",
+        summary: "Newest",
+        source: "system",
+        sourceLabel: "System"
+      },
+      "2026-07-16T15:00:00.000Z"
+    );
+    const middle = await store.createNotification(
+      owner.user.id,
+      {
+        title: "Middle notification",
+        summary: "Middle",
+        source: "system",
+        sourceLabel: "System"
+      },
+      "2026-07-16T13:00:00.000Z"
+    );
+    await store.createNotification(
+      owner.user.id,
+      {
+        title: "Fourth notification",
+        summary: "Fourth",
+        source: "system",
+        sourceLabel: "System"
+      },
+      "2026-07-16T11:00:00.000Z"
+    );
+    await store.createNotification(
+      owner.user.id,
+      {
+        title: "Fifth notification",
+        summary: "Fifth",
+        source: "system",
+        sourceLabel: "System"
+      },
+      "2026-07-16T10:00:00.000Z"
+    );
+    await store.createNotification(
+      owner.user.id,
+      {
+        title: "Sixth notification",
+        summary: "Sixth",
+        source: "system",
+        sourceLabel: "System"
+      },
+      "2026-07-16T09:00:00.000Z"
+    );
+    const env: Partial<ApiEnv> = {
+      OPENAI_API_KEY: "test-key",
+      assistantAiClient: {
+        async answer(input) {
+          expect(input.context.notifications.map((notification) => notification.title)).toEqual([
+            "Newest notification",
+            "Middle notification",
+            "Older notification",
+            "Fourth notification",
+            "Fifth notification"
+          ]);
+          expect(JSON.stringify(input.context)).not.toContain("Sixth notification");
+          return {
+            answer: "Newest, then middle, then older.",
+            sourceIds: [older.id, newest.id, middle.id],
+            outputTokens: 10
+          };
+        }
+      }
+    };
+
+    const response = await requestJson<AssistantChatResponse>(
+      store,
+      "POST",
+      "/v1/assistant/chat",
+      { message: "what are my latest notifications?", timezone: "America/New_York" },
+      owner.session.token,
+      200,
+      env
+    );
+    expect(response.sources.map((source) => source.title)).toEqual([
+      "Newest notification",
+      "Middle notification",
+      "Older notification"
+    ]);
+  });
+
+  it("sorts calendar source previews earliest upcoming first", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "assistant-calendar-order@example.com");
+    const later = await store.createLocalCalendarEvent(
+      owner.user.id,
+      {
+        title: "Later event",
+        startAt: "2026-07-18T15:00:00.000Z",
+        endAt: "2026-07-18T15:30:00.000Z",
+        timezone: "America/New_York"
+      },
+      "2026-07-16T12:00:00.000Z"
+    );
+    const earlier = await store.createLocalCalendarEvent(
+      owner.user.id,
+      {
+        title: "Earlier event",
+        startAt: "2026-07-17T15:00:00.000Z",
+        endAt: "2026-07-17T15:30:00.000Z",
+        timezone: "America/New_York"
+      },
+      "2026-07-16T12:00:00.000Z"
+    );
+    const env: Partial<ApiEnv> = {
+      OPENAI_API_KEY: "test-key",
+      assistantAiClient: {
+        async answer(input) {
+          expect(input.context.calendarEvents.map((event) => event.title)).toEqual([
+            "Earlier event",
+            "Later event"
+          ]);
+          return {
+            answer: "Earlier, then later.",
+            sourceIds: [later.id, earlier.id],
+            outputTokens: 10
+          };
+        }
+      }
+    };
+
+    const response = await requestJson<AssistantChatResponse>(
+      store,
+      "POST",
+      "/v1/assistant/chat",
+      { message: "what do I have going on this week?", timezone: "America/New_York" },
+      owner.session.token,
+      200,
+      env
+    );
+    expect(response.sources.map((source) => source.title)).toEqual([
+      "Earlier event",
+      "Later event"
+    ]);
+  });
+
+  it("passes built-in DentLink usage help to assistant questions", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "assistant-help@example.com");
+    let sawHelpContext = false;
+    const env: Partial<ApiEnv> = {
+      OPENAI_API_KEY: "test-key",
+      assistantAiClient: {
+        async answer(input) {
+          sawHelpContext = true;
+          expect(input.context.help).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                topic: "Notifications",
+                guidance: expect.arrayContaining([expect.stringContaining("review active items")])
+              }),
+              expect.objectContaining({
+                topic: "Settings and connections",
+                guidance: expect.arrayContaining([expect.stringContaining("Refresh All")])
+              })
+            ])
+          );
+          return {
+            answer:
+              "Use Home for assistant questions, Notifications for incoming items, Notes for tasks, Calendar for events, and Settings -> Connections for sync setup.",
+            sourceIds: [],
+            outputTokens: 14
+          };
+        }
+      }
+    };
+
+    const response = await requestJson<AssistantChatResponse>(
+      store,
+      "POST",
+      "/v1/assistant/chat",
+      { message: "tell me how to use dentlink", timezone: "America/New_York" },
+      owner.session.token,
+      200,
+      env
+    );
+    expect(sawHelpContext).toBe(true);
+    expect(response.answer).toContain("Notifications");
+    expect(response.sources).toEqual([]);
+  });
+
+  it("returns a stable assistant error when AI is unavailable", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "assistant-no-ai@example.com");
+    const response = await requestJson<ApiErrorBody>(
+      store,
+      "POST",
+      "/v1/assistant/chat",
+      { message: "What do I have this week?", timezone: "America/New_York" },
+      owner.session.token,
+      503
+    );
+    expect(response.error.code).toBe("missing_api_key");
   });
 
   it("creates IMAP notifications with fallback content when AI is disabled", async () => {
@@ -2113,6 +2636,21 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       attempted: 0,
       skipped: 1
     });
+    const skippedAttempts = await store.listConnectorSyncAttempts(owner.user.id, imap.id, 10);
+    expect(skippedAttempts[0]).toMatchObject({
+      trigger: "scheduled",
+      engine: "gmail_imap",
+      status: "skipped",
+      errorCode: "sync_in_progress",
+      errorMessage: "Gmail sync is already in progress"
+    });
+    expect(skippedAttempts[0]?.details).toMatchObject({
+      operation: "incremental",
+      skippedReason: "fresh_sync_in_progress",
+      lockReferenceAt: "2026-07-14T20:09:00.000Z",
+      lockAgeMs: 60_000,
+      staleAfterMs: 300_000
+    });
     expect(
       (
         await requestJson<{ notifications: Notification[] }>(
@@ -2135,6 +2673,37 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       "2026-07-14T20:00:00.000Z"
     );
     expect(staleSyncing).not.toBeNull();
+    await expect(
+      syncGmailAccount(
+        store,
+        owner.user.id,
+        imap.id,
+        env,
+        "2026-07-14T20:02:00.000Z",
+        "refresh_all"
+      )
+    ).resolves.toMatchObject({
+      account: {
+        settings: {
+          gmailLastSyncEngine: "gmail_imap"
+        }
+      },
+      createdNotifications: 1,
+      summary: {
+        created: 1
+      }
+    });
+
+    const latestAfterRefreshAll = await store.getConnectorAccount(owner.user.id, imap.id);
+    expect(latestAfterRefreshAll).not.toBeNull();
+    const staleForScheduled = await store.updateConnectorAccount(
+      owner.user.id,
+      imap.id,
+      latestAfterRefreshAll?.version ?? 0,
+      { syncStatus: "syncing" },
+      "2026-07-14T20:00:00.000Z"
+    );
+    expect(staleForScheduled).not.toBeNull();
     expect(await syncConnectedGmailAccounts(store, env, "2026-07-14T20:20:00.000Z")).toMatchObject({
       attempted: 1,
       succeeded: 1
@@ -2159,7 +2728,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     expect(accounts.accounts[0]?.settings).toMatchObject({
       gmailIngestionEngine: "gmail_imap",
       gmailLastSyncEngine: "gmail_imap",
-      gmailLastSyncCreated: 1
+      gmailLastSyncDuplicate: 0
     });
   });
 
@@ -2426,6 +2995,37 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     expect(records.records.find((record) => record.status === "failed")).toMatchObject({
       processingReason: "Gmail API request failed",
       errorMessage: "Gmail API request failed"
+    });
+
+    const diagnostics = await requestJson<{
+      attempts: Array<{
+        trigger: string;
+        engine: string;
+        status: string;
+        errorCode: string | null;
+        errorMessage: string | null;
+        summary: typeof sync.summary | null;
+        details: Record<string, unknown>;
+      }>;
+    }>(
+      store,
+      "GET",
+      `/v1/connectors/gmail/${linked.account.id}/diagnostics`,
+      undefined,
+      owner.session.token
+    );
+    expect(diagnostics.attempts[0]).toMatchObject({
+      trigger: "manual",
+      engine: "gmail_api",
+      status: "partial",
+      errorCode: "gmail_partial_sync_failed",
+      summary: sync.summary
+    });
+    expect(diagnostics.attempts[0]?.details).toMatchObject({
+      operation: "incremental",
+      cursorAdvanced: false,
+      cursorBeforePresent: true,
+      cursorAfterPresent: true
     });
   });
 
@@ -4030,6 +4630,35 @@ function gmailTestEnv(
   };
 }
 
+async function connectGmailForTest(
+  store: DentLinkStore,
+  owner: AuthSession,
+  env: Partial<ApiEnv>
+): Promise<ConnectorAccount> {
+  const start = await requestJson<{ authorizationUrl: string }>(
+    store,
+    "POST",
+    "/v1/connectors/gmail/start",
+    undefined,
+    owner.session.token,
+    201,
+    env
+  );
+  const startUrl = new URL(start.authorizationUrl);
+  const callback = await handleApiRequest(
+    new Request(
+      `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${startUrl.searchParams.get(
+        "state"
+      )}`,
+      { headers: { Accept: "application/json" } }
+    ),
+    { store, ...env }
+  );
+  expect(callback.status).toBe(200);
+  const linked = (await callback.json()) as { account: ConnectorAccount };
+  return linked.account;
+}
+
 async function connectImapGmailForTest(
   store: DentLinkStore,
   owner: AuthSession,
@@ -4080,6 +4709,10 @@ async function connectImapGmailForTest(
     200,
     env
   );
+}
+
+function gmailBodyData(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64url");
 }
 
 function googleCalendarTestEnv(googleCalendarClient: GoogleCalendarApiClient): Partial<ApiEnv> {
@@ -4200,6 +4833,16 @@ function fakeGmailImapClient(): GmailImapClient {
       expect(options.accessToken).toBe("access-token-refreshed");
       expect(options.recentWindowDays).toBeGreaterThan(0);
       expect(options.maxMessages).toBeGreaterThan(0);
+      if (options.newerThanUid) {
+        expect(options.newerThanUid).toBe("11");
+        expect(options.expectedUidValidity).toBe("999");
+        return {
+          mailboxMessageCount: 10,
+          uidValidity: "999",
+          discoveredUids: [],
+          messages: []
+        };
+      }
       return {
         mailboxMessageCount: 10,
         uidValidity: "999",

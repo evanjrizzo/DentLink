@@ -91,12 +91,12 @@ Notification.
 
 Milestone 7 Slice 3.2 begins a controlled Gmail IMAP migration. Gmail connector accounts now support
 an `ingestionEngine` setting with `gmail_api` as the default and `gmail_imap` as an explicit
-per-account opt-in. IMAP ingestion uses Worker TLS sockets, Gmail XOAUTH2, `SELECT INBOX`, a rolling
-recent-window `UID SEARCH`, bounded MIME fetches, and the existing deterministic-rule and
-Notification pipeline. Existing Gmail API accounts are not switched automatically; IMAP accounts
-must reconnect with the `https://mail.google.com/` scope and pass an IMAP capability check before
-the credential is accepted. IMAP duplicate prevention prefers `X-GM-MSGID`, then `Message-ID`, then
-a mailbox UID fallback.
+per-account opt-in. IMAP ingestion uses Worker TLS sockets, Gmail XOAUTH2, `SELECT INBOX`, an INBOX
+UID cursor with UIDVALIDITY checks, a rolling recent-window `UID SEARCH` fallback, bounded MIME
+fetches, and the existing deterministic-rule and Notification pipeline. Existing Gmail API accounts
+are not switched automatically; IMAP accounts must reconnect with the `https://mail.google.com/`
+scope and pass an IMAP capability check before the credential is accepted. IMAP duplicate prevention
+prefers `X-GM-MSGID`, then `Message-ID`, then a mailbox UID fallback.
 
 Milestone 7 Slice 3.3 makes the IMAP engine selectable in preview without manual database edits. The
 selector persists a requested engine separately from the active engine so a failed IMAP reconnect
@@ -113,16 +113,23 @@ event stream watches DentLink sync changes and emits change hints such as `notif
 `calendar_updated`, and `connectors_updated`; clients then fetch normal API resources through the
 existing contracts.
 
+Gmail sync observability is durable. Every manual Sync Now, Refresh All-triggered Gmail sync,
+scheduled Gmail sync, backfill, skipped fresh-lock attempt, partial attempt, and failed attempt
+appends a safe user-scoped `connector_sync_attempts` record. The Connections diagnostics surface and
+export read these records through the existing authenticated Gmail diagnostics endpoint, so sync
+failures can be debugged after the Worker invocation has ended without relying on ephemeral runtime
+logs.
+
 Milestone 7 Slice 4 keeps deterministic email rules as the correctness boundary and adds optional
-provider-neutral AI enrichment after rule evaluation. IMAP messages are normalized into safe email
-metadata plus bounded plain text, with text/plain preferred and cleaned HTML text used only as a
-fallback. Rules can match sender, domain, recipients, subject, labels, unread state, attachment
-presence, automated senders, mailing-list signals, body text, and always/never notify flags before a
-Notification is created. If an OpenAI key is configured server-side, AI is available and defaults
-to enabled for users unless they explicitly opt out in Settings -> AI. Non-suppressed notifications
-may receive a structured summary, category, importance, suggested action, deadline, and explanation.
-AI failures update AI metadata on the notification and usage counters but do not fail Gmail
-ingestion or change connector health.
+provider-neutral AI enrichment after rule evaluation. Gmail API and IMAP messages are normalized
+into safe email metadata plus bounded plain text, with text/plain preferred and cleaned HTML text
+used only as a fallback. Rules can match sender, domain, recipients, subject, labels, unread state,
+attachment presence, automated senders, mailing-list signals, body text, and always/never notify
+flags before a Notification is created. If an OpenAI key is configured server-side, AI is available
+and defaults to enabled for users unless they explicitly opt out in Settings -> AI. Non-suppressed
+notifications may receive a structured summary, category, importance, suggested action, deadline,
+and explanation. AI failures update AI metadata on the notification and usage counters but do not
+fail Gmail ingestion or change connector health.
 
 Milestone 7 Slice 4.3 keeps the backend notification status model as the source of truth and refines
 client interaction semantics. `status = done` means the user completed the required action and the
@@ -133,6 +140,16 @@ corresponding timestamp in storage. The web client decides whether to show Compl
 metadata only: AI `requiresAction`, non-ignore suggested actions, action-oriented categories,
 high-priority deterministic rules, task-like source labels, or explicit deadlines. Importance alone
 does not make a notification actionable.
+
+Milestone 7 Slice 4.4 adds the first read-only assistant surface. The web Home tab hosts a
+responsive chat panel, while `POST /v1/assistant/chat` remains stateless and backend-mediated. The
+assistant never receives credentials or direct database access; the API gathers bounded, user-scoped
+context from normalized Notifications, normalized Gmail source records, and upcoming calendar
+events, plus bounded static DentLink usage guidance for product help questions, then calls the
+configured provider-neutral AI boundary. Notification and email context is provided newest-first,
+calendar context is provided earliest-upcoming first, and response source previews are sorted by the
+backend before returning to clients. This slice intentionally does not add actions, persistent chat
+history, provider writeback, or autonomous item mutation.
 
 The responsive web UI uses one adaptive-surface system for notification details, Notes create/edit,
 Calendar event details, local event creation, and ICS import. Surfaces render as bottom sheets on

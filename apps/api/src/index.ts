@@ -1,4 +1,5 @@
 import { D1DentLinkStore, type D1DatabaseLike } from "./d1-storage";
+import { AssistantError, answerAssistantQuestion, type AssistantRuntimeEnv } from "./assistant";
 import {
   generateSessionToken,
   generateWebhookSecret,
@@ -77,9 +78,10 @@ import type {
   UserPreferences
 } from "@dentlink/item-model";
 
-export type ApiEnv = GmailRuntimeEnv & {
-  googleCalendarClient?: GoogleCalendarApiClient;
-} & GoogleCalendarRuntimeEnv & {
+export type ApiEnv = GmailRuntimeEnv &
+  AssistantRuntimeEnv & {
+    googleCalendarClient?: GoogleCalendarApiClient;
+  } & GoogleCalendarRuntimeEnv & {
     store?: DentLinkStore;
     DB?: D1DatabaseLike;
     DENTLINK_ENV?: string;
@@ -468,6 +470,11 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
         202
       );
     }
+    if (method === "POST" && path === "/v1/assistant/chat") {
+      return json(
+        await answerAssistantQuestion(store, auth.user.id, env, await readJson(request), now)
+      );
+    }
     const gmailDisconnectMatch = path.match(/^\/v1\/connectors\/gmail\/([^/]+)\/disconnect$/);
     if (gmailDisconnectMatch && method === "POST") {
       return json(
@@ -761,6 +768,7 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
 
     return error("not_found", "Endpoint not found", 404);
   } catch (caught) {
+    if (caught instanceof AssistantError) return error(caught.code, caught.message, caught.status);
     if (caught instanceof ValidationError) return error(caught.code, caught.message, 400);
     if (caught instanceof IcsError) return error(caught.code, caught.message, 400);
     if (caught instanceof GmailConfigError)
@@ -835,7 +843,8 @@ async function syncAllConnectors(
           userId,
           account.id,
           env,
-          new Date().toISOString()
+          new Date().toISOString(),
+          "refresh_all"
         );
         results.push({
           accountId: account.id,
@@ -852,6 +861,10 @@ async function syncAllConnectors(
           message: null
         });
       } catch (caught) {
+        if (caught instanceof StoreError && caught.code === "sync_in_progress") {
+          results.push(skippedSyncAllConnector(account, caught.message));
+          continue;
+        }
         results.push(failedSyncAllConnector(account, caught));
       }
       continue;
@@ -897,6 +910,28 @@ async function syncAllConnectors(
     completedAt: new Date().toISOString(),
     status: failures === 0 ? "success" : failures === results.length ? "failed" : "partial",
     connectors: results
+  };
+}
+
+function skippedSyncAllConnector(
+  account: ConnectorAccount,
+  message: string
+): ConnectorSyncAllResult["connectors"][number] {
+  return {
+    accountId: account.id,
+    provider: account.connectorKey,
+    status: "skipped",
+    engine:
+      account.connectorKey === "gmail"
+        ? account.settings.gmailIngestionEngine === "gmail_imap"
+          ? "gmail_imap"
+          : "gmail_api"
+        : undefined,
+    created: 0,
+    updated: 0,
+    duplicate: 0,
+    failed: 0,
+    message
   };
 }
 

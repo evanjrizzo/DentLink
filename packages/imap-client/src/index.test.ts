@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { gmailSourceExternalId } from "./gmail";
 import { parseMime } from "./mime";
 import { searchUids, selectedExistsCount } from "./protocol";
-import { recentSinceDate } from "./search";
+import { recentSinceDate, uidSearchCommand } from "./search";
 import { xoauth2InitialResponse } from "./xoauth2";
 
 describe("@dentlink/imap-client", () => {
@@ -95,5 +95,11 @@ describe("@dentlink/imap-client", () => {
 
   it("builds rolling IMAP since dates", () => {
     expect(recentSinceDate("2026-07-14T12:00:00.000Z", 1)).toBe("13-Jul-2026");
+  });
+
+  it("builds UID range searches when a prior UID is known", () => {
+    expect(uidSearchCommand("13-Jul-2026", "11")).toBe("UID SEARCH UID 12:*");
+    expect(uidSearchCommand("13-Jul-2026", null)).toBe("UID SEARCH SINCE 13-Jul-2026");
+    expect(uidSearchCommand("13-Jul-2026", "not-a-uid")).toBe("UID SEARCH SINCE 13-Jul-2026");
   });
 });

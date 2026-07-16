@@ -138,4 +138,34 @@ describe("@dentlink/api-client", () => {
       available: true
     });
   });
+
+  it("posts assistant chat requests", async () => {
+    const client = new DentLinkApiClient({
+      fetchImpl: async (url, init) => {
+        expect(url).toBe("/v1/assistant/chat");
+        expect(init?.method).toBe("POST");
+        expect(init?.body).toBe(
+          JSON.stringify({ message: "What is this week?", timezone: "America/New_York" })
+        );
+        return new Response(
+          JSON.stringify({
+            answer: "You have one event this week.",
+            sources: [],
+            ai: {
+              status: "complete",
+              provider: "openai",
+              model: "gpt-4.1-mini",
+              promptVersion: "assistant-readonly-v1",
+              outputTokens: 20
+            }
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    });
+
+    await expect(
+      client.askAssistant({ message: "What is this week?", timezone: "America/New_York" })
+    ).resolves.toMatchObject({ answer: "You have one event this week." });
+  });
 });

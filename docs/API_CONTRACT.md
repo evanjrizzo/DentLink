@@ -143,23 +143,36 @@ Notes, sync, history, or conflict contracts.
   `skipped`.
 - Notification status values keep their existing API representation. `active` appears in the normal
   Notifications list. `done` means the user completed the required action and storage sets
-  `completedAt`. `dismissed` means the user removed the item from Active without claiming
-  completion and storage sets `dismissedAt`. `suppressed` means the item was stored and remains
-  searchable but is below the user's current notification threshold. `deleted` is soft-deleted.
-  Restoring a completed, dismissed, or suppressed item uses `PATCH /v1/notifications/:id` with
+  `completedAt`. `dismissed` means the user removed the item from Active without claiming completion
+  and storage sets `dismissedAt`. `suppressed` means the item was stored and remains searchable but
+  is below the user's current notification threshold. `deleted` is soft-deleted. Restoring a
+  completed, dismissed, or suppressed item uses `PATCH /v1/notifications/:id` with
   `status: "active"` and clears the applicable timestamp through the existing storage behavior.
 - `GET /v1/ai/settings`: return authenticated user's server-side email AI availability, effective
   enabled state, provider/model, input limit, unavailable reason when applicable, and monthly usage
   counters. It never returns `OPENAI_API_KEY` or provider credentials.
-- `PATCH /v1/ai/settings`: persist the authenticated user's explicit AI enabled/disabled
-  preference. New users and existing users with no preference default to enabled when
-  `OPENAI_API_KEY` is configured and the server has not disabled AI.
+- `PATCH /v1/ai/settings`: persist the authenticated user's explicit AI enabled/disabled preference.
+  New users and existing users with no preference default to enabled when `OPENAI_API_KEY` is
+  configured and the server has not disabled AI.
 - `POST /v1/ai/reprocess`: reprocess same-day Gmail AI metadata for the authenticated user from
-  already-normalized connector source records. Body: `{ "timezone": "America/New_York",
-  "accountId": "optional Gmail connector account id" }`. The operation is idempotent for unchanged
-  content hashes, does not refetch Gmail, preserves pinned/completed/dismissed/deleted state, updates
-  AI summary/category/importance/actionability, reapplies the post-score threshold, avoids duplicate
-  notifications, and returns progress counts plus partial-failure details with HTTP `202`.
+  already-normalized connector source records. Body:
+  `{ "timezone": "America/New_York", "accountId": "optional Gmail connector account id" }`. The
+  operation is idempotent for unchanged content hashes, does not refetch Gmail, preserves
+  pinned/completed/dismissed/deleted state, updates AI summary/category/importance/actionability,
+  reapplies the post-score threshold, avoids duplicate notifications, and returns progress counts
+  plus partial-failure details with HTTP `202`.
+- `POST /v1/assistant/chat`: answer one authenticated read-only assistant question from bounded
+  DentLink context. Body:
+  `{ "message": "What do I have going on this week?", "timezone": "America/New_York" }`. The backend
+  resolves user identity from the session, gathers newest-first normalized notification context,
+  normalized Gmail source-record context, earliest-upcoming calendar events, and bounded static
+  DentLink usage guidance, calls the configured AI provider when available, and returns
+  `{ answer, sources, ai }`. Sources contain DentLink source IDs, kind (`notification`, `email`, or
+  `calendar_event`), title, subtitle, timestamp, and optional source URL. Notification and email
+  source previews are returned newest-first; calendar source previews are returned earliest-upcoming
+  first. The endpoint does not mutate Gmail, calendar providers, notifications, notes, or connector
+  state. Missing or globally disabled AI returns a stable error such as `missing_api_key` or
+  `disabled_by_environment`.
 - `GET /v1/webhooks`: list authenticated user's named webhook endpoints. Responses include
   `ingestUrl` but never include the endpoint secret or secret hash.
 - `POST /v1/webhooks`: create a named webhook endpoint. The response returns the generated webhook
@@ -229,7 +242,8 @@ Google Calendar or any other Google service.
   `returnTo` URL when present. JSON clients may send `Accept: application/json`.
 - `POST /v1/connectors/gmail/:accountId/sync`: authenticated manual Gmail sync for an owned Gmail
   connector account. The default `gmail_api` engine is incremental and uses Gmail history IDs when a
-  checkpoint exists. The preview-only `gmail_imap` engine uses a rolling recent-window IMAP scan.
+  checkpoint exists. The preview-only `gmail_imap` engine uses an INBOX UID cursor when UIDVALIDITY
+  still matches, with a rolling recent-window IMAP scan as the fallback.
 - `POST /v1/connectors/gmail/:accountId/backfill`: authenticated backfill for an owned Gmail
   connector account. It scans at least the last 30 days through Gmail message-list pagination and
   does not reset existing notifications or the incremental history checkpoint.
@@ -325,12 +339,17 @@ Prompt fields are limited to 2,000 characters and the API normalizes thresholds 
 
 The Worker also runs scheduled Gmail synchronization every five minutes for connected, idle Gmail
 accounts. Scheduled sync uses the account's selected ingestion engine. `gmail_api` accounts use the
-history-checkpoint path; `gmail_imap` accounts use a duplicate-safe rolling recent-window scan.
+history-checkpoint path; `gmail_imap` accounts use a duplicate-safe UID cursor when available and a
+rolling recent-window scan when the UID cursor is unavailable or UIDVALIDITY changes. Scheduled sync
+treats an existing `syncing` lock as fresh for five minutes. Manual Gmail sync and Refresh All use a
+60-second stale-lock window so user-initiated refreshes can recover from an interrupted poll that
+marked an account `syncing` but did not finish.
 
 Incremental Gmail API sync advances `syncCursor` only when all discovered message IDs finish without
 a per-message failure. Backfill remains duplicate-safe through source-record identity but is no
-longer exposed as the normal user recovery path. IMAP recovery relies on rolling scans and source
-record uniqueness.
+longer exposed as the normal user recovery path. IMAP recovery relies on the stored INBOX UID
+cursor, UIDVALIDITY checks, rolling-scan fallback, and source-record uniqueness. The IMAP UID cursor
+advances only when the sync has no per-message failures.
 
 The diagnostics endpoint returns:
 
@@ -338,6 +357,17 @@ The diagnostics endpoint returns:
 - `summary`: aggregate counts derived from Gmail source-record outcomes.
 - `messages`: recent entries with Gmail message ID, outcome, processing reason, processed timestamp,
   linked DentLink notification ID where present, and source record ID.
+- `attempts`: recent durable sync-attempt rows for the account. Each attempt includes trigger
+  (`manual`, `scheduled`, `refresh_all`, or `backfill`), engine, status (`success`, `partial`,
+  `failed`, or `skipped`), start/completion timestamps, duration, safe error code/message, aggregate
+  Gmail counts when available, and safe diagnostic details. Fresh-lock skips include safe lock
+  reference time, lock age, and stale-lock threshold so delayed manual, scheduled, or Refresh All
+  attempts are observable. Attempts are append-only diagnostic records and are scoped to the
+  authenticated owner of the connector account.
+
+`POST /v1/connectors/sync-all` reports Gmail `sync_in_progress` locks as skipped connector results
+rather than failed connector results. The per-account Gmail attempt log remains the authoritative
+place to inspect why the account skipped.
 
 Connector settings additionally store engine-aware diagnostics for the connector card: selected and
 active engine, last sync timestamp, duration, scanned count, processed count, notifications created,

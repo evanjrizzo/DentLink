@@ -225,9 +225,10 @@ pnpm db:migrate:production
 Production migrations are explicit and manual. Do not add destructive production reset scripts.
 Milestone 2 adds `0002_notifications_webhooks.sql`; Milestone 3 adds `0003_connector_framework.sql`;
 Milestone 3.1 adds `0004_gmail_connector.sql`; Milestone 4 adds
-`0005_google_calendar_connector.sql`; Milestone 5 adds `0006_calendar_foundation_ics.sql`. Apply
-migrations to preview before deploying code that uses the corresponding sync change types or local
-calendar/annotation tables.
+`0005_google_calendar_connector.sql`; Milestone 5 adds `0006_calendar_foundation_ics.sql`; Milestone
+7 diagnostics add `0012_connector_sync_attempts.sql`. Apply migrations to preview before deploying
+code that uses the corresponding sync change types, local calendar/annotation tables, or connector
+sync-attempt diagnostics.
 
 ## Workflows
 

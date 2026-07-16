@@ -20,6 +20,7 @@ import type {
   ConnectorCredential,
   ConnectorCredentialKind,
   ConnectorOAuthState,
+  ConnectorSyncAttempt,
   ConnectorSourceRecord,
   ConnectorSourceRecordInput,
   CurrentSession,
@@ -228,6 +229,23 @@ type ConnectorSourceRecordRow = {
   processing_reason: string | null;
   error_message: string | null;
   version: number;
+};
+
+type ConnectorSyncAttemptRow = {
+  id: string;
+  user_id: string;
+  account_id: string;
+  connector_key: string;
+  trigger: ConnectorSyncAttempt["trigger"];
+  engine: ConnectorSyncAttempt["engine"];
+  status: ConnectorSyncAttempt["status"];
+  started_at: string;
+  completed_at: string;
+  duration_ms: number;
+  error_code: string | null;
+  error_message: string | null;
+  summary_json: string | null;
+  details_json: string;
 };
 
 type ConnectorOAuthStateRow = {
@@ -1150,6 +1168,60 @@ export class D1DentLinkStore implements DentLinkStore {
       [userId, accountId]
     );
     return rows.map(connectorSourceRecordFromRow);
+  }
+
+  async createConnectorSyncAttempt(
+    userId: EntityId,
+    input: Omit<ConnectorSyncAttempt, "id" | "userId">
+  ): Promise<ConnectorSyncAttempt> {
+    const account = await this.getConnectorAccount(userId, input.accountId);
+    if (!account) throw new StoreError("not_found", "Connector account not found");
+    const attempt: ConnectorSyncAttempt = {
+      ...input,
+      id: crypto.randomUUID(),
+      userId
+    };
+    await this.db
+      .prepare(
+        `INSERT INTO connector_sync_attempts
+           (id, user_id, account_id, connector_key, trigger, engine, status, started_at,
+            completed_at, duration_ms, error_code, error_message, summary_json, details_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(
+        attempt.id,
+        attempt.userId,
+        attempt.accountId,
+        attempt.connectorKey,
+        attempt.trigger,
+        attempt.engine,
+        attempt.status,
+        attempt.startedAt,
+        attempt.completedAt,
+        attempt.durationMs,
+        attempt.errorCode,
+        attempt.errorMessage,
+        attempt.summary ? JSON.stringify(attempt.summary) : null,
+        JSON.stringify(attempt.details)
+      )
+      .run();
+    return attempt;
+  }
+
+  async listConnectorSyncAttempts(
+    userId: EntityId,
+    accountId: EntityId,
+    limit = 50
+  ): Promise<ConnectorSyncAttempt[]> {
+    const boundedLimit = Math.min(Math.max(Math.floor(limit), 1), 200);
+    const rows = await this.all<ConnectorSyncAttemptRow>(
+      `SELECT * FROM connector_sync_attempts
+       WHERE user_id = ? AND account_id = ?
+       ORDER BY started_at DESC, id DESC
+       LIMIT ?`,
+      [userId, accountId, boundedLimit]
+    );
+    return rows.map(connectorSyncAttemptFromRow);
   }
 
   async createConnectorOAuthState(
@@ -2850,6 +2922,27 @@ function connectorSourceRecordFromRow(row: ConnectorSourceRecordRow): ConnectorS
     processingReason: row.processing_reason,
     errorMessage: row.error_message,
     version: row.version
+  };
+}
+
+function connectorSyncAttemptFromRow(row: ConnectorSyncAttemptRow): ConnectorSyncAttempt {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    accountId: row.account_id,
+    connectorKey: row.connector_key,
+    trigger: row.trigger,
+    engine: row.engine,
+    status: row.status,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    durationMs: row.duration_ms,
+    errorCode: row.error_code,
+    errorMessage: row.error_message,
+    summary: row.summary_json
+      ? (JSON.parse(row.summary_json) as ConnectorSyncAttempt["summary"])
+      : null,
+    details: JSON.parse(row.details_json) as Record<string, unknown>
   };
 }
 

@@ -204,9 +204,9 @@ Implemented scope:
 - DentLink-owned local calendar events with CRUD, version checks, user isolation, all-day support,
   timezone metadata, simple RRULE recurrence storage, category/color fields, reminder metadata, and
   soft deletion.
-- ICS import/export for authenticated DentLink Local events, including timed events, all-day
-  events, descriptions, locations, safe URLs, imported UID deduplication, and recurrence
-  preservation where supported.
+- ICS import/export for authenticated DentLink Local events, including timed events, all-day events,
+  descriptions, locations, safe URLs, imported UID deduplication, and recurrence preservation where
+  supported.
 - DentLink-only annotations for provider events: notes, pinned, completed, hidden, and tags without
   mutating Google Calendar.
 - Calendar source filters for all sources, Google Calendar, and DentLink Local.
@@ -217,43 +217,21 @@ Implemented scope:
   listing, sync changes, and duplicate-safe ICS import.
 
 Out of scope and still not implemented: Google Calendar writeback, provider event creation or
-editing, attendee management, CalDAV, remote ICS subscriptions, Microsoft Graph, Outlook, IMAP,
-AI summaries, reminder delivery, push/email/SMS notifications, drag-and-drop scheduling, mobile,
-desktop, widgets, and production deployment.
-    Future providers
+editing, attendee management, CalDAV, remote ICS subscriptions, Microsoft Graph, Outlook, IMAP, AI
+summaries, reminder delivery, push/email/SMS notifications, drag-and-drop scheduling, mobile,
+desktop, widgets, and production deployment. Future providers
 
-Calendar Annotations
-Allow users to add DentLink-only metadata to imported events:
-    notes
-    pinned
-    completed
-    hidden
-    tags
-without modifying Google.
+Calendar Annotations Allow users to add DentLink-only metadata to imported events: notes pinned
+completed hidden tags without modifying Google.
 
-ICS
-Import
-    upload .ics
-    parse
-    import into local calendar
-Export
-    export local events
-    optionally export annotations
-No CalDAV.
-No provider sync.
+ICS Import upload .ics parse import into local calendar Export export local events optionally export
+annotations No CalDAV. No provider sync.
 
-API
-CRUD local events
-import endpoint
-export endpoint
-filter endpoint
+API CRUD local events import endpoint export endpoint filter endpoint
 
 Tests
 
-Browser
-API
-ICS parser
-Timezone handling
+Browser API ICS parser Timezone handling
 
 Recurring events
 
@@ -269,13 +247,13 @@ development branch.
 
 Objective
 
-Transform DentLink from a collection of independent Notes, Notifications, Gmail, and Calendar views into a unified, prioritized personal dashboard.
+Transform DentLink from a collection of independent Notes, Notifications, Gmail, and Calendar views
+into a unified, prioritized personal dashboard.
 
 Milestone 7 focuses on three areas:
 
-reliable notification ingestion
-unified ranking across all sources
-optional AI-powered summarization and classification
+reliable notification ingestion unified ranking across all sources optional AI-powered summarization
+and classification
 
 Microsoft 365, Outlook, and IMAP remain deferred under Milestone 6.
 
@@ -285,50 +263,45 @@ Before introducing AI, ensure Gmail synchronization is complete, deterministic, 
 
 Implemented slices now include Gmail API diagnostics, Gmail backfill as a low-priority maintenance
 tool, deterministic Gmail rules, preview Gmail IMAP engine selection, and live-dashboard refresh
-behavior. Slice 3.5 adds an authenticated metadata-only DentLink event stream, polling fallback,
-visibility refresh, and `Refresh All` orchestration across connected supported services without
-moving provider polling into the browser.
+behavior. Gmail sync attempts are now durably logged for manual Sync Now, scheduled sync, Refresh
+All, backfill, skipped fresh-lock attempts, partial attempts, and failed attempts, with safe details
+available in Connections diagnostics and JSON export. Slice 3.5 adds an authenticated metadata-only
+DentLink event stream, polling fallback, visibility refresh, and `Refresh All` orchestration across
+connected supported services without moving provider polling into the browser.
 
 Slice 4 adds user-manageable email sorting rules, normalized IMAP email metadata, optional
 server-side OpenAI summarization/classification, AI usage accounting, explainable notification
 sorting modes, and a more organized Connections view with collapsible Gmail, Google Calendar, and
-Webhook sections. Slice 4.2 makes the web UI responsive and touch-first across mobile, the
-1280x720 dashboard, and desktop, with advanced Notes, Agenda, connection, and diagnostic controls
-behind adaptive sheets, panels, Settings, or Debug Mode. AI summaries default to enabled when an
-OpenAI key is configured and remain user-disableable in Settings.
+Webhook sections. Slice 4.2 makes the web UI responsive and touch-first across mobile, the 1280x720
+dashboard, and desktop, with advanced Notes, Agenda, connection, and diagnostic controls behind
+adaptive sheets, panels, Settings, or Debug Mode. AI summaries default to enabled when an OpenAI key
+is configured and remain user-disableable in Settings.
 
 Slice 4.3 refines daily notification actions and adaptive surfaces. Notification cards expose
 compact contextual actions: Pin/Unpin and Dismiss are always available, source opening appears when
 a source URL exists, and Complete appears only when existing rule, AI, deadline, category, or
 task-type signals mark the item actionable. Complete moves an item to History as completed and
-records completion time; Dismiss moves it to History as dismissed and records dismissal time. Restore
-returns either state to Active and clears the corresponding completion or dismissal marker through
-the existing notification status model. Adaptive panels use tokenized width and height rules,
-choose bottom-sheet mode for phone, narrow landscape, and short 1280x720 layouts, and use wider
-right-side panels only when the panel and remaining main content are both usable.
+records completion time; Dismiss moves it to History as dismissed and records dismissal time.
+Restore returns either state to Active and clears the corresponding completion or dismissal marker
+through the existing notification status model. Adaptive panels use tokenized width and height
+rules, choose bottom-sheet mode for phone, narrow landscape, and short 1280x720 layouts, and use
+wider right-side panels only when the panel and remaining main content are both usable. The Notes
+view keeps completed notes visible by default, provides a local Filters checkbox to hide or show
+them, sorts completed notes after active notes within their folder, and sizes card completion
+checkboxes for touch use while preserving backend-owned note status.
 
 Scope
 
 Implement:
 
-complete Gmail pagination
-incremental history synchronization validation
-duplicate prevention
-idempotent notification creation
-robust HTML and multipart email parsing
-retry handling for partial sync failures
-sync diagnostics
-per-message processing status
-browser regression coverage for large mailboxes
+complete Gmail pagination incremental history synchronization validation duplicate prevention
+idempotent notification creation robust HTML and multipart email parsing retry handling for partial
+sync failures sync diagnostics per-message processing status browser regression coverage for large
+mailboxes
 
 Each processed Gmail message must end with one of:
 
-notification created
-notification updated
-skipped
-duplicate
-filtered
-failed
+notification created notification updated skipped duplicate filtered failed
 
 with an associated reason.
 
@@ -340,30 +313,14 @@ Refine Notifications into DentLink's primary information stream.
 
 Supported sources:
 
-Gmail
-Webhooks
-Google Calendar
-Local Calendar
-Future providers
+Gmail Webhooks Google Calendar Local Calendar Future providers
 
 Every notification should share a common model regardless of origin.
 
 Common fields include:
 
-title
-summary
-source
-source identifier
-timestamp
-priority
-tags
-pinned
-completed
-hidden
-dismissed
-ranking score
-explanation
-AI metadata
+title summary source source identifier timestamp priority tags pinned completed hidden dismissed
+ranking score explanation AI metadata
 
 Notifications become the central object presented to the user.
 
@@ -373,18 +330,8 @@ Implement deterministic filtering before AI.
 
 Supported rule types:
 
-sender
-sender domain
-recipient
-subject contains
-Gmail labels
-attachment presence
-mailing list detection
-automated sender detection
-keyword matching
-include rules
-exclude rules
-always notify
+sender sender domain recipient subject contains Gmail labels attachment presence mailing list
+detection automated sender detection keyword matching include rules exclude rules always notify
 never notify
 
 Rules execute before AI.
@@ -402,12 +349,9 @@ not block ingestion.
 
 Requirements:
 
-enabled by default when an OpenAI key is configured, user-disableable in Settings
-OpenAI API key stored server-side
-provider-neutral AI interface
-configurable model selection
-graceful degradation if unavailable
-AI failure never blocks synchronization
+enabled by default when an OpenAI key is configured, user-disableable in Settings OpenAI API key
+stored server-side provider-neutral AI interface configurable model selection graceful degradation
+if unavailable AI failure never blocks synchronization
 
 Initial capabilities:
 
@@ -419,24 +363,12 @@ Classification
 
 Predict:
 
-importance
-category
-requires action
-deadline detected
-newsletter
-receipt
-personal
-work
-Suggested action
+importance category requires action deadline detected newsletter receipt personal work Suggested
+action
 
 Examples:
 
-Reply
-Review
-Schedule
-Ignore
-Archive
-Explainability
+Reply Review Schedule Ignore Archive Explainability
 
 Every AI result should include a brief explanation.
 
@@ -450,22 +382,12 @@ Replace chronological ordering with explainable ranking.
 
 Ranking inputs include:
 
-due dates
-deadlines
-sender importance
-pinned state
-user feedback
-completion state
-calendar proximity
-AI importance
-deterministic rules
-recency
+due dates deadlines sender importance pinned state user feedback completion state calendar proximity
+AI importance deterministic rules recency
 
 Every ranked item should expose:
 
-overall score
-contributing factors
-ranking explanation
+overall score contributing factors ranking explanation
 
 Example:
 
@@ -477,21 +399,12 @@ Create DentLink's primary landing page.
 
 Sections:
 
-Today's schedule
-High-priority notifications
-Upcoming calendar events
-Overdue tasks
-Pinned notes
+Today's schedule High-priority notifications Upcoming calendar events Overdue tasks Pinned notes
 Recently completed items
 
 Support:
 
-cross-source search
-source filters
-quick complete
-quick dismiss
-quick pin
-quick open
+cross-source search source filters quick complete quick dismiss quick pin quick open
 
 The dashboard becomes the default home screen.
 
@@ -499,24 +412,13 @@ Phase 7: AI Usage and Settings
 
 Add configuration for:
 
-AI enable/disable
-selected provider
-selected model
-monthly usage
-estimated token cost
-processing status
-privacy controls
-resend for AI processing
-Exit Criteria
-Gmail sync reliably processes every eligible message.
-Large mailboxes synchronize without duplicates or missing messages.
-Every notification has a recorded processing outcome.
-Deterministic filtering works before AI.
-AI summaries and classifications are optional.
-AI failures never interrupt synchronization.
-Users can explain why every notification was shown or hidden.
-Notifications from Notes, Gmail, Webhooks, and Calendar participate in the same ranking system.
-The Dashboard becomes the default landing page.
+AI enable/disable selected provider selected model monthly usage estimated token cost processing
+status privacy controls resend for AI processing Exit Criteria Gmail sync reliably processes every
+eligible message. Large mailboxes synchronize without duplicates or missing messages. Every
+notification has a recorded processing outcome. Deterministic filtering works before AI. AI
+summaries and classifications are optional. AI failures never interrupt synchronization. Users can
+explain why every notification was shown or hidden. Notifications from Notes, Gmail, Webhooks, and
+Calendar participate in the same ranking system. The Dashboard becomes the default landing page.
 Existing authentication, Notes, Calendar, connector, and synchronization tests continue to pass.
 
 ## Milestone 8: Tauri desktop and local agent

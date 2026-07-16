@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { aiPackage, normalizeEmailBody, parseEmailAiOutput, trimEmailThread } from "./index";
+import {
+  aiPackage,
+  normalizeAssistantAnswer,
+  normalizeEmailBody,
+  parseAssistantAiOutput,
+  parseEmailAiOutput,
+  trimEmailThread
+} from "./index";
 
 describe("@dentlink/ai", () => {
   it("declares the AI package boundary", () => {
@@ -46,5 +53,33 @@ describe("@dentlink/ai", () => {
     expect(() => parseEmailAiOutput(JSON.stringify({ summary: "missing fields" }))).toThrow(
       /invalid/i
     );
+  });
+
+  it("puts inline assistant numbered lists on separate lines", () => {
+    expect(
+      normalizeAssistantAnswer(
+        "To use DentLink: 1) Open Home. 2) Check Notifications. 3) Use Notes."
+      )
+    ).toBe("To use DentLink:\n1) Open Home.\n2) Check Notifications.\n3) Use Notes.");
+  });
+
+  it("puts inline assistant bullet lists on separate lines", () => {
+    expect(normalizeAssistantAnswer("Try these: - Home - Notifications - Calendar")).toBe(
+      "Try these:\n- Home\n- Notifications\n- Calendar"
+    );
+  });
+
+  it("normalizes assistant output after parsing structured JSON", () => {
+    expect(
+      parseAssistantAiOutput(
+        JSON.stringify({
+          answer: "Use DentLink: 1) Home. 2) Notifications.",
+          sourceIds: ["source_1"]
+        })
+      )
+    ).toEqual({
+      answer: "Use DentLink:\n1) Home.\n2) Notifications.",
+      sourceIds: ["source_1"]
+    });
   });
 });
