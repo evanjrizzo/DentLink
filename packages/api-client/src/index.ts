@@ -18,6 +18,7 @@ import type {
   ConnectorSyncAllResult,
   CurrentSession,
   EmailAiSettings,
+  EmailAiReprocessResult,
   EntityId,
   Folder,
   FolderPatch,
@@ -423,8 +424,14 @@ export class DentLinkApiClient {
     return this.requestText(`/v1/calendar/ics/export${suffix}`);
   }
 
-  async listNotifications(): Promise<NotificationsList> {
-    return this.request<NotificationsList>("/v1/notifications");
+  async listNotifications(
+    options: { includeSuppressed?: boolean; search?: string } = {}
+  ): Promise<NotificationsList> {
+    const params = new URLSearchParams();
+    if (options.includeSuppressed) params.set("includeSuppressed", "true");
+    if (options.search) params.set("search", options.search);
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    return this.request<NotificationsList>(`/v1/notifications${suffix}`);
   }
 
   async getEmailAiSettings(): Promise<EmailAiSettings> {
@@ -434,6 +441,16 @@ export class DentLinkApiClient {
   async updateEmailAiSettings(input: { enabled: boolean }): Promise<EmailAiSettings> {
     return this.request<EmailAiSettings>("/v1/ai/settings", {
       method: "PATCH",
+      body: input
+    });
+  }
+
+  async reprocessEmailAi(input: {
+    timezone: string;
+    accountId?: EntityId | null;
+  }): Promise<EmailAiReprocessResult> {
+    return this.request<EmailAiReprocessResult>("/v1/ai/reprocess", {
+      method: "POST",
       body: input
     });
   }

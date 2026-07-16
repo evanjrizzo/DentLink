@@ -32,7 +32,7 @@ export type CurrentSession = {
 export type NoteKind = "task" | "reference";
 export type NoteStatus = "active" | "done" | "deleted";
 export type NotePriority = "none" | "low" | "medium" | "high";
-export type NotificationStatus = "active" | "done" | "dismissed" | "deleted";
+export type NotificationStatus = "active" | "suppressed" | "done" | "dismissed" | "deleted";
 export type CalendarEventSource = "local" | "google-calendar" | "note";
 export type CalendarEventStatus = "active" | "cancelled" | "dismissed" | "deleted";
 export type CalendarSourceFilter = "all" | CalendarEventSource;
@@ -108,6 +108,7 @@ export type EmailAiAccountOverride = {
   accountId: EntityId;
   enabled: boolean;
   prompt: string;
+  threshold?: number;
 };
 
 export type EmailAiPreferenceSettings = {
@@ -649,6 +650,27 @@ export type EmailAiSettings = {
   outputTokensThisMonth: number;
   failedRequestsThisMonth: number;
   estimatedCostThisMonth: number | null;
+};
+
+export type EmailAiReprocessResult = {
+  id: EntityId;
+  startedAt: IsoDateTime;
+  completedAt: IsoDateTime;
+  timezone: string;
+  day: string;
+  status: "success" | "partial" | "failed";
+  processed: number;
+  updated: number;
+  suppressed: number;
+  restored: number;
+  skipped: number;
+  failed: number;
+  errors: Array<{
+    recordId: EntityId;
+    messageId: string;
+    code: string;
+    message: string;
+  }>;
 };
 
 export type GoogleCalendarSyncResult = {

@@ -75,6 +75,10 @@ const aiPreferencesSchemaPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../migrations/0010_ai_user_preferences.sql"
 );
+const notificationSuppressedSchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0011_notification_suppressed_status.sql"
+);
 
 type StoreFixture = {
   name: string;
@@ -107,7 +111,8 @@ const fixtures: StoreFixture[] = [
         milestone7SchemaPath,
         milestone7RulesSchemaPath,
         milestone7AiSchemaPath,
-        aiPreferencesSchemaPath
+        aiPreferencesSchemaPath,
+        notificationSuppressedSchemaPath
       ]);
       return {
         store: new D1DentLinkStore(db),
@@ -1617,6 +1622,177 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       owner.session.token
     );
     expect(notifications.notifications[0]?.ai).toMatchObject({ status: "disabled" });
+  });
+
+  it("applies per-account AI overrides, suppresses below-threshold notifications, and reprocesses same-day stored data idempotently", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-ai-reprocess@example.com");
+    const now = "2026-07-16T16:00:00.000Z";
+    const account = await store.createConnectorAccount(
+      owner.user.id,
+      {
+        connectorKey: "gmail",
+        displayName: "Gmail owner@example.test",
+        settings: { googleEmail: "owner@example.test" },
+        credentialRef: "credential_ref_test",
+        credentialStatus: "configured"
+      },
+      now
+    );
+    const notification = await store.createNotification(
+      owner.user.id,
+      {
+        title: "Insurance update",
+        summary: "Stored body",
+        body: "Created from stored normalized data",
+        source: "connector",
+        sourceLabel: "Gmail",
+        severity: "medium",
+        email: {
+          accountId: account.id,
+          provider: "gmail",
+          providerMessageId: "message-1",
+          messageId: "<message-1@example.test>",
+          xGmMsgId: null,
+          senderAddress: "clinic@example.test",
+          senderDisplayName: "Clinic",
+          recipients: ["owner@example.test"],
+          subject: "Insurance update",
+          receivedAt: now,
+          labels: ["INBOX"],
+          unread: true,
+          automatedSender: false,
+          mailingList: false,
+          attachments: [],
+          snippet: "Please review your insurance update.",
+          normalizedBodyHash: null,
+          sourceUrl: "https://mail.google.com/mail/u/0/#inbox/message-1"
+        }
+      },
+      now
+    );
+    await store.createConnectorSourceRecord(
+      owner.user.id,
+      {
+        accountId: account.id,
+        sourceExternalId: "message-1",
+        sourceType: "email",
+        payloadHash: "hash-1",
+        normalizedPayload: {
+          provider: "gmail",
+          provider_item_id: "message-1",
+          received_at: now,
+          labels: ["INBOX"],
+          unread: true,
+          sender: "Clinic <clinic@example.test>",
+          sender_address: "clinic@example.test",
+          subject: "Insurance update",
+          recipients: ["owner@example.test"],
+          normalized_body: "Please review your insurance update.",
+          notification_id: notification.id,
+          connector_account: account.id
+        }
+      },
+      now
+    );
+
+    await requestJson(
+      store,
+      "PATCH",
+      "/v1/preferences",
+      {
+        patch: {
+          ai: {
+            globalPrompt: "Global billing guidance",
+            threshold: 80,
+            accountOverrides: [
+              {
+                accountId: account.id,
+                enabled: true,
+                prompt: "Account-specific insurance guidance",
+                threshold: 60
+              }
+            ]
+          }
+        }
+      },
+      owner.session.token
+    );
+
+    const aiInputs: unknown[] = [];
+    const env: Partial<ApiEnv> = {
+      OPENAI_API_KEY: "test-openai-key",
+      DENTLINK_AI_MODEL: "gpt-test-mini",
+      emailAiClient: {
+        async summarizeEmail(input) {
+          aiInputs.push(input);
+          return {
+            summary: "AI reprocessed insurance update.",
+            importance: 50,
+            category: "action_required" as const,
+            requiresAction: true,
+            suggestedAction: "Review",
+            deadline: null,
+            reason: "Stored source record requested review.",
+            outputTokens: 9
+          };
+        }
+      }
+    };
+
+    const reprocessed = await requestJson<{
+      status: string;
+      updated: number;
+      suppressed: number;
+      failed: number;
+      errors: unknown[];
+    }>(
+      store,
+      "POST",
+      "/v1/ai/reprocess",
+      { timezone: "UTC", accountId: account.id },
+      owner.session.token,
+      202,
+      env
+    );
+    expect(reprocessed.errors).toEqual([]);
+    expect(reprocessed).toMatchObject({ status: "success", updated: 1, suppressed: 1, failed: 0 });
+    expect(aiInputs).toHaveLength(1);
+    expect(JSON.stringify(aiInputs[0])).toContain("Account-specific insurance guidance");
+    expect(JSON.stringify(aiInputs[0])).not.toMatch(/threshold|60|80/i);
+
+    const normalInbox = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(normalInbox.notifications).toEqual([]);
+    const searchable = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications?includeSuppressed=true&search=insurance",
+      undefined,
+      owner.session.token
+    );
+    expect(searchable.notifications[0]).toMatchObject({
+      id: notification.id,
+      status: "suppressed",
+      summary: "AI reprocessed insurance update.",
+      ai: { importance: 50 }
+    });
+
+    await requestJson(
+      store,
+      "POST",
+      "/v1/ai/reprocess",
+      { timezone: "UTC", accountId: account.id },
+      owner.session.token,
+      202,
+      env
+    );
+    expect(aiInputs).toHaveLength(1);
   });
 
   it("creates IMAP notifications with fallback content when AI is disabled", async () => {

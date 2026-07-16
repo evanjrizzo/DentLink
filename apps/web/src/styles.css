@@ -393,17 +393,72 @@ textarea {
 
 .folder-browser {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  grid-template-columns: 1fr;
   gap: 8px;
 }
 
-.folder-browser button {
+.folder-browser > button,
+.folder-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   min-width: 0;
   border-left: 4px solid var(--accent);
   text-align: left;
+}
+
+.folder-row {
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface-bg);
+  padding: 6px;
+}
+
+.folder-row.selected,
+.folder-browser > button.selected {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-bg));
+}
+
+.folder-disclosure {
+  width: 34px;
+  min-width: 34px;
+  justify-content: center;
+}
+
+.folder-select-button {
+  flex: 1 1 auto;
+}
+
+.folder-actions,
+.folder-rename-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.folder-rename-form {
+  flex: 1 1 auto;
+}
+
+.folder-note-groups,
+.folder-note-group {
+  display: grid;
+  gap: 10px;
+}
+
+.folder-group-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--surface-bg) 94%, var(--accent));
+}
+
+.empty-state {
+  margin: 0;
+  color: var(--muted-text);
 }
 
 .tag-dropdown {
@@ -515,6 +570,7 @@ textarea {
   display: grid;
   gap: 10px;
   border: 1px solid #d7dce5;
+  border-left: 4px solid var(--source-accent, #d7dce5);
   border-radius: 8px;
   background: #ffffff;
   padding: 14px;
@@ -749,6 +805,11 @@ textarea {
   color: var(--dismiss-action);
 }
 
+.history-state.suppressed {
+  background: #fef3c7;
+  color: #92400e;
+}
+
 .notification-detail-panel,
 .settings-panel,
 .subsettings-panel {
@@ -794,8 +855,46 @@ textarea {
 
 .source-color-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 10px;
+}
+
+.source-color-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: end;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.source-color-row small {
+  color: var(--muted-text);
+}
+
+.account-ai-overrides,
+.account-ai-card,
+.ai-reprocess-result {
+  display: grid;
+  gap: 10px;
+}
+
+.account-ai-card,
+.ai-reprocess-result {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-bg);
+  padding: 12px;
+}
+
+.ai-reprocess-result.partial,
+.ai-reprocess-result.failed {
+  border-color: var(--warning);
+}
+
+.settings-back-button {
+  justify-self: start;
 }
 
 .settings-grid label,
@@ -1239,22 +1338,23 @@ textarea {
   display: inline-flex;
   align-items: center;
   width: max-content;
+  border: 1px solid color-mix(in srgb, var(--source-accent, #1d4ed8) 55%, transparent);
   border-radius: 999px;
   padding: 3px 8px;
-  background: #eef2ff;
-  color: #1d4ed8;
+  background: color-mix(in srgb, var(--source-accent, #1d4ed8) 12%, var(--surface-bg));
+  color: color-mix(in srgb, var(--source-accent, #1d4ed8) 78%, #0f172a);
   font-size: 12px;
   font-weight: 700;
 }
 
 .source-badge.local {
-  background: #ecfdf3;
-  color: #137a3a;
+  background: color-mix(in srgb, var(--source-accent, #137a3a) 12%, var(--surface-bg));
+  color: color-mix(in srgb, var(--source-accent, #137a3a) 78%, #0f172a);
 }
 
 .source-badge.note {
-  background: #f3e8ff;
-  color: #6d28d9;
+  background: color-mix(in srgb, var(--source-accent, #6d28d9) 12%, var(--surface-bg));
+  color: color-mix(in srgb, var(--source-accent, #6d28d9) 78%, #0f172a);
 }
 
 .annotation-flags {

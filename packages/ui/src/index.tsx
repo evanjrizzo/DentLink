@@ -27,6 +27,7 @@ export type NotesWorkspaceProps = {
 };
 
 const NOTE_TITLE_LIMIT = 72;
+const UNFILED_FOLDER_ID = "__unfiled";
 
 export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
   const [draft, setDraft] = useState<NoteInput>({
@@ -41,12 +42,44 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
   const [moreOptionsOpen, setMoreOptionsOpen] = useState(true);
   const [folderName, setFolderName] = useState("");
   const [tagName, setTagName] = useState("");
+  const [expandedFolders, setExpandedFolders] = useState<EntityId[]>([UNFILED_FOLDER_ID]);
+  const [renamingFolderId, setRenamingFolderId] = useState<EntityId | null>(null);
+  const [folderDraftName, setFolderDraftName] = useState("");
+  const [localError, setLocalError] = useState<string | null>(null);
   const sortedNotes = useMemo(() => [...props.notes].sort(compareNotes), [props.notes]);
+  const searchActive = props.search.trim().length > 0;
+  const displayedNotes = sortedNotes.filter((note) =>
+    props.selectedFolderId === null
+      ? true
+      : props.selectedFolderId === UNFILED_FOLDER_ID
+        ? !note.folderId
+        : note.folderId === props.selectedFolderId
+  );
   const editingNote = sortedNotes.find((note) => note.id === editingNoteId) ?? null;
+  const unfiledNotes = sortedNotes.filter((note) => !note.folderId);
+  const folderGroups = props.folders.map((folder) => ({
+    folder,
+    notes: sortedNotes.filter((note) => note.folderId === folder.id)
+  }));
+  const searchResultFolderIds = useMemo(() => {
+    if (!searchActive) return [];
+    return [
+      ...(unfiledNotes.length > 0 ? [UNFILED_FOLDER_ID] : []),
+      ...folderGroups.filter((group) => group.notes.length > 0).map((group) => group.folder.id)
+    ];
+  }, [folderGroups, searchActive, unfiledNotes.length]);
 
   useEffect(() => {
     if (props.openNoteId) setEditingNoteId(props.openNoteId);
   }, [props.openNoteId]);
+
+  useEffect(() => {
+    if (searchResultFolderIds.length === 0) return;
+    setExpandedFolders((current) => {
+      const next = Array.from(new Set([...current, ...searchResultFolderIds]));
+      return next.length === current.length ? current : next;
+    });
+  }, [searchResultFolderIds]);
 
   async function submitDraft(): Promise<void> {
     if (draft.title.trim().length === 0) return;
@@ -100,8 +133,10 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
                 onSubmit={(event) => {
                   event.preventDefault();
                   if (!folderName.trim()) return;
-                  void props.onCreateFolder(folderName);
-                  setFolderName("");
+                  void runFolderAction(async () => {
+                    await props.onCreateFolder(folderName);
+                    setFolderName("");
+                  });
                 }}
               >
                 <input
@@ -152,33 +187,116 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
           </label>
         ) : null}
 
-        <section className="folder-browser" aria-label="Note folders">
+        {localError ? (
+          <p className="app-error" role="alert">
+            {localError}
+          </p>
+        ) : null}
+
+        <section className="folder-browser file-viewer" aria-label="Note folders">
           <button
             type="button"
             className={props.selectedFolderId === null ? "selected" : ""}
             onClick={() => props.onFolderChange(null)}
           >
-            <span>Unfiled</span>
-            <strong>{props.notes.filter((note) => !note.folderId).length}</strong>
+            <span>All Notes</span>
+            <strong>{sortedNotes.length}</strong>
           </button>
-          {props.folders.map((folder) => (
-            <button
-              key={folder.id}
-              type="button"
-              className={props.selectedFolderId === folder.id ? "selected" : ""}
-              onClick={() => props.onFolderChange(folder.id)}
-            >
-              <span>{folder.name}</span>
-              <strong>{props.notes.filter((note) => note.folderId === folder.id).length}</strong>
-            </button>
-          ))}
+          <FolderRow
+            id={UNFILED_FOLDER_ID}
+            name="Unfiled"
+            count={unfiledNotes.length}
+            selected={props.selectedFolderId === UNFILED_FOLDER_ID}
+            expanded={expandedFolders.includes(UNFILED_FOLDER_ID)}
+            onSelect={() => props.onFolderChange(UNFILED_FOLDER_ID)}
+            onToggle={() => toggleExpanded(UNFILED_FOLDER_ID)}
+          />
+          {props.folders.map((folder) => {
+            const count = sortedNotes.filter((note) => note.folderId === folder.id).length;
+            return (
+              <FolderRow
+                key={folder.id}
+                id={folder.id}
+                name={folder.name}
+                count={count}
+                selected={props.selectedFolderId === folder.id}
+                expanded={expandedFolders.includes(folder.id)}
+                renaming={renamingFolderId === folder.id}
+                draftName={folderDraftName}
+                onDraftNameChange={setFolderDraftName}
+                onSelect={() => props.onFolderChange(folder.id)}
+                onToggle={() => toggleExpanded(folder.id)}
+                onRenameStart={() => {
+                  setRenamingFolderId(folder.id);
+                  setFolderDraftName(folder.name);
+                }}
+                onRenameCancel={() => {
+                  setRenamingFolderId(null);
+                  setFolderDraftName("");
+                }}
+                onRenameSubmit={() =>
+                  void runFolderAction(async () => {
+                    if (!folderDraftName.trim()) return;
+                    await props.onUpdateFolder?.(folder.id, folderDraftName);
+                    setRenamingFolderId(null);
+                    setFolderDraftName("");
+                  })
+                }
+                onDelete={() =>
+                  void runFolderAction(async () => {
+                    if (
+                      window.confirm(
+                        `Delete "${folder.name}" and move ${count} note${count === 1 ? "" : "s"} to Unfiled?`
+                      )
+                    ) {
+                      await props.onDeleteFolder?.(folder.id);
+                      props.onFolderChange(null);
+                    }
+                  })
+                }
+              />
+            );
+          })}
         </section>
 
-        <div className="note-list" aria-label="Notes">
-          {sortedNotes.map((note) => (
-            <NoteCard key={note.id} note={note} onOpenDetails={setEditingNoteId} {...props} />
-          ))}
-        </div>
+        <section className="folder-note-groups" aria-label="Folder contents">
+          {props.selectedFolderId === null ? (
+            <>
+              <FolderNoteGroup
+                title="Unfiled"
+                notes={unfiledNotes}
+                expanded={searchActive || expandedFolders.includes(UNFILED_FOLDER_ID)}
+                onToggle={() => toggleExpanded(UNFILED_FOLDER_ID)}
+                renderNote={(note) => (
+                  <NoteCard key={note.id} note={note} onOpenDetails={setEditingNoteId} {...props} />
+                )}
+              />
+              {folderGroups.map((group) => (
+                <FolderNoteGroup
+                  key={group.folder.id}
+                  title={group.folder.name}
+                  notes={group.notes}
+                  expanded={searchActive || expandedFolders.includes(group.folder.id)}
+                  onToggle={() => toggleExpanded(group.folder.id)}
+                  renderNote={(note) => (
+                    <NoteCard
+                      key={note.id}
+                      note={note}
+                      onOpenDetails={setEditingNoteId}
+                      {...props}
+                    />
+                  )}
+                />
+              ))}
+            </>
+          ) : (
+            <div className="note-list" aria-label="Notes">
+              {displayedNotes.map((note) => (
+                <NoteCard key={note.id} note={note} onOpenDetails={setEditingNoteId} {...props} />
+              ))}
+            </div>
+          )}
+        </section>
       </section>
       <button
         type="button"
@@ -341,12 +459,128 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
       {editingNote ? (
         <NoteDetailsPanel
           note={editingNote}
-          sortedNotes={sortedNotes}
+          sortedNotes={displayedNotes}
           {...props}
           onClose={() => setEditingNoteId(null)}
         />
       ) : null}
     </main>
+  );
+
+  function toggleExpanded(folderId: EntityId): void {
+    setExpandedFolders((current) =>
+      current.includes(folderId) ? current.filter((id) => id !== folderId) : [...current, folderId]
+    );
+  }
+
+  async function runFolderAction(action: () => Promise<void>): Promise<void> {
+    setLocalError(null);
+    try {
+      await action();
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : "Folder action failed.");
+    }
+  }
+}
+
+function FolderRow(props: {
+  id: EntityId;
+  name: string;
+  count: number;
+  selected: boolean;
+  expanded: boolean;
+  renaming?: boolean;
+  draftName?: string;
+  onDraftNameChange?: (value: string) => void;
+  onSelect: () => void;
+  onToggle: () => void;
+  onRenameStart?: () => void;
+  onRenameCancel?: () => void;
+  onRenameSubmit?: () => void;
+  onDelete?: () => void;
+}): ReactElement {
+  return (
+    <div className={`folder-row ${props.selected ? "selected" : ""}`}>
+      <button
+        type="button"
+        className="folder-disclosure"
+        aria-label={`${props.expanded ? "Collapse" : "Expand"} ${props.name}`}
+        aria-expanded={props.expanded}
+        onClick={props.onToggle}
+      >
+        {props.expanded ? "-" : "+"}
+      </button>
+      {props.renaming ? (
+        <form
+          className="folder-rename-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            props.onRenameSubmit?.();
+          }}
+        >
+          <input
+            aria-label={`Rename ${props.name}`}
+            value={props.draftName ?? ""}
+            onChange={(event) => props.onDraftNameChange?.(event.currentTarget.value)}
+          />
+          <button type="submit">Save</button>
+          <button type="button" onClick={props.onRenameCancel}>
+            Cancel
+          </button>
+        </form>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="folder-select-button"
+            aria-pressed={props.selected}
+            onClick={props.onSelect}
+          >
+            <span>{props.name}</span>
+            <strong>{props.count}</strong>
+          </button>
+          {props.id !== UNFILED_FOLDER_ID ? (
+            <div className="folder-actions">
+              <button type="button" onClick={props.onRenameStart}>
+                Rename
+              </button>
+              <button type="button" className="mini-danger" onClick={props.onDelete}>
+                Delete
+              </button>
+            </div>
+          ) : null}
+        </>
+      )}
+    </div>
+  );
+}
+
+function FolderNoteGroup(props: {
+  title: string;
+  notes: Note[];
+  expanded: boolean;
+  onToggle: () => void;
+  renderNote: (note: Note) => ReactElement;
+}): ReactElement {
+  return (
+    <section className="folder-note-group" aria-label={`${props.title} notes`}>
+      <button
+        type="button"
+        className="folder-group-heading"
+        aria-expanded={props.expanded}
+        onClick={props.onToggle}
+      >
+        <span>{props.expanded ? "-" : "+"}</span>
+        <strong>{props.title}</strong>
+        <span>{props.notes.length}</span>
+      </button>
+      {props.expanded ? (
+        <div className="note-list" aria-label={`${props.title} notes`}>
+          {props.notes.length === 0 ? <p className="empty-state">No notes here.</p> : null}
+          {props.notes.map((note) => props.renderNote(note))}
+        </div>
+      ) : null}
+    </section>
   );
 }
 

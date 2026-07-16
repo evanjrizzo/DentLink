@@ -38,7 +38,9 @@ Pinned items appear first. Manual ordering is global. Dragging does not create n
 Complete does not strongly penalize future items. Dismiss may contribute negative relevance feedback
 only when ranking-feedback controls record that intent. AI may adjust only within documented bounds.
 
-All fetched email remains searchable even when it is below the promotion threshold.
+All fetched email remains searchable even when it is below the promotion threshold. The AI importance
+threshold is applied after scoring, so the model scores independently and does not receive the
+threshold value.
 
 ## Complete and dismiss
 
@@ -54,3 +56,8 @@ Dismiss must not modify provider content. Drag reorder must not create negative 
 ## AI bounds
 
 AI may summarize, estimate urgency, extract due dates, detect likely action requests, suggest tasks, and apply bounded ranking adjustments. Deterministic rules and explicit user rules outrank AI output. Core ranking must work with AI disabled.
+
+Custom global or per-Gmail-account importance instructions supplement DentLink's fixed structured
+prompt. They cannot replace required output-schema, safety, normalization, or provider-neutral
+instructions. Prompt and threshold changes can trigger same-day reprocessing from stored normalized
+Gmail source records without refetching Gmail or duplicating notifications.

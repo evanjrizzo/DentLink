@@ -15,6 +15,7 @@ export type EmailAiInput = {
   body: string;
   receivedAt: string;
   labels: string[];
+  importanceInstruction?: string;
 };
 
 export type EmailAiResult = {
@@ -131,6 +132,10 @@ export function createOpenAIEmailAiClient(input: {
               role: "system",
               content:
                 "Summarize and classify one email for a personal notification dashboard. Return only valid JSON matching the schema. Importance is an integer from 0 through 100, where 100 means show immediately and 0 means likely noise."
+            },
+            {
+              role: "system",
+              content: `User importance guidance: ${email.importanceInstruction?.trim() || "Use DentLink's default importance guidance."}`
             },
             {
               role: "user",

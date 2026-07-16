@@ -10,6 +10,7 @@ import type {
   ConnectorAccount,
   ConnectorSyncAllResult,
   DentLinkChangeEvent,
+  EmailAiReprocessResult,
   EmailAiSettings,
   EntityId,
   GmailDiagnostics,
@@ -125,6 +126,8 @@ export function DentLinkNotesApp(): ReactElement {
     lastAttemptAt: null
   });
   const [preferences, setPreferences] = useState<UserPreferences | null>(null);
+  const [aiReprocessResult, setAiReprocessResult] = useState<EmailAiReprocessResult | null>(null);
+  const [aiReprocessRunning, setAiReprocessRunning] = useState(false);
   const [gmailEngineSaveStates, setGmailEngineSaveStates] = useState<
     Record<EntityId, GmailEngineSaveState>
   >({});
@@ -156,7 +159,6 @@ export function DentLinkNotesApp(): ReactElement {
   const noteMutationSequence = useRef(0);
   const notesListRef = useRef(notesList);
 
-  const filteredNotes = useMemo(() => notesList.notes, [notesList.notes]);
   const effectiveTimezone = preferences?.timezone.selected ?? detectedTimezone();
   const calendarEventsWithNotes = useMemo(
     () => [
@@ -238,15 +240,10 @@ export function DentLinkNotesApp(): ReactElement {
     document.title = auth ? `${pageTitle(view, settingsTab)} - DentLink` : "DentLink";
   }, [auth, view, settingsTab]);
 
-  async function loadNotes(
-    nextSearch = search,
-    nextFolderId = folderId,
-    nextTagIds = tagIds
-  ): Promise<void> {
+  async function loadNotes(nextSearch = search, nextTagIds = tagIds): Promise<void> {
     const requestId = (notesRequest.current += 1);
     const response = await client.listNotes({
       search: nextSearch || undefined,
-      folderId: nextFolderId ?? undefined,
       tagIds: nextTagIds
     });
     if (requestId === notesRequest.current) setNotesList(response);
@@ -255,7 +252,7 @@ export function DentLinkNotesApp(): ReactElement {
   async function loadNotifications(): Promise<void> {
     const requestId = (notificationsRequest.current += 1);
     const [response, aiSettings] = await Promise.all([
-      client.listNotifications(),
+      client.listNotifications({ includeSuppressed: true }),
       client.getEmailAiSettings().catch(() => null)
     ]);
     if (requestId === notificationsRequest.current) {
@@ -504,6 +501,7 @@ export function DentLinkNotesApp(): ReactElement {
       await loadNotes();
     } catch (caught) {
       handleFailure(caught);
+      throw caught;
     }
   }
 
@@ -513,6 +511,7 @@ export function DentLinkNotesApp(): ReactElement {
       await loadNotes();
     } catch (caught) {
       handleFailure(caught);
+      throw caught;
     }
   }
 
@@ -523,6 +522,7 @@ export function DentLinkNotesApp(): ReactElement {
       await loadNotes();
     } catch (caught) {
       handleFailure(caught);
+      throw caught;
     }
   }
 
@@ -561,6 +561,23 @@ export function DentLinkNotesApp(): ReactElement {
       if (patch.ai) await loadNotifications();
     } catch (caught) {
       handleFailure(caught);
+    }
+  }
+
+  async function reprocessEmailAi(accountId?: EntityId | null): Promise<void> {
+    setAiReprocessRunning(true);
+    setAiReprocessResult(null);
+    try {
+      const result = await client.reprocessEmailAi({
+        timezone: effectiveTimezone,
+        accountId: accountId ?? null
+      });
+      setAiReprocessResult(result);
+      await loadNotifications();
+    } catch (caught) {
+      handleFailure(caught);
+    } finally {
+      setAiReprocessRunning(false);
     }
   }
 
@@ -677,7 +694,7 @@ export function DentLinkNotesApp(): ReactElement {
     } catch (caught) {
       if (caught instanceof DentLinkApiError && caught.code === "version_mismatch") {
         try {
-          const latest = await client.listNotifications();
+          const latest = await client.listNotifications({ includeSuppressed: true });
           const current = latest.notifications.find((item) => item.id === notification.id);
           if (!current) {
             setNotifications(latest.notifications);
@@ -747,7 +764,7 @@ export function DentLinkNotesApp(): ReactElement {
     } catch (caught) {
       if (caught instanceof DentLinkApiError && caught.code === "version_mismatch") {
         try {
-          const latest = await client.listNotifications();
+          const latest = await client.listNotifications({ includeSuppressed: true });
           const latestById = new Map(latest.notifications.map((item) => [item.id, item]));
           await client.reorderNotifications(
             orderedNotifications
@@ -1283,6 +1300,8 @@ export function DentLinkNotesApp(): ReactElement {
           notifications={notifications}
           aiSettings={emailAiSettings}
           importanceThreshold={preferences?.ai.threshold ?? 0}
+          sourceColors={appearance.sourceColors}
+          webhooks={webhooks}
           onCreateNotification={createNotification}
           onUpdateNotification={updateNotification}
           onDeleteNotification={deleteNotification}
@@ -1294,6 +1313,7 @@ export function DentLinkNotesApp(): ReactElement {
         <CalendarWorkspace
           events={calendarEventsWithNotes}
           accounts={connectorAccounts}
+          sourceColors={appearance.sourceColors}
           mode={calendarMode}
           selectedDate={calendarDate}
           source={calendarSource}
@@ -1322,7 +1342,7 @@ export function DentLinkNotesApp(): ReactElement {
       ) : null}
       {view === "notes" ? (
         <NotesWorkspace
-          notes={filteredNotes}
+          notes={notesList.notes}
           folders={notesList.folders}
           tags={notesList.tags}
           selectedFolderId={folderId}
@@ -1330,18 +1350,17 @@ export function DentLinkNotesApp(): ReactElement {
           search={search}
           onSearchChange={(nextSearch) => {
             setSearch(nextSearch);
-            void loadNotes(nextSearch, folderId, tagIds);
+            void loadNotes(nextSearch, tagIds);
           }}
           onFolderChange={(nextFolderId) => {
             setFolderId(nextFolderId);
-            void loadNotes(search, nextFolderId, tagIds);
           }}
           onTagToggle={(tagId) => {
             const nextTagIds = tagIds.includes(tagId)
               ? tagIds.filter((item) => item !== tagId)
               : [...tagIds, tagId];
             setTagIds(nextTagIds);
-            void loadNotes(search, folderId, nextTagIds);
+            void loadNotes(search, nextTagIds);
           }}
           onCreateFolder={createFolder}
           onUpdateFolder={updateFolder}
@@ -1369,6 +1388,9 @@ export function DentLinkNotesApp(): ReactElement {
           onPreferencesChange={updatePreferences}
           aiSettings={emailAiSettings}
           onEmailAiEnabledChange={updateEmailAiEnabled}
+          aiReprocessResult={aiReprocessResult}
+          aiReprocessRunning={aiReprocessRunning}
+          onReprocessEmailAi={reprocessEmailAi}
           accounts={connectorAccounts}
           webhooks={webhooks}
           webhookDraft={webhookDraft}
@@ -1579,6 +1601,8 @@ function NotificationsView(props: {
   notifications: Notification[];
   aiSettings: EmailAiSettings | null;
   importanceThreshold: number;
+  sourceColors: Record<string, string>;
+  webhooks: Array<WebhookEndpoint & { ingestUrl: string }>;
   onCreateNotification: (input: NotificationInput) => Promise<void>;
   onUpdateNotification: (
     notification: Notification,
@@ -1591,6 +1615,7 @@ function NotificationsView(props: {
   const [rankingMode, setRankingMode] = useState(false);
   const [sortMode, setSortMode] = useState<NotificationSortMode>("recommended");
   const [listMode, setListMode] = useState<"active" | "history">("active");
+  const [notificationSearch, setNotificationSearch] = useState("");
   const [expandedId, setExpandedId] = useState<EntityId | null>(null);
   const [showFullBodyIds, setShowFullBodyIds] = useState<EntityId[]>([]);
   const [draft, setDraft] = useState<NotificationInput>({
@@ -1598,15 +1623,25 @@ function NotificationsView(props: {
     summary: "",
     severity: "info"
   });
-  const visibleNotifications = props.notifications.filter((notification) =>
-    listMode === "history"
-      ? notification.status === "dismissed" || notification.status === "done"
-      : notification.status === "active" &&
-        (props.debugMode ||
-          notification.ai.importance === null ||
-          notification.ai.importance === undefined ||
-          notification.ai.importance >= props.importanceThreshold)
-  );
+  const visibleNotifications = props.notifications.filter((notification) => {
+    const searchMatches =
+      !notificationSearch.trim() ||
+      JSON.stringify({
+        title: notification.title,
+        summary: notification.summary,
+        sender: notification.email?.senderDisplayName,
+        subject: notification.email?.subject,
+        category: notification.ai?.category
+      })
+        .toLowerCase()
+        .includes(notificationSearch.trim().toLowerCase());
+    if (!searchMatches) return false;
+    if (listMode === "history")
+      return notification.status === "dismissed" || notification.status === "done";
+    if (notification.status === "suppressed")
+      return props.debugMode || Boolean(notificationSearch.trim());
+    return notification.status === "active";
+  });
   const sorted = sortNotifications(visibleNotifications, sortMode);
   const selectedNotification = sorted.find((item) => item.id === expandedId) ?? null;
   const selectedIndex = selectedNotification ? sorted.indexOf(selectedNotification) : -1;
@@ -1654,6 +1689,14 @@ function NotificationsView(props: {
           </button>
         ) : null}
       </div>
+      <label className="field notification-search">
+        <span>Search notifications</span>
+        <input
+          aria-label="Search notifications"
+          value={notificationSearch}
+          onChange={(event) => setNotificationSearch(event.currentTarget.value)}
+        />
+      </label>
       {props.debugMode ? (
         <>
           <section className="ai-settings-panel" aria-label="Email AI settings">
@@ -1720,6 +1763,7 @@ function NotificationsView(props: {
         <article
           key={notification.id}
           className={`notification-card compact-notification ${notification.status} importance-${importanceBand(notification)}`}
+          style={notificationAccentStyle(notification, props.sourceColors, props.webhooks)}
         >
           <button
             type="button"
@@ -1741,6 +1785,9 @@ function NotificationsView(props: {
               <span className="action-required">Action required</span>
             ) : null}
             {listMode === "history" ? <HistoryStateBadge notification={notification} /> : null}
+            {notification.status === "suppressed" ? (
+              <span className="history-state suppressed">Below threshold</span>
+            ) : null}
           </button>
           <NotificationQuickActions
             notification={notification}
@@ -1903,7 +1950,10 @@ function NotificationQuickActions(props: {
 }): ReactElement {
   const notification = props.notification;
   const actionable = isActionableNotification(notification);
-  const isHistory = notification.status === "dismissed" || notification.status === "done";
+  const isHistory =
+    notification.status === "dismissed" ||
+    notification.status === "done" ||
+    notification.status === "suppressed";
   return (
     <div className={`notification-touch-actions ${props.expanded ? "expanded" : ""}`}>
       <IconButton
@@ -1964,6 +2014,9 @@ function HistoryStateBadge(props: { notification: Notification }): ReactElement 
         Dismissed {notification.dismissedAt ? relativeTime(notification.dismissedAt) : ""}
       </span>
     );
+  }
+  if (notification.status === "suppressed") {
+    return <span className="history-state suppressed">Below threshold</span>;
   }
   return null;
 }
@@ -2180,6 +2233,7 @@ function WebhooksView(props: {
 function CalendarWorkspace(props: {
   events: CalendarEvent[];
   accounts: ConnectorAccount[];
+  sourceColors: Record<string, string>;
   mode: CalendarMode;
   selectedDate: string;
   source: CalendarSourceFilter;
@@ -2249,13 +2303,18 @@ function CalendarWorkspace(props: {
         <PlusIcon />
       </button>
       {props.mode === "agenda" ? (
-        <AgendaCalendarView events={visibleEvents} actions={eventActions} />
+        <AgendaCalendarView
+          events={visibleEvents}
+          actions={eventActions}
+          sourceColors={props.sourceColors}
+        />
       ) : null}
       {props.mode === "day" ? (
         <DayCalendarView
           events={visibleEvents}
           selectedDate={props.selectedDate}
           actions={eventActions}
+          sourceColors={props.sourceColors}
         />
       ) : null}
       {props.mode === "week" ? (
@@ -2263,6 +2322,7 @@ function CalendarWorkspace(props: {
           events={visibleEvents}
           selectedDate={props.selectedDate}
           actions={eventActions}
+          sourceColors={props.sourceColors}
         />
       ) : null}
       {props.mode === "month" ? (
@@ -2272,6 +2332,7 @@ function CalendarWorkspace(props: {
           onDateChange={props.onDateChange}
           onModeChange={props.onModeChange}
           actions={eventActions}
+          sourceColors={props.sourceColors}
         />
       ) : null}
       {selectedEvent ? (
@@ -2284,6 +2345,7 @@ function CalendarWorkspace(props: {
             event={selectedEvent}
             onClose={() => setSelectedEvent(null)}
             actions={eventActions}
+            sourceColors={props.sourceColors}
           />
         </div>
       ) : null}
@@ -2714,13 +2776,20 @@ function IcsControls(props: {
 function AgendaCalendarView(props: {
   events: CalendarEvent[];
   actions: CalendarEventActions;
+  sourceColors: Record<string, string>;
 }): ReactElement {
   const sorted = [...props.events].sort(compareEventsByStart);
   if (sorted.length === 0) return <p>No events in this range.</p>;
   return (
     <section className="agenda-view" aria-label="Agenda events">
       {sorted.map((event) => (
-        <CalendarEventCard key={event.id} event={event} actions={props.actions} detailed />
+        <CalendarEventCard
+          key={event.id}
+          event={event}
+          actions={props.actions}
+          sourceColors={props.sourceColors}
+          detailed
+        />
       ))}
     </section>
   );
@@ -2730,6 +2799,7 @@ function DayCalendarView(props: {
   events: CalendarEvent[];
   selectedDate: string;
   actions: CalendarEventActions;
+  sourceColors: Record<string, string>;
 }): ReactElement {
   const allDayEvents = props.events.filter((event) => isAllDayOnDate(event, props.selectedDate));
   const timedEvents = layoutTimedEvents(
@@ -2742,7 +2812,12 @@ function DayCalendarView(props: {
         <div className="calendar-chip-row">
           {allDayEvents.length === 0 ? <span>No all-day events</span> : null}
           {allDayEvents.map((event) => (
-            <EventChip key={event.id} event={event} actions={props.actions} />
+            <EventChip
+              key={event.id}
+              event={event}
+              actions={props.actions}
+              sourceColors={props.sourceColors}
+            />
           ))}
         </div>
       </div>
@@ -2753,7 +2828,12 @@ function DayCalendarView(props: {
             <div key={hour} className="time-grid-line" aria-hidden="true" />
           ))}
           {timedEvents.map((layout) => (
-            <TimedEventBlock key={layout.event.id} layout={layout} actions={props.actions} />
+            <TimedEventBlock
+              key={layout.event.id}
+              layout={layout}
+              actions={props.actions}
+              sourceColors={props.sourceColors}
+            />
           ))}
         </div>
       </div>
@@ -2765,6 +2845,7 @@ function WeekCalendarView(props: {
   events: CalendarEvent[];
   selectedDate: string;
   actions: CalendarEventActions;
+  sourceColors: Record<string, string>;
 }): ReactElement {
   const days = weekDays(props.selectedDate);
   return (
@@ -2787,7 +2868,12 @@ function WeekCalendarView(props: {
             {props.events
               .filter((event) => isAllDayOnDate(event, day.key))
               .map((event) => (
-                <EventChip key={event.id} event={event} actions={props.actions} />
+                <EventChip
+                  key={event.id}
+                  event={event}
+                  actions={props.actions}
+                  sourceColors={props.sourceColors}
+                />
               ))}
           </div>
         ))}
@@ -2799,7 +2885,12 @@ function WeekCalendarView(props: {
             ))}
             {layoutTimedEvents(props.events.filter((event) => isTimedOnDate(event, day.key))).map(
               (layout) => (
-                <TimedEventBlock key={layout.event.id} layout={layout} actions={props.actions} />
+                <TimedEventBlock
+                  key={layout.event.id}
+                  layout={layout}
+                  actions={props.actions}
+                  sourceColors={props.sourceColors}
+                />
               )
             )}
           </div>
@@ -2815,6 +2906,7 @@ function MonthCalendarView(props: {
   onDateChange: (date: string) => void;
   onModeChange: (mode: CalendarMode) => void;
   actions: CalendarEventActions;
+  sourceColors: Record<string, string>;
 }): ReactElement {
   const cells = monthCells(props.selectedDate);
   const currentMonth = props.selectedDate.slice(0, 7);
@@ -2847,7 +2939,13 @@ function MonthCalendarView(props: {
             </button>
             <div className="month-events">
               {visible.map((event) => (
-                <EventChip key={event.id} event={event} actions={props.actions} compact />
+                <EventChip
+                  key={event.id}
+                  event={event}
+                  actions={props.actions}
+                  sourceColors={props.sourceColors}
+                  compact
+                />
               ))}
               {events.length > visible.length ? (
                 <button
@@ -2872,6 +2970,7 @@ function MonthCalendarView(props: {
 function CalendarEventCard(props: {
   event: CalendarEvent;
   actions: CalendarEventActions;
+  sourceColors: Record<string, string>;
   detailed?: boolean;
 }): ReactElement {
   const event = props.event;
@@ -2879,11 +2978,11 @@ function CalendarEventCard(props: {
     <article
       className={`calendar-card ${event.source} ${event.status}`}
       aria-label={`Calendar event ${event.title}`}
-      style={eventAccentStyle(event)}
+      style={eventAccentStyle(event, props.sourceColors)}
     >
       <div className="calendar-card-header">
         <strong>{event.title}</strong>
-        <SourceBadge event={event} />
+        <SourceBadge event={event} sourceColors={props.sourceColors} />
       </div>
       <div className="calendar-time">
         <time dateTime={event.startAt}>{formatEventStart(event)}</time>
@@ -2901,13 +3000,14 @@ function CalendarEventCard(props: {
 function EventChip(props: {
   event: CalendarEvent;
   actions: CalendarEventActions;
+  sourceColors: Record<string, string>;
   compact?: boolean;
 }): ReactElement {
   return (
     <button
       type="button"
       className={`event-chip ${props.event.source}`}
-      style={eventAccentStyle(props.event)}
+      style={eventAccentStyle(props.event, props.sourceColors)}
       onClick={() => props.actions.onSelectEvent(props.event)}
     >
       {!props.event.allDay && !props.compact ? <span>{formatEventTime(props.event)}</span> : null}
@@ -2920,6 +3020,7 @@ function EventChip(props: {
 function TimedEventBlock(props: {
   layout: TimedLayoutEvent;
   actions: CalendarEventActions;
+  sourceColors: Record<string, string>;
 }): ReactElement {
   const left = (props.layout.column / props.layout.columns) * 100;
   const width = 100 / props.layout.columns;
@@ -2928,7 +3029,7 @@ function TimedEventBlock(props: {
       type="button"
       className={`timed-event ${props.layout.event.source}`}
       style={{
-        ...eventAccentStyle(props.layout.event),
+        ...eventAccentStyle(props.layout.event, props.sourceColors),
         top: `${props.layout.top}px`,
         height: `${props.layout.height}px`,
         left: `calc(${left}% + 4px)`,
@@ -2946,6 +3047,7 @@ function EventDetailsPanel(props: {
   event: CalendarEvent;
   actions: CalendarEventActions;
   onClose: () => void;
+  sourceColors: Record<string, string>;
 }): ReactElement {
   const event = props.event;
   return (
@@ -2960,7 +3062,7 @@ function EventDetailsPanel(props: {
         <h2>{event.title}</h2>
         <IconButton label="Close event details" icon="close" onClick={props.onClose} />
       </div>
-      <SourceBadge event={event} />
+      <SourceBadge event={event} sourceColors={props.sourceColors} />
       <dl>
         <dt>Date and time</dt>
         <dd>
@@ -3076,8 +3178,18 @@ function EventActions(props: {
   );
 }
 
-function SourceBadge(props: { event: CalendarEvent }): ReactElement {
-  return <span className={`source-badge ${props.event.source}`}>{sourceLabel(props.event)}</span>;
+function SourceBadge(props: {
+  event: CalendarEvent;
+  sourceColors: Record<string, string>;
+}): ReactElement {
+  return (
+    <span
+      className={`source-badge ${props.event.source}`}
+      style={sourceBadgeStyle(calendarSourceColor(props.event, props.sourceColors))}
+    >
+      {sourceLabel(props.event)}
+    </span>
+  );
 }
 
 function AnnotationSummary(props: { event: CalendarEvent }): ReactElement | null {
@@ -3229,14 +3341,73 @@ function compareEventsByStart(left: CalendarEvent, right: CalendarEvent): number
   return left.startAt.localeCompare(right.startAt) || left.title.localeCompare(right.title);
 }
 
-function eventAccentStyle(event: CalendarEvent): CSSProperties {
-  const color =
-    event.source === "note"
-      ? event.color || "#7c3aed"
-      : event.source === "local"
-        ? event.color || "#2f855a"
-        : "#2563eb";
-  return { "--event-accent": color } as CSSProperties;
+function eventAccentStyle(
+  event: CalendarEvent,
+  sourceColors: Record<string, string>
+): CSSProperties {
+  return sourceAccentStyle(calendarSourceColor(event, sourceColors), "--event-accent");
+}
+
+function notificationAccentStyle(
+  notification: Notification,
+  sourceColors: Record<string, string>,
+  webhooks: Array<WebhookEndpoint & { ingestUrl: string }>
+): CSSProperties {
+  return sourceAccentStyle(
+    notificationSourceColor(notification, sourceColors, webhooks),
+    "--source-accent"
+  );
+}
+
+function sourceBadgeStyle(color: string): CSSProperties {
+  return {
+    "--source-accent": color,
+    borderColor: color
+  } as CSSProperties;
+}
+
+function sourceAccentStyle(color: string, variableName: string): CSSProperties {
+  return {
+    [variableName]: color,
+    "--source-accent": color
+  } as CSSProperties;
+}
+
+function calendarSourceColor(event: CalendarEvent, sourceColors: Record<string, string>): string {
+  if (event.source === "note") return event.color || sourceColors.note || "#7c3aed";
+  if (event.source === "local") return event.color || sourceColors.local || "#2f855a";
+  if (event.connectorAccountId) {
+    const accountColor = sourceColors[`google-calendar:${event.connectorAccountId}`];
+    if (accountColor) return accountColor;
+  }
+  return sourceColors["google-calendar"] || "#2563eb";
+}
+
+function notificationSourceColor(
+  notification: Notification,
+  sourceColors: Record<string, string>,
+  webhooks: Array<WebhookEndpoint & { ingestUrl: string }>
+): string {
+  const category = notification.ai?.category;
+  if (category) {
+    const categoryColor = sourceColors[`category:${category}`];
+    if (categoryColor) return categoryColor;
+  }
+  if (notification.email?.accountId) {
+    const accountColor = sourceColors[`gmail:${notification.email.accountId}`];
+    if (accountColor) return accountColor;
+  }
+  if (notification.email) return sourceColors.gmail || "#1d4ed8";
+  if (notification.source === "webhook") {
+    const webhook = webhooks.find((endpoint) => endpoint.name === notification.sourceLabel);
+    if (webhook) {
+      const webhookColor = sourceColors[`webhook:${webhook.id}`];
+      if (webhookColor) return webhookColor;
+    }
+    return sourceColors.webhook || "#b45309";
+  }
+  if (notification.source === "system") return sourceColors["category:system"] || "#64748b";
+  return sourceColors.local || "#2563eb";
 }
 
 function sourceLabel(event: CalendarEvent): string {
@@ -3638,6 +3809,9 @@ function SettingsView(props: {
   ) => Promise<void>;
   aiSettings: EmailAiSettings | null;
   onEmailAiEnabledChange: (enabled: boolean) => Promise<void>;
+  aiReprocessResult: EmailAiReprocessResult | null;
+  aiReprocessRunning: boolean;
+  onReprocessEmailAi: (accountId?: EntityId | null) => Promise<void>;
   accounts: ConnectorAccount[];
   webhooks: Array<WebhookEndpoint & { ingestUrl: string }>;
   webhookDraft: { name: string; slug: string; destination: WebhookDestination };
@@ -3677,6 +3851,15 @@ function SettingsView(props: {
   const gmailAccounts = props.accounts.filter((account) => account.connectorKey === "gmail");
   return (
     <main className="settings-shell">
+      {props.selectedTab !== "general" ? (
+        <button
+          type="button"
+          className="settings-back-button"
+          onClick={() => props.onTabChange("general")}
+        >
+          Back to Settings
+        </button>
+      ) : null}
       <nav className="settings-tabs" aria-label="Settings sections">
         {(
           [
@@ -3714,14 +3897,20 @@ function SettingsView(props: {
         <AppearanceSettingsPanel
           appearance={props.appearance}
           onAppearanceChange={props.onAppearanceChange}
+          accounts={props.accounts}
+          webhooks={props.webhooks}
         />
       ) : null}
       {props.selectedTab === "ai" ? (
         <AiSettingsPanel
           settings={props.aiSettings}
           preferences={props.preferences}
+          accounts={gmailAccounts}
+          reprocessResult={props.aiReprocessResult}
+          reprocessRunning={props.aiReprocessRunning}
           onPreferencesChange={props.onPreferencesChange}
           onEnabledChange={props.onEmailAiEnabledChange}
+          onReprocess={props.onReprocessEmailAi}
         />
       ) : null}
       {props.selectedTab === "connections" ? (
@@ -3854,6 +4043,8 @@ function TimezoneSettingsPanel(props: {
 function AppearanceSettingsPanel(props: {
   appearance: AppearancePreferences;
   onAppearanceChange: (appearance: AppearancePreferences) => void;
+  accounts: ConnectorAccount[];
+  webhooks: Array<WebhookEndpoint & { ingestUrl: string }>;
 }): ReactElement {
   const update = (patch: Partial<AppearancePreferences>) =>
     props.onAppearanceChange({ ...props.appearance, ...patch });
@@ -3938,6 +4129,8 @@ function AppearanceSettingsPanel(props: {
       <SourceColorSettings
         appearance={props.appearance}
         onAppearanceChange={props.onAppearanceChange}
+        accounts={props.accounts}
+        webhooks={props.webhooks}
       />
       <label className="debug-toggle">
         <input
@@ -3957,42 +4150,147 @@ function AppearanceSettingsPanel(props: {
 function SourceColorSettings(props: {
   appearance: AppearancePreferences;
   onAppearanceChange: (appearance: AppearancePreferences) => void;
+  accounts: ConnectorAccount[];
+  webhooks: Array<WebhookEndpoint & { ingestUrl: string }>;
 }): ReactElement {
-  const entries = Object.entries(props.appearance.sourceColors);
+  const defaultColors = defaultAppearance().sourceColors;
+  const entries = sourceColorEntries(props.accounts, props.webhooks, props.appearance.sourceColors);
+  const updateColor = (source: string, color: string) =>
+    props.onAppearanceChange({
+      ...props.appearance,
+      sourceColors: {
+        ...props.appearance.sourceColors,
+        [source]: color
+      }
+    });
+  const resetColor = (source: string) => {
+    const next = { ...props.appearance.sourceColors };
+    if (defaultColors[source]) next[source] = defaultColors[source];
+    else delete next[source];
+    props.onAppearanceChange({ ...props.appearance, sourceColors: next });
+  };
   return (
     <section className="subsettings-panel" aria-label="Source colors">
       <h3>Source Colors</h3>
       <div className="source-color-grid">
-        {entries.map(([source, color]) => (
-          <label key={source}>
-            {source}
-            <input
-              type="color"
-              value={color}
-              onChange={(event) =>
-                props.onAppearanceChange({
-                  ...props.appearance,
-                  sourceColors: {
-                    ...props.appearance.sourceColors,
-                    [source]: event.currentTarget.value
-                  }
-                })
-              }
-            />
-          </label>
+        {entries.map((entry) => (
+          <div key={entry.key} className="source-color-row">
+            <label>
+              <span>{entry.label}</span>
+              <small>{entry.kind}</small>
+              <input
+                type="color"
+                value={entry.color}
+                onChange={(event) => updateColor(entry.key, event.currentTarget.value)}
+              />
+            </label>
+            <button type="button" onClick={() => resetColor(entry.key)}>
+              Reset
+            </button>
+          </div>
         ))}
       </div>
+      <button
+        type="button"
+        onClick={() =>
+          props.onAppearanceChange({
+            ...props.appearance,
+            sourceColors: defaultAppearance().sourceColors
+          })
+        }
+      >
+        Reset all source colors
+      </button>
     </section>
   );
+}
+
+function sourceColorEntries(
+  accounts: ConnectorAccount[],
+  webhooks: Array<WebhookEndpoint & { ingestUrl: string }>,
+  colors: Record<string, string>
+): Array<{ key: string; label: string; kind: string; color: string }> {
+  const fallback = defaultAppearance().sourceColors;
+  const gmailColor = fallback.gmail ?? "#1d4ed8";
+  const calendarColor = fallback["google-calendar"] ?? "#2563eb";
+  const localColor = fallback.local ?? "#137a3a";
+  const noteColor = fallback.note ?? "#7c3aed";
+  const webhookColor = fallback.webhook ?? "#b45309";
+  const entries: Array<{ key: string; label: string; kind: string; color: string }> = [
+    { key: "gmail", label: "Gmail", kind: "source type", color: colors.gmail ?? gmailColor },
+    {
+      key: "google-calendar",
+      label: "Google Calendar",
+      kind: "source type",
+      color: colors["google-calendar"] ?? calendarColor
+    },
+    { key: "local", label: "Local events", kind: "source type", color: colors.local ?? localColor },
+    { key: "note", label: "Notes", kind: "source type", color: colors.note ?? noteColor },
+    {
+      key: "webhook",
+      label: "Webhooks",
+      kind: "source type",
+      color: colors.webhook ?? webhookColor
+    },
+    {
+      key: "category:action_required",
+      label: "Action required",
+      kind: "notification category",
+      color: colors["category:action_required"] ?? "#b91c1c"
+    },
+    {
+      key: "category:newsletter",
+      label: "Newsletter",
+      kind: "notification category",
+      color: colors["category:newsletter"] ?? "#0f766e"
+    },
+    {
+      key: "category:receipt",
+      label: "Receipt",
+      kind: "notification category",
+      color: colors["category:receipt"] ?? "#a16207"
+    },
+    {
+      key: "category:personal",
+      label: "Personal",
+      kind: "notification category",
+      color: colors["category:personal"] ?? "#7c3aed"
+    }
+  ];
+  for (const account of accounts) {
+    if (account.connectorKey === "gmail" || account.connectorKey === "google-calendar") {
+      const key = `${account.connectorKey}:${account.id}`;
+      entries.push({
+        key,
+        label: account.displayName,
+        kind: account.connectorKey === "gmail" ? "Gmail account" : "calendar account",
+        color: colors[key] ?? (account.connectorKey === "gmail" ? gmailColor : calendarColor)
+      });
+    }
+  }
+  for (const webhook of webhooks) {
+    const key = `webhook:${webhook.id}`;
+    entries.push({
+      key,
+      label: webhook.name,
+      kind: "webhook",
+      color: colors[key] ?? webhookColor
+    });
+  }
+  return entries;
 }
 
 function AiSettingsPanel(props: {
   settings: EmailAiSettings | null;
   preferences: UserPreferences | null;
+  accounts: ConnectorAccount[];
+  reprocessResult: EmailAiReprocessResult | null;
+  reprocessRunning: boolean;
   onPreferencesChange: (
     patch: Parameters<DentLinkApiClient["updatePreferences"]>[0]
   ) => Promise<void>;
   onEnabledChange: (enabled: boolean) => Promise<void>;
+  onReprocess: (accountId?: EntityId | null) => Promise<void>;
 }): ReactElement {
   const settings = props.settings;
   const unavailable = Boolean(settings && !settings.available);
@@ -4032,7 +4330,11 @@ function AiSettingsPanel(props: {
       </div>
       <AiImportanceControls
         preferences={props.preferences}
+        accounts={props.accounts}
+        reprocessResult={props.reprocessResult}
+        reprocessRunning={props.reprocessRunning}
         onPreferencesChange={props.onPreferencesChange}
+        onReprocess={props.onReprocess}
       />
       <p>
         When enabled, DentLink sends bounded normalized email text, subject, and safe metadata to
@@ -4045,9 +4347,13 @@ function AiSettingsPanel(props: {
 
 function AiImportanceControls(props: {
   preferences: UserPreferences | null;
+  accounts: ConnectorAccount[];
+  reprocessResult: EmailAiReprocessResult | null;
+  reprocessRunning: boolean;
   onPreferencesChange: (
     patch: Parameters<DentLinkApiClient["updatePreferences"]>[0]
   ) => Promise<void>;
+  onReprocess: (accountId?: EntityId | null) => Promise<void>;
 }): ReactElement {
   const ai = props.preferences?.ai ?? {
     globalPrompt: "",
@@ -4056,18 +4362,26 @@ function AiImportanceControls(props: {
     accountOverrides: []
   };
   const [presetName, setPresetName] = useState("");
+  function overrideFor(accountId: EntityId) {
+    return ai.accountOverrides.find((override) => override.accountId === accountId);
+  }
+  async function saveAi(next: typeof ai): Promise<void> {
+    await props.onPreferencesChange({ ai: next });
+  }
   return (
     <section className="subsettings-panel" aria-label="AI importance settings">
       <h3>Importance Scoring</h3>
+      <p>
+        Prompt and threshold changes affect future scoring. Reprocess today to apply them to stored
+        same-day Gmail items without refetching Gmail.
+      </p>
       <label className="field">
         <span>Global importance instruction</span>
         <textarea
           maxLength={2000}
           value={ai.globalPrompt}
           onChange={(event) =>
-            void props.onPreferencesChange({
-              ai: { ...ai, globalPrompt: event.currentTarget.value }
-            })
+            void saveAi({ ...ai, globalPrompt: event.currentTarget.value.slice(0, 2000) })
           }
         />
         <span className="character-count">{2000 - ai.globalPrompt.length} characters left</span>
@@ -4079,13 +4393,151 @@ function AiImportanceControls(props: {
           min="0"
           max="100"
           value={ai.threshold}
-          onChange={(event) =>
-            void props.onPreferencesChange({
-              ai: { ...ai, threshold: Number(event.currentTarget.value) }
-            })
-          }
+          onChange={(event) => void saveAi({ ...ai, threshold: Number(event.currentTarget.value) })}
         />
       </label>
+      <button
+        type="button"
+        disabled={props.reprocessRunning}
+        onClick={() => void props.onReprocess(null)}
+      >
+        {props.reprocessRunning ? "Reprocessing..." : "Reprocess today's Gmail"}
+      </button>
+      {props.reprocessResult ? (
+        <div className={`ai-reprocess-result ${props.reprocessResult.status}`} role="status">
+          <strong>Reprocess {props.reprocessResult.status}</strong>
+          <span>
+            {props.reprocessResult.updated} updated, {props.reprocessResult.suppressed} suppressed,{" "}
+            {props.reprocessResult.restored} restored, {props.reprocessResult.failed} failed
+          </span>
+          {props.reprocessResult.errors.length > 0 ? (
+            <button type="button" onClick={() => void props.onReprocess(null)}>
+              Retry
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {props.accounts.length > 0 ? (
+        <section className="account-ai-overrides" aria-label="Per-account AI overrides">
+          <h4>Gmail Account Overrides</h4>
+          {props.accounts.map((account) => {
+            const override = overrideFor(account.id);
+            const inherited = !override?.enabled;
+            const prompt = inherited ? ai.globalPrompt : override.prompt;
+            const threshold = inherited ? ai.threshold : (override.threshold ?? ai.threshold);
+            return (
+              <section key={account.id} className="account-ai-card">
+                <div>
+                  <strong>{account.displayName}</strong>
+                  <span>{inherited ? "Inheriting global settings" : "Using account override"}</span>
+                </div>
+                <label className="debug-toggle">
+                  <input
+                    type="checkbox"
+                    checked={!inherited}
+                    onChange={(event) => {
+                      const enabled = event.currentTarget.checked;
+                      const rest = ai.accountOverrides.filter(
+                        (item) => item.accountId !== account.id
+                      );
+                      void saveAi({
+                        ...ai,
+                        accountOverrides: [
+                          ...rest,
+                          {
+                            accountId: account.id,
+                            enabled,
+                            prompt: override?.prompt || ai.globalPrompt,
+                            threshold: override?.threshold ?? ai.threshold
+                          }
+                        ]
+                      });
+                    }}
+                  />{" "}
+                  Override global
+                </label>
+                {!inherited ? (
+                  <>
+                    <label className="field">
+                      <span>Account importance instruction</span>
+                      <textarea
+                        maxLength={2000}
+                        value={prompt}
+                        onChange={(event) => {
+                          const rest = ai.accountOverrides.filter(
+                            (item) => item.accountId !== account.id
+                          );
+                          void saveAi({
+                            ...ai,
+                            accountOverrides: [
+                              ...rest,
+                              {
+                                accountId: account.id,
+                                enabled: true,
+                                prompt: event.currentTarget.value.slice(0, 2000),
+                                threshold
+                              }
+                            ]
+                          });
+                        }}
+                      />
+                      <span className="character-count">
+                        {2000 - prompt.length} characters left
+                      </span>
+                    </label>
+                    <label className="field">
+                      <span>Account threshold: {threshold}</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={threshold}
+                        onChange={(event) => {
+                          const rest = ai.accountOverrides.filter(
+                            (item) => item.accountId !== account.id
+                          );
+                          void saveAi({
+                            ...ai,
+                            accountOverrides: [
+                              ...rest,
+                              {
+                                accountId: account.id,
+                                enabled: true,
+                                prompt,
+                                threshold: Number(event.currentTarget.value)
+                              }
+                            ]
+                          });
+                        }}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void saveAi({
+                          ...ai,
+                          accountOverrides: ai.accountOverrides.filter(
+                            (item) => item.accountId !== account.id
+                          )
+                        })
+                      }
+                    >
+                      Return to global inheritance
+                    </button>
+                    <button
+                      type="button"
+                      disabled={props.reprocessRunning}
+                      onClick={() => void props.onReprocess(account.id)}
+                    >
+                      Reprocess this account today
+                    </button>
+                  </>
+                ) : null}
+              </section>
+            );
+          })}
+        </section>
+      ) : null}
       <div className="inline-form">
         <input
           aria-label="Preset name"
@@ -4097,20 +4549,18 @@ function AiImportanceControls(props: {
           type="button"
           onClick={() => {
             if (!presetName.trim()) return;
-            void props.onPreferencesChange({
-              ai: {
-                ...ai,
-                presets: [
-                  ...ai.presets,
-                  {
-                    id: crypto.randomUUID(),
-                    name: presetName.trim(),
-                    prompt: ai.globalPrompt,
-                    createdAt: new Date().toISOString(),
-                    updatedAt: new Date().toISOString()
-                  }
-                ]
-              }
+            void saveAi({
+              ...ai,
+              presets: [
+                ...ai.presets,
+                {
+                  id: crypto.randomUUID(),
+                  name: presetName.trim(),
+                  prompt: ai.globalPrompt,
+                  createdAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString()
+                }
+              ]
             });
             setPresetName("");
           }}
@@ -4124,18 +4574,14 @@ function AiImportanceControls(props: {
             {preset.name}
             <button
               type="button"
-              onClick={() =>
-                void props.onPreferencesChange({ ai: { ...ai, globalPrompt: preset.prompt } })
-              }
+              onClick={() => void saveAi({ ...ai, globalPrompt: preset.prompt })}
             >
               Load
             </button>
             <button
               type="button"
               onClick={() =>
-                void props.onPreferencesChange({
-                  ai: { ...ai, presets: ai.presets.filter((item) => item.id !== preset.id) }
-                })
+                void saveAi({ ...ai, presets: ai.presets.filter((item) => item.id !== preset.id) })
               }
             >
               Delete
@@ -4146,13 +4592,12 @@ function AiImportanceControls(props: {
       <button
         type="button"
         onClick={() =>
-          void props.onPreferencesChange({
-            ai: {
-              ...ai,
-              globalPrompt:
-                "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.",
-              threshold: 0
-            }
+          void saveAi({
+            ...ai,
+            globalPrompt:
+              "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.",
+            threshold: 0,
+            accountOverrides: []
           })
         }
       >

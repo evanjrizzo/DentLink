@@ -16,6 +16,7 @@ import {
   getGmailRules,
   GmailConfigError,
   gmailConnectorDefinition,
+  reprocessSameDayEmailAi,
   startGmailOAuth,
   syncConnectedGmailAccounts,
   syncGmailAccount,
@@ -455,6 +456,18 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
         )
       );
     }
+    if (method === "POST" && path === "/v1/ai/reprocess") {
+      return json(
+        await reprocessSameDayEmailAi(
+          store,
+          auth.user.id,
+          env,
+          parseAiReprocessBody(await readJson(request)),
+          now
+        ),
+        202
+      );
+    }
     const gmailDisconnectMatch = path.match(/^\/v1\/connectors\/gmail\/([^/]+)\/disconnect$/);
     if (gmailDisconnectMatch && method === "POST") {
       return json(
@@ -592,7 +605,26 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
       );
     }
     if (method === "GET" && path === "/v1/notifications") {
-      return json(await store.listNotifications(auth.user.id));
+      const listed = await store.listNotifications(auth.user.id);
+      const includeSuppressed = url.searchParams.get("includeSuppressed") === "true";
+      const search = (url.searchParams.get("search") ?? "").trim().toLowerCase();
+      return json({
+        notifications: listed.notifications.filter((notification) => {
+          if (!includeSuppressed && notification.status === "suppressed") return false;
+          if (!search) return true;
+          return JSON.stringify({
+            title: notification.title,
+            summary: notification.summary,
+            body: notification.body,
+            sender: notification.email?.senderDisplayName,
+            senderAddress: notification.email?.senderAddress,
+            subject: notification.email?.subject,
+            category: notification.ai?.category
+          })
+            .toLowerCase()
+            .includes(search);
+        })
+      });
     }
     if (method === "GET" && path === "/v1/ai/settings") {
       return json(await getEmailAiSettings(store, auth.user.id, env, now));
@@ -1079,6 +1111,20 @@ function parseEmailAiSettingsPatch(value: unknown): { enabled: boolean } {
   return { enabled };
 }
 
+function parseAiReprocessBody(value: unknown): { timezone: string; accountId?: string | null } {
+  const object =
+    typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  const timezone =
+    typeof object.timezone === "string" && validTimezone(object.timezone)
+      ? object.timezone
+      : DEFAULT_TIMEZONE;
+  const accountId =
+    typeof object.accountId === "string" && object.accountId.trim()
+      ? object.accountId.trim()
+      : null;
+  return { timezone, accountId };
+}
+
 const TIMEZONE_PREFERENCE_KEY = "timezone_v1";
 const EMAIL_AI_PREFERENCES_KEY = "email_ai_preferences_v1";
 const DEFAULT_TIMEZONE = "UTC";
@@ -1245,7 +1291,16 @@ function normalizeAccountOverride(
   const object = value as Record<string, unknown>;
   if (typeof object.accountId !== "string" || !object.accountId) return null;
   const prompt = typeof object.prompt === "string" ? boundedPrompt(object.prompt) : "";
-  return { accountId: object.accountId, enabled: object.enabled === true, prompt };
+  const threshold =
+    typeof object.threshold === "number" && Number.isFinite(object.threshold)
+      ? Math.max(0, Math.min(100, Math.round(object.threshold)))
+      : undefined;
+  return {
+    accountId: object.accountId,
+    enabled: object.enabled === true,
+    prompt,
+    ...(threshold === undefined ? {} : { threshold })
+  };
 }
 
 function boundedPrompt(value: string): string {

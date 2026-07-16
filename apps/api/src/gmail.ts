@@ -41,6 +41,7 @@ import type {
   GmailRule,
   GmailRulesResponse,
   GmailSyncResult,
+  EmailAiReprocessResult,
   Notification
 } from "@dentlink/item-model";
 import type { ConnectorDefinition } from "@dentlink/connector-sdk";
@@ -62,6 +63,13 @@ const GMAIL_RULES_SETTING_KEY = "gmailRulesJson";
 const GMAIL_INGESTION_ENGINE_SETTING_KEY = "gmailIngestionEngine";
 const EMAIL_AI_ENABLED_PREFERENCE_KEY = "email_ai_enabled";
 const EMAIL_AI_PREFERENCES_KEY = "email_ai_preferences_v1";
+const DEFAULT_IMPORTANCE_PROMPT =
+  "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.";
+
+type EmailAiUserConfig = ReturnType<typeof emailAiConfig> & {
+  importanceInstruction: string;
+  threshold: number;
+};
 
 type GmailOperation =
   | "gmail_token_refresh"
@@ -1308,7 +1316,7 @@ async function ingestNormalizedGmailEmail(
       rank: notificationRankForRule(ruleDecision.action),
       email: emailMetadata,
       rule: ruleMetadata,
-      ai: await initialEmailAiMetadata(store, userId, env, email, now)
+      ai: await initialEmailAiMetadata(store, userId, account.id, env, email, now)
     },
     now
   );
@@ -1317,6 +1325,7 @@ async function ingestNormalizedGmailEmail(
     userId,
     notification,
     email,
+    account.id,
     env,
     now
   );
@@ -1509,6 +1518,271 @@ async function recordGmailMessageDuplicate(
 
 function shouldRetryGmailSourceRecord(status: ConnectorSourceRecord["status"]): boolean {
   return status === "pending" || status === "failed";
+}
+
+export async function reprocessSameDayEmailAi(
+  store: DentLinkStore,
+  userId: EntityId,
+  env: GmailRuntimeEnv,
+  input: { timezone: string; accountId?: EntityId | null },
+  now: string
+): Promise<EmailAiReprocessResult> {
+  const startedAt = now;
+  const day = dateKeyInTimeZone(now, input.timezone);
+  const accounts = (await store.listConnectorAccounts(userId)).accounts.filter(
+    (account) =>
+      account.connectorKey === GMAIL_CONNECTOR_KEY &&
+      account.status !== "deleted" &&
+      (!input.accountId || account.id === input.accountId)
+  );
+  const notifications = (await store.listNotifications(userId)).notifications;
+  const notificationsById = new Map(
+    notifications.map((notification) => [notification.id, notification])
+  );
+  const result: EmailAiReprocessResult = {
+    id: crypto.randomUUID(),
+    startedAt,
+    completedAt: startedAt,
+    timezone: input.timezone,
+    day,
+    status: "success",
+    processed: 0,
+    updated: 0,
+    suppressed: 0,
+    restored: 0,
+    skipped: 0,
+    failed: 0,
+    errors: []
+  };
+  for (const account of accounts) {
+    const records = await store.listConnectorSourceRecords(userId, account.id);
+    for (const record of records) {
+      if (record.sourceType !== "email") continue;
+      const email = normalizedGmailEmailFromSourceRecord(record, now);
+      if (!email || dateKeyInTimeZone(email.receivedAt, input.timezone) !== day) continue;
+      const notificationId =
+        typeof record.normalizedPayload.notification_id === "string"
+          ? record.normalizedPayload.notification_id
+          : null;
+      const notification = notificationId ? notificationsById.get(notificationId) : null;
+      if (!notification || notification.status === "deleted") {
+        result.skipped += 1;
+        continue;
+      }
+      try {
+        const updated = await reprocessNotificationAi(
+          store,
+          userId,
+          account.id,
+          notification,
+          email,
+          env,
+          now
+        );
+        notificationsById.set(updated.id, updated);
+        const payload = {
+          ...record.normalizedPayload,
+          ai_status: updated.ai.status,
+          ai_model: updated.ai.model,
+          ai_content_hash: updated.ai.contentHash
+        };
+        await store.updateConnectorSourceRecordProcessing(
+          userId,
+          account.id,
+          record.sourceExternalId,
+          {
+            status: "notification_updated",
+            processingReason: "Reprocessed same-day AI metadata",
+            normalizedPayload: payload,
+            payloadHash: await hashSessionToken(JSON.stringify(payload))
+          },
+          now
+        );
+        result.processed += 1;
+        result.updated += 1;
+        if (updated.status === "suppressed") result.suppressed += 1;
+        if (notification.status === "suppressed" && updated.status === "active")
+          result.restored += 1;
+      } catch (error) {
+        result.failed += 1;
+        result.errors.push({
+          recordId: record.id,
+          messageId: record.sourceExternalId,
+          code:
+            error instanceof EmailAiError
+              ? error.code
+              : error instanceof StoreError
+                ? error.code
+                : "ai_reprocess_failed",
+          message: safeAiMessage(error instanceof Error ? error.message : "AI reprocessing failed.")
+        });
+      }
+    }
+  }
+  result.completedAt = new Date().toISOString();
+  result.status = result.failed === 0 ? "success" : result.updated > 0 ? "partial" : "failed";
+  return result;
+}
+
+async function reprocessNotificationAi(
+  store: DentLinkStore,
+  userId: EntityId,
+  accountId: EntityId,
+  notification: Notification,
+  email: NormalizedGmailEmail,
+  env: GmailRuntimeEnv,
+  now: string
+): Promise<Notification> {
+  const config = await emailAiUserConfig(store, userId, env, accountId);
+  if (!config.enabled) {
+    if (notification.ai.status === "disabled") return notification;
+    return store.updateNotification(
+      userId,
+      notification.id,
+      notification.version,
+      { ai: notificationAiState("disabled", config.model) },
+      now
+    );
+  }
+  if (!email.normalizedBody.trim()) {
+    if (notification.ai.status === "skipped") return notification;
+    return store.updateNotification(
+      userId,
+      notification.id,
+      notification.version,
+      { ai: notificationAiState("skipped", config.model, now) },
+      now
+    );
+  }
+  const inputBody = email.normalizedBody.slice(0, config.maxInputChars);
+  const contentHash = await emailContentHash({
+    subject: email.subject,
+    body: inputBody,
+    sender: email.senderAddress,
+    promptVersion: `${EMAIL_AI_PROMPT_VERSION}:${config.importanceInstruction}`,
+    model: config.model
+  });
+  if (
+    notification.ai.status === "complete" &&
+    notification.ai.contentHash === contentHash &&
+    notification.ai.importance !== null
+  ) {
+    const status = thresholdStatus(
+      notification.status,
+      notification.ai.importance,
+      config.threshold
+    );
+    if (status === notification.status) return notification;
+    return store.updateNotification(userId, notification.id, notification.version, { status }, now);
+  }
+  const client =
+    env.emailAiClient ?? createOpenAIEmailAiClient({ apiKey: config.apiKey, model: config.model });
+  const ai = await client.summarizeEmail({
+    sender: email.sender,
+    subject: email.subject,
+    body: inputBody,
+    receivedAt: email.receivedAt,
+    labels: email.labels,
+    importanceInstruction: config.importanceInstruction
+  });
+  await store.recordAiUsage(
+    userId,
+    {
+      provider: "openai",
+      model: config.model,
+      inputChars: inputBody.length,
+      outputTokens: ai.outputTokens,
+      failed: false
+    },
+    now
+  );
+  return store.updateNotification(
+    userId,
+    notification.id,
+    notification.version,
+    {
+      summary: ai.summary,
+      severity: ai.requiresAction || ai.importance >= 75 ? "high" : notification.severity,
+      rank: notification.rank + Math.round(ai.importance / 2),
+      status: thresholdStatus(notification.status, ai.importance, config.threshold),
+      ai: {
+        status: "complete",
+        model: config.model,
+        promptVersion: EMAIL_AI_PROMPT_VERSION,
+        processedAt: now,
+        inputChars: inputBody.length,
+        outputTokens: ai.outputTokens,
+        contentHash,
+        summary: ai.summary,
+        category: ai.category,
+        importance: ai.importance,
+        requiresAction: ai.requiresAction,
+        suggestedAction: ai.suggestedAction,
+        deadline: ai.deadline,
+        reason: ai.reason,
+        errorCode: null,
+        errorMessage: null
+      }
+    },
+    now
+  );
+}
+
+function normalizedGmailEmailFromSourceRecord(
+  record: ConnectorSourceRecord,
+  now: string
+): NormalizedGmailEmail | null {
+  const payload = record.normalizedPayload;
+  if (payload.provider !== "gmail") return null;
+  const subject = stringPayload(payload.subject, "(no subject)");
+  const sender = stringPayload(payload.sender, "Unknown sender");
+  const senderAddress = stringPayload(payload.sender_address, emailAddressFromHeader(sender));
+  const receivedAt = validIsoOrFallback(stringPayload(payload.received_at, now), now);
+  return {
+    sourceExternalId: record.sourceExternalId,
+    providerItemId: stringPayload(payload.provider_item_id, record.sourceExternalId),
+    threadId: stringPayload(payload.thread_id, "") || null,
+    historyId: stringPayload(payload.history_id, "") || null,
+    messageId: stringPayload(payload.message_id, "") || null,
+    internalDate: stringPayload(payload.internal_date, "") || null,
+    receivedAt,
+    labels: Array.isArray(payload.labels)
+      ? payload.labels.filter((item): item is string => typeof item === "string")
+      : [],
+    unread: payload.unread === true,
+    sender,
+    senderAddress,
+    subject,
+    recipients: Array.isArray(payload.recipients)
+      ? payload.recipients.filter((item): item is string => typeof item === "string")
+      : [],
+    hasAttachment: payload.has_attachment === true,
+    attachments: Array.isArray(payload.attachments)
+      ? (payload.attachments as EmailAttachmentMetadata[])
+      : [],
+    automatedSender: payload.automated_sender === true,
+    mailingList: payload.mailing_list === true,
+    permalink: stringPayload(payload.permalink, "") || null,
+    normalizedBody: stringPayload(payload.normalized_body, ""),
+    normalizedBodyHash: stringPayload(payload.normalized_body_hash, "") || null,
+    htmlPresent: payload.html_present === true
+  };
+}
+
+function stringPayload(value: unknown, fallback: string): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function dateKeyInTimeZone(iso: string, timezone: string): string {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  const parts = formatter.formatToParts(new Date(iso));
+  const value = (type: string) => parts.find((part) => part.type === type)?.value ?? "00";
+  return `${value("year")}-${value("month")}-${value("day")}`;
 }
 
 function summarizeGmailOutcomes(
@@ -1748,11 +2022,12 @@ function gmailRuleActionLabel(action: GmailRule["action"]): string {
 async function initialEmailAiMetadata(
   store: DentLinkStore,
   userId: EntityId,
+  accountId: EntityId,
   env: GmailRuntimeEnv,
   email: NormalizedGmailEmail,
   now: string
 ): Promise<Notification["ai"]> {
-  const config = await emailAiUserConfig(store, userId, env);
+  const config = await emailAiUserConfig(store, userId, env, accountId);
   if (!config.enabled) return notificationAiState("disabled", config.model);
   if (!email.normalizedBody.trim()) return notificationAiState("skipped", config.model, now);
   return notificationAiState("pending", config.model);
@@ -1763,17 +2038,18 @@ async function maybeProcessEmailAi(
   userId: EntityId,
   notification: Notification,
   email: NormalizedGmailEmail,
+  accountId: EntityId,
   env: GmailRuntimeEnv,
   now: string
 ): Promise<Notification> {
-  const config = await emailAiUserConfig(store, userId, env);
+  const config = await emailAiUserConfig(store, userId, env, accountId);
   if (!config.enabled || notification.ai.status !== "pending") return notification;
   const inputBody = email.normalizedBody.slice(0, config.maxInputChars);
   const contentHash = await emailContentHash({
     subject: email.subject,
     body: inputBody,
     sender: email.senderAddress,
-    promptVersion: EMAIL_AI_PROMPT_VERSION,
+    promptVersion: `${EMAIL_AI_PROMPT_VERSION}:${config.importanceInstruction}`,
     model: config.model
   });
   try {
@@ -1785,7 +2061,8 @@ async function maybeProcessEmailAi(
       subject: email.subject,
       body: inputBody,
       receivedAt: email.receivedAt,
-      labels: email.labels
+      labels: email.labels,
+      importanceInstruction: config.importanceInstruction
     });
     await store.recordAiUsage(
       userId,
@@ -1806,6 +2083,7 @@ async function maybeProcessEmailAi(
         summary: result.summary,
         severity: result.requiresAction || result.importance >= 75 ? "high" : notification.severity,
         rank: notification.rank + Math.round(result.importance / 2),
+        status: thresholdStatus(notification.status, result.importance, config.threshold),
         ai: {
           status: "complete",
           model: config.model,
@@ -1924,13 +2202,25 @@ function emailAiConfig(env: GmailRuntimeEnv): {
 async function emailAiUserConfig(
   store: DentLinkStore,
   userId: EntityId,
-  env: GmailRuntimeEnv
-): Promise<ReturnType<typeof emailAiConfig>> {
+  env: GmailRuntimeEnv,
+  accountId?: EntityId
+): Promise<EmailAiUserConfig> {
   const config = emailAiConfig(env);
   const preference = await store.getUserPreference(userId, EMAIL_AI_ENABLED_PREFERENCE_KEY);
+  const preferences = emailAiPreferencesFromStoredJson(
+    await store.getUserPreference(userId, EMAIL_AI_PREFERENCES_KEY)
+  );
+  const override = accountId
+    ? preferences.accountOverrides.find((item) => item.accountId === accountId && item.enabled)
+    : null;
   return {
     ...config,
-    enabled: config.available && preference !== "false"
+    enabled: config.available && preference !== "false",
+    importanceInstruction: override?.prompt?.trim() || preferences.globalPrompt,
+    threshold:
+      typeof override?.threshold === "number" && Number.isFinite(override.threshold)
+        ? Math.max(0, Math.min(100, Math.round(override.threshold)))
+        : preferences.threshold
   };
 }
 
@@ -1938,8 +2228,7 @@ function emailAiPreferencesFromStoredJson(
   value: string | null
 ): NonNullable<EmailAiSettings["preferences"]> {
   const fallback: NonNullable<EmailAiSettings["preferences"]> = {
-    globalPrompt:
-      "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.",
+    globalPrompt: DEFAULT_IMPORTANCE_PROMPT,
     threshold: 0,
     presets: [],
     accountOverrides: []
@@ -1962,6 +2251,15 @@ function emailAiPreferencesFromStoredJson(
   } catch {
     return fallback;
   }
+}
+
+function thresholdStatus(
+  current: Notification["status"],
+  importance: number,
+  threshold: number
+): Notification["status"] {
+  if (current === "done" || current === "dismissed" || current === "deleted") return current;
+  return importance >= threshold ? "active" : "suppressed";
 }
 
 function safeAiMessage(message: string): string {

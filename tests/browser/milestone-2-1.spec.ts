@@ -1364,6 +1364,141 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     ).toBeVisible();
     await expect(page.getByRole("textbox", { name: /^Title/ })).toHaveCount(0);
   });
+
+  test("covers corrective Notes folders, AI overrides, source colors, and mobile Settings navigation", async ({
+    page
+  }) => {
+    await page.setViewportSize({ width: 412, height: 915 });
+    const state = await installCorrectiveRegressionRoutes(page);
+
+    await page.goto("/");
+    await expect(page.getByRole("button", { name: "Notifications" })).toBeVisible();
+    await expect(
+      page.getByLabel("Mobile primary").getByRole("button", { name: "Settings" })
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Settings" }).click();
+    await expect(page.getByRole("button", { name: "Appearance", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "AI", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Back to Settings" })).toBeVisible();
+    await page.getByRole("button", { name: "Back to Settings" }).click();
+    await expect(page.getByRole("button", { name: "Appearance", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Notes" }).click();
+
+    const folderBrowser = page.getByLabel("Note folders");
+    await expect(folderBrowser.getByRole("button", { name: /All Notes/ })).toBeVisible();
+    await expect(folderBrowser.getByRole("button", { name: "Unfiled1" })).toBeVisible();
+    await expect(folderBrowser.getByRole("button", { name: "Operations1" })).toBeVisible();
+    await expect(noteCard(page, "Filed note")).toHaveCount(0);
+    await page.getByRole("button", { name: "Expand Operations" }).click();
+    await expect(noteCard(page, "Filed note")).toBeVisible();
+    await page.getByRole("button", { name: "Collapse Operations" }).click();
+    await expect(noteCard(page, "Filed note")).toHaveCount(0);
+    await page.keyboard.press("Tab");
+    await expect(page.locator(":focus")).toBeVisible();
+    await page.getByRole("button", { name: "Expand Operations" }).click();
+    await expect(noteCard(page, "Filed note")).toBeVisible();
+
+    await page.getByText("Filters").click();
+    await page.getByText("Manage folders and tags").click();
+    await page.getByLabel("New folder name").fill("Clinical");
+    await page.getByRole("button", { name: "Add" }).first().click();
+    await expect(folderBrowser.getByRole("button", { name: "Clinical0" })).toBeVisible();
+    await folderBrowser.getByRole("button", { name: "Clinical0" }).click();
+    await expect(noteCard(page, "Filed note")).toHaveCount(0);
+    await folderBrowser.getByRole("button", { name: /All Notes/ }).click();
+
+    await page
+      .getByRole("article", { name: "Note Unfiled note" })
+      .getByRole("button", { name: /Unfiled note/ })
+      .click();
+    await page.getByText("More Options").focus();
+    await page.keyboard.press("Enter");
+    await page.getByLabel("Folder for Unfiled note").selectOption({ label: "Clinical" });
+    await settleMutation(page);
+    await page.getByRole("button", { name: "Close note details" }).click();
+    await folderBrowser.getByRole("button", { name: "Clinical1" }).click();
+    await expect(noteCard(page, "Unfiled note")).toBeVisible();
+
+    await folderBrowser.getByRole("button", { name: /All Notes/ }).click();
+    await page
+      .locator(".folder-row")
+      .filter({ hasText: "Clinical" })
+      .getByRole("button", { name: "Rename" })
+      .click();
+    await page.getByLabel("Rename Clinical").fill("Treatment");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect(folderBrowser.getByRole("button", { name: "Treatment1" })).toBeVisible();
+    page.once("dialog", async (dialog) => {
+      expect(dialog.message()).toContain("move 1 note to Unfiled");
+      await dialog.accept();
+    });
+    await page
+      .locator(".folder-row")
+      .filter({ hasText: "Treatment" })
+      .getByRole("button", { name: "Delete" })
+      .click();
+    await expect(folderBrowser.getByRole("button", { name: "Treatment1" })).toHaveCount(0);
+    await folderBrowser.getByRole("button", { name: "Unfiled1" }).click();
+    await expect(noteCard(page, "Unfiled note")).toBeVisible();
+
+    state.failNextFolderCreate = true;
+    await page.setViewportSize({ width: 1280, height: 720 });
+    if (!(await page.getByLabel("New folder name").isVisible())) {
+      await page.getByText("Filters").click();
+    }
+    if (!(await page.getByLabel("New folder name").isVisible())) {
+      await page.getByText("Manage folders and tags").click();
+    }
+    await page.getByLabel("New folder name").fill("Broken folder");
+    await page.getByRole("button", { name: "Add" }).first().click();
+    await expect(page.getByRole("alert").first()).toContainText("Folder name already exists");
+
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "AI", exact: true }).click();
+    await expect(page.getByText("Inheriting global settings")).toBeVisible();
+    await page.getByLabel("Override global").click();
+    await expect(page.getByText("Using account override")).toBeVisible();
+    await page.getByLabel("Account importance instruction").fill("Prioritize implant messages.");
+    await page.getByLabel(/Account threshold:/).fill("72");
+    state.gmailRefetchRequests = 0;
+    await page.getByRole("button", { name: "Reprocess this account today" }).click();
+    await expect(page.getByText("Reprocess partial")).toBeVisible();
+    await expect(page.getByText("1 updated, 1 suppressed, 0 restored, 1 failed")).toBeVisible();
+    expect(state.reprocessRequests).toEqual([
+      { timezone: "America/New_York", accountId: "connector_gmail_corrective" }
+    ]);
+    expect(state.gmailRefetchRequests).toBe(0);
+    await page.getByRole("button", { name: "Retry" }).click();
+    await expect(page.getByText("Reprocess success")).toBeVisible();
+    await page.getByRole("button", { name: "Return to global inheritance" }).click();
+    await expect(page.getByText("Inheriting global settings")).toBeVisible();
+
+    await page.getByRole("button", { name: "Appearance", exact: true }).click();
+    await expect(page.getByText("Gmail Account", { exact: true })).toBeVisible();
+    await expect(page.getByText("Calendar Account", { exact: true })).toBeVisible();
+    await expect(page.getByText("Clinical intake webhook", { exact: true })).toBeVisible();
+    await page
+      .locator(".source-color-row")
+      .filter({ hasText: "Gmail Account" })
+      .locator("input[type='color']")
+      .fill("#123456");
+    await page.getByRole("button", { name: "Reset all source colors" }).click();
+    await expect(
+      page
+        .locator(".source-color-row")
+        .filter({ hasText: "Gmail Account" })
+        .locator("input[type='color']")
+    ).not.toHaveValue("#123456");
+
+    await page.setViewportSize({ width: 568, height: 320 });
+    await expect(
+      page.getByLabel("Mobile primary").getByRole("button", { name: "Notifications" })
+    ).toBeVisible();
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await expect(page.getByRole("button", { name: "Notifications" })).toBeVisible();
+    await page.setViewportSize({ width: 1024, height: 500 });
+    await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
+  });
 });
 
 function noteCard(page: Page, title: string) {
@@ -1464,9 +1599,364 @@ async function dentlinkStorage(page: Page): Promise<string> {
   return page.evaluate(() => window.localStorage.getItem("dentlink.auth.session.v1") ?? "");
 }
 
+async function installCorrectiveRegressionRoutes(page: Page) {
+  const now = "2026-07-15T16:00:00.000Z";
+  const user = {
+    id: "user_corrective_browser",
+    email: "corrective@example.invalid",
+    createdAt: now
+  };
+  const session = {
+    user,
+    session: {
+      token: "session_corrective_browser",
+      expiresAt: "2026-07-15T18:00:00.000Z"
+    }
+  };
+  const state = {
+    user,
+    folders: [
+      {
+        id: "folder_operations",
+        userId: user.id,
+        name: "Operations",
+        createdAt: now,
+        updatedAt: now
+      }
+    ],
+    tags: [],
+    notes: [
+      noteFixture({
+        id: "note_filed",
+        userId: user.id,
+        title: "Filed note",
+        folderId: "folder_operations"
+      }),
+      noteFixture({ id: "note_unfiled", userId: user.id, title: "Unfiled note", folderId: null })
+    ],
+    preferences: {
+      timezone: {
+        mode: "override",
+        detected: "America/New_York",
+        selected: "America/New_York"
+      },
+      ai: {
+        globalPrompt: "Default global importance guidance.",
+        threshold: 50,
+        presets: [],
+        accountOverrides: []
+      }
+    },
+    accounts: [
+      connectorAccountFixture({
+        id: "connector_gmail_corrective",
+        userId: user.id,
+        connectorKey: "gmail",
+        displayName: "Gmail Account",
+        settings: { googleEmail: "corrective@example.invalid" }
+      }),
+      connectorAccountFixture({
+        id: "connector_calendar_corrective",
+        userId: user.id,
+        connectorKey: "google-calendar",
+        displayName: "Calendar Account",
+        settings: { googleCalendarSummary: "Operatory calendar" }
+      })
+    ],
+    webhooks: [
+      {
+        id: "webhook_corrective",
+        userId: user.id,
+        name: "Clinical intake webhook",
+        slug: "clinical-intake",
+        destination: "notification",
+        secretHash: "hidden",
+        status: "enabled",
+        ingestUrl: "/v1/ingest/webhooks/clinical-intake",
+        createdAt: now,
+        updatedAt: now,
+        lastTriggeredAt: null
+      }
+    ],
+    notifications: [
+      notificationFixture({
+        id: "notification_suppressed_corrective",
+        title: "Suppressed insurance update",
+        summary: "Below threshold"
+      })
+    ].map((notification) => ({ ...notification, status: "suppressed" })),
+    reprocessRequests: [] as Array<{ timezone: string; accountId: string | null }>,
+    gmailRefetchRequests: 0,
+    failNextFolderCreate: false,
+    reprocessAttempts: 0
+  };
+
+  await page.route("**/v1/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    const method = request.method();
+    if (method === "OPTIONS") {
+      await route.fulfill({ status: 204, headers: corsHeaders() });
+      return;
+    }
+    if (method === "GET" && path === "/v1/auth/session") {
+      await fulfillJson(route, { user, session: { expiresAt: session.session.expiresAt } });
+      return;
+    }
+    if (method === "GET" && path === "/v1/events") {
+      await route.fulfill({
+        status: 200,
+        headers: { ...corsHeaders(), "Content-Type": "text/event-stream" },
+        body: ""
+      });
+      return;
+    }
+    if (method === "GET" && path === "/v1/notes") {
+      const search = (url.searchParams.get("search") ?? "").toLowerCase();
+      await fulfillJson(route, {
+        notes: state.notes.filter((note) => note.title.toLowerCase().includes(search)),
+        folders: state.folders,
+        tags: state.tags
+      });
+      return;
+    }
+    if (method === "POST" && path === "/v1/folders") {
+      if (state.failNextFolderCreate) {
+        state.failNextFolderCreate = false;
+        await fulfillJson(
+          route,
+          { error: { code: "folder_exists", message: "Folder name already exists" } },
+          409
+        );
+        return;
+      }
+      const body = (await request.postDataJSON()) as { name: string };
+      const folder = {
+        id: `folder_${body.name.toLowerCase().replaceAll(/\s+/g, "_")}`,
+        userId: user.id,
+        name: body.name,
+        createdAt: now,
+        updatedAt: now
+      };
+      state.folders = [...state.folders, folder];
+      await fulfillJson(route, folder, 201);
+      return;
+    }
+    if (method === "PATCH" && path.startsWith("/v1/folders/")) {
+      const folderId = path.split("/").pop();
+      const body = (await request.postDataJSON()) as { patch: { name?: string } };
+      state.folders = state.folders.map((folder) =>
+        folder.id === folderId ? { ...folder, name: body.patch.name ?? folder.name } : folder
+      );
+      await fulfillJson(
+        route,
+        state.folders.find((folder) => folder.id === folderId)
+      );
+      return;
+    }
+    if (method === "DELETE" && path.startsWith("/v1/folders/")) {
+      const folderId = path.split("/").pop();
+      state.folders = state.folders.filter((folder) => folder.id !== folderId);
+      state.notes = state.notes.map((note) =>
+        note.folderId === folderId ? { ...note, folderId: null, version: note.version + 1 } : note
+      );
+      await fulfillJson(route, { ok: true });
+      return;
+    }
+    if (method === "PATCH" && path.startsWith("/v1/notes/")) {
+      const noteId = path.split("/").pop();
+      const body = (await request.postDataJSON()) as {
+        expectedVersion: number;
+        patch: { folderId?: string | null };
+      };
+      let updated = state.notes.find((note) => note.id === noteId);
+      state.notes = state.notes.map((note) => {
+        if (note.id !== noteId) return note;
+        updated = {
+          ...note,
+          ...body.patch,
+          version: note.version + 1,
+          updatedAt: now
+        };
+        return updated;
+      });
+      await fulfillJson(route, updated);
+      return;
+    }
+    if (method === "GET" && path === "/v1/preferences") {
+      await fulfillJson(route, state.preferences);
+      return;
+    }
+    if (method === "PATCH" && path === "/v1/preferences") {
+      const body = (await request.postDataJSON()) as {
+        patch: { timezone?: typeof state.preferences.timezone; ai?: typeof state.preferences.ai };
+      };
+      state.preferences = {
+        timezone: { ...state.preferences.timezone, ...(body.patch.timezone ?? {}) },
+        ai: { ...state.preferences.ai, ...(body.patch.ai ?? {}) }
+      };
+      await fulfillJson(route, state.preferences);
+      return;
+    }
+    if (method === "GET" && path === "/v1/connectors/accounts") {
+      await fulfillJson(route, { accounts: state.accounts });
+      return;
+    }
+    if (method === "GET" && path === "/v1/webhooks") {
+      await fulfillJson(route, { webhooks: state.webhooks });
+      return;
+    }
+    if (method === "GET" && path === "/v1/notifications") {
+      const search = (url.searchParams.get("search") ?? "").toLowerCase();
+      const includeSuppressed = url.searchParams.get("includeSuppressed") === "true";
+      await fulfillJson(route, {
+        notifications: state.notifications.filter((notification) => {
+          const item = notification as { title: string; summary: string; status: string };
+          const matches = `${item.title} ${item.summary}`.toLowerCase().includes(search);
+          return matches && (includeSuppressed || item.status !== "suppressed");
+        })
+      });
+      return;
+    }
+    if (method === "GET" && path === "/v1/calendar/events") {
+      await fulfillJson(route, { events: [] });
+      return;
+    }
+    if (method === "GET" && path === "/v1/ai/settings") {
+      await fulfillJson(route, {
+        enabled: true,
+        available: true,
+        provider: "openai",
+        model: "gpt-test-mini",
+        maxInputChars: 6000,
+        unavailableReason: null,
+        requestsThisMonth: 0,
+        inputCharsThisMonth: 0,
+        outputTokensThisMonth: 0,
+        failedRequestsThisMonth: 0,
+        estimatedCostThisMonth: null
+      });
+      return;
+    }
+    if (method === "POST" && path === "/v1/ai/reprocess") {
+      const body = (await request.postDataJSON()) as { timezone: string; accountId?: string };
+      state.reprocessRequests.push({
+        timezone: body.timezone,
+        accountId: body.accountId ?? null
+      });
+      state.reprocessAttempts += 1;
+      await fulfillJson(
+        route,
+        {
+          startedAt: now,
+          completedAt: now,
+          status: state.reprocessAttempts === 1 ? "partial" : "success",
+          timezone: body.timezone,
+          accountId: body.accountId ?? null,
+          scanned: 2,
+          processed: state.reprocessAttempts === 1 ? 1 : 2,
+          updated: state.reprocessAttempts === 1 ? 1 : 2,
+          suppressed: state.reprocessAttempts === 1 ? 1 : 2,
+          restored: 0,
+          skipped: 0,
+          failed: state.reprocessAttempts === 1 ? 1 : 0,
+          errors:
+            state.reprocessAttempts === 1
+              ? [
+                  {
+                    sourceRecordId: "source_failed",
+                    messageId: "gmail-failed",
+                    error: "AI provider timeout"
+                  }
+                ]
+              : []
+        },
+        202
+      );
+      return;
+    }
+    if (
+      method === "GET" &&
+      (path.includes("/gmail/") || path.includes("/source-records") || path.includes("/backfill"))
+    ) {
+      state.gmailRefetchRequests += 1;
+    }
+    await route.fulfill({
+      status: 404,
+      headers: corsHeaders(),
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "not_found", message: "Not found" } })
+    });
+  });
+
+  await page.addInitScript((storedSession) => {
+    window.localStorage.setItem("dentlink.auth.session.v1", JSON.stringify(storedSession));
+  }, session);
+
+  return state;
+}
+
 async function settleMutation(page: Page): Promise<void> {
   await page.waitForTimeout(500);
   await expect(page.getByRole("alert")).toHaveCount(0);
+}
+
+function noteFixture(input: {
+  id: string;
+  userId: string;
+  title: string;
+  folderId: string | null;
+}) {
+  return {
+    id: input.id,
+    userId: input.userId,
+    kind: "task",
+    title: input.title,
+    body: "",
+    folderId: input.folderId,
+    tags: [],
+    dueAt: null,
+    priority: "none",
+    pinned: false,
+    status: "active",
+    globalOrder: input.folderId ? 1000 : 2000,
+    sourceUrl: null,
+    version: 1,
+    createdAt: "2026-07-15T16:00:00.000Z",
+    updatedAt: "2026-07-15T16:00:00.000Z",
+    completedAt: null
+  };
+}
+
+function connectorAccountFixture(input: {
+  id: string;
+  userId: string;
+  connectorKey: "gmail" | "google-calendar";
+  displayName: string;
+  settings: Record<string, unknown>;
+}) {
+  return {
+    id: input.id,
+    userId: input.userId,
+    connectorKey: input.connectorKey,
+    displayName: input.displayName,
+    status: "connected",
+    healthStatus: "healthy",
+    syncStatus: "idle",
+    settings: input.settings,
+    credentialRef: `credential_${input.id}`,
+    credentialStatus: "configured",
+    syncCursor: null,
+    lastSyncAt: null,
+    nextSyncAt: null,
+    lastHealthAt: "2026-07-15T16:00:00.000Z",
+    errorCode: null,
+    errorMessage: null,
+    createdAt: "2026-07-15T16:00:00.000Z",
+    updatedAt: "2026-07-15T16:00:00.000Z",
+    version: 1
+  };
 }
 
 function notificationFixture(input: {

@@ -127,7 +127,10 @@ Clients should not observe different API behavior between the in-memory adapter 
 Milestone 2 adds Notifications and named webhook ingestion without changing the Milestone 1 auth,
 Notes, sync, history, or conflict contracts.
 
-- `GET /v1/notifications`: list the authenticated user's non-deleted notifications.
+- `GET /v1/notifications`: list the authenticated user's non-deleted notifications. Suppressed
+  below-threshold notifications are omitted by default; pass `includeSuppressed=true` to include
+  them. Optional `search` filters searchable title, summary, body, sender, subject, and source
+  metadata, including suppressed items when `includeSuppressed=true`.
 - `POST /v1/notifications`: create a manual/system notification for the authenticated user.
 - `PATCH /v1/notifications/:id`: update `pinned` or `status` with `expectedVersion`.
 - `DELETE /v1/notifications/:id`: soft-delete a notification with `expectedVersion`.
@@ -141,16 +144,22 @@ Notes, sync, history, or conflict contracts.
 - Notification status values keep their existing API representation. `active` appears in the normal
   Notifications list. `done` means the user completed the required action and storage sets
   `completedAt`. `dismissed` means the user removed the item from Active without claiming
-  completion and storage sets `dismissedAt`. `deleted` is soft-deleted. Restoring a completed or
-  dismissed item uses `PATCH /v1/notifications/:id` with `status: "active"` and clears the
-  applicable timestamp through the existing storage behavior. Slice 4.3 changed the web action
-  model only; it added no notification endpoint or migration.
+  completion and storage sets `dismissedAt`. `suppressed` means the item was stored and remains
+  searchable but is below the user's current notification threshold. `deleted` is soft-deleted.
+  Restoring a completed, dismissed, or suppressed item uses `PATCH /v1/notifications/:id` with
+  `status: "active"` and clears the applicable timestamp through the existing storage behavior.
 - `GET /v1/ai/settings`: return authenticated user's server-side email AI availability, effective
   enabled state, provider/model, input limit, unavailable reason when applicable, and monthly usage
   counters. It never returns `OPENAI_API_KEY` or provider credentials.
 - `PATCH /v1/ai/settings`: persist the authenticated user's explicit AI enabled/disabled
   preference. New users and existing users with no preference default to enabled when
   `OPENAI_API_KEY` is configured and the server has not disabled AI.
+- `POST /v1/ai/reprocess`: reprocess same-day Gmail AI metadata for the authenticated user from
+  already-normalized connector source records. Body: `{ "timezone": "America/New_York",
+  "accountId": "optional Gmail connector account id" }`. The operation is idempotent for unchanged
+  content hashes, does not refetch Gmail, preserves pinned/completed/dismissed/deleted state, updates
+  AI summary/category/importance/actionability, reapplies the post-score threshold, avoids duplicate
+  notifications, and returns progress counts plus partial-failure details with HTTP `202`.
 - `GET /v1/webhooks`: list authenticated user's named webhook endpoints. Responses include
   `ingestUrl` but never include the endpoint secret or secret hash.
 - `POST /v1/webhooks`: create a named webhook endpoint. The response returns the generated webhook
@@ -303,9 +312,16 @@ notification metadata.
 Optional email AI processing runs when `OPENAI_API_KEY` is configured and the user has not disabled
 AI in Settings -> AI. `DENTLINK_AI_ENABLED=false` disables AI globally; otherwise users default to
 enabled. It uses `DENTLINK_AI_MODEL` and `DENTLINK_AI_MAX_INPUT_CHARS` when set. AI receives bounded
-normalized subject, sender, labels, timestamp, and body text only after deterministic rules have
-allowed notification creation. Invalid, timed-out, or rate-limited AI output records
-`ai.status = failed` and preserves the notification and Gmail connector health.
+normalized subject, sender, labels, timestamp, body text, and the effective global or per-account
+importance instruction only after deterministic rules have allowed notification creation. The
+notification threshold is never sent to the AI provider; it is applied after independent scoring.
+Invalid, timed-out, or rate-limited AI output records `ai.status = failed` and preserves the
+notification and Gmail connector health.
+
+AI importance preferences live in `/v1/preferences`. `ai.globalPrompt` and `ai.threshold` are the
+default for all Gmail accounts. `ai.accountOverrides[]` may enable an account-specific prompt and
+threshold for a Gmail connector account; disabled or absent overrides inherit the global values.
+Prompt fields are limited to 2,000 characters and the API normalizes thresholds to `0..100`.
 
 The Worker also runs scheduled Gmail synchronization every five minutes for connected, idle Gmail
 accounts. Scheduled sync uses the account's selected ingestion engine. `gmail_api` accounts use the

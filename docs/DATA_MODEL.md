@@ -119,12 +119,13 @@ updates.
 
 `migrations/0002_notifications_webhooks.sql` extends the durable schema:
 
-- `notifications`: user-scoped active/done/dismissed/deleted notification records with title,
+- `notifications`: user-scoped active/done/dismissed/suppressed/deleted notification records with title,
   summary, body, source metadata, severity, pin state, rank, global order, version, timestamps, and
   completion/dismissal timestamps. `done` records a handled item through `completed_at`;
   `dismissed` records an item removed from Active without implying completion through
-  `dismissed_at`. Restoring either state to `active` clears the matching timestamp while preserving
-  the notification's versioned lineage.
+  `dismissed_at`. `suppressed` records a stored/searchable item whose independent AI importance
+  score is below the user's notification threshold. Restoring these states to `active` clears the
+  matching timestamp where applicable while preserving the notification's versioned lineage.
 - `webhook_endpoints`: user-scoped named endpoints with unique `(user_id, slug)`, hashed secret
   storage, destination mapping, enabled state, default severity/priority, last-triggered metadata,
   and version.
@@ -282,6 +283,17 @@ empty email/rule metadata.
 processing preferences. Slice 4.2 uses key `email_ai_enabled` to store an explicit AI opt-out. The
 absence of that key means AI follows server availability and defaults to enabled when
 `OPENAI_API_KEY` is configured.
+
+`migrations/0011_notification_suppressed_status.sql` rebuilds `notifications` in place so the D1
+status check accepts `suppressed` while preserving existing rows, AI/email/rule metadata, ordering,
+versions, and indexes. Suppressed notifications remain user-scoped records; normal listings hide
+them unless the client explicitly includes suppressed results, and search can still return them.
+
+The `email_ai_preferences_v1` user preference stores bounded AI importance customization:
+`globalPrompt`, global `threshold`, saved prompt `presets`, and optional `accountOverrides`.
+Per-account overrides are keyed by Gmail connector account ID. Disabled or missing overrides inherit
+the global prompt and threshold. Same-day reprocessing reads normalized Gmail source records and
+updates existing notifications in place, preserving user action state and duplicate identity.
 
 Milestone 7 Slice 4.3 adds no schema migration. Contextual actionability is derived from existing
 notification metadata: AI `requiresAction`, non-ignore suggested actions, action-oriented
