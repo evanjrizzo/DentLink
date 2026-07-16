@@ -38,7 +38,6 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
   });
   const [composerOpen, setComposerOpen] = useState(false);
   const [editingNoteId, setEditingNoteId] = useState<EntityId | null>(null);
-  const [searchOpen, setSearchOpen] = useState(false);
   const [moreOptionsOpen, setMoreOptionsOpen] = useState(true);
   const [folderName, setFolderName] = useState("");
   const [tagName, setTagName] = useState("");
@@ -94,14 +93,14 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
     <main className="notes-shell notes-shell-compact">
       <section className="notes-main">
         <div className="notes-compact-toolbar">
-          <button
-            type="button"
-            aria-label="Search notes"
-            className={searchOpen ? "selected" : ""}
-            onClick={() => setSearchOpen((open) => !open)}
-          >
-            Search
-          </button>
+          <label className="field notes-search-field">
+            <span>Search</span>
+            <input
+              aria-label="Search notes"
+              value={props.search}
+              onChange={(event) => props.onSearchChange(event.currentTarget.value)}
+            />
+          </label>
           <details className="notes-filter-menu">
             <summary>Filters</summary>
             <label className="field">
@@ -158,16 +157,6 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
             <span className="filter-chip">{props.selectedTagIds.length} tag filter</span>
           ) : null}
         </div>
-
-        {searchOpen || props.search ? (
-          <label className="field notes-search-field">
-            <span>Search</span>
-            <input
-              value={props.search}
-              onChange={(event) => props.onSearchChange(event.currentTarget.value)}
-            />
-          </label>
-        ) : null}
 
         {localError ? (
           <p className="app-error" role="alert">
@@ -603,12 +592,23 @@ function NoteCard(
   const folderName = note.folderId
     ? props.folders.find((folder) => folder.id === note.folderId)?.name
     : null;
+  function openDetails(): void {
+    props.onOpenDetails(note.id);
+  }
   return (
     <article
       aria-label={`Note ${note.title}`}
       className={`note-card compact-note-card ${note.status === "done" ? "done" : ""}`}
       draggable
+      tabIndex={0}
       onDragStart={props.onDragStart}
+      onClick={openDetails}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openDetails();
+        }
+      }}
     >
       <div className="note-card-top">
         <input
@@ -616,6 +616,7 @@ function NoteCard(
           type="checkbox"
           checked={note.status === "done"}
           disabled={disabled || note.kind !== "task"}
+          onClick={(event) => event.stopPropagation()}
           onChange={(event) =>
             void props.onUpdateNote(note, {
               status: event.currentTarget.checked ? "done" : "active"
@@ -625,7 +626,10 @@ function NoteCard(
         <button
           type="button"
           className="note-title-button"
-          onClick={() => props.onOpenDetails(note.id)}
+          onClick={(event) => {
+            event.stopPropagation();
+            openDetails();
+          }}
         >
           <strong>{note.title}</strong>
           {note.body ? <span>{note.body}</span> : null}
@@ -636,30 +640,14 @@ function NoteCard(
           className="icon-button note-pin-button"
           aria-pressed={note.pinned}
           disabled={disabled}
-          onClick={() => void props.onUpdateNote(note, { pinned: !note.pinned })}
+          onClick={(event) => {
+            event.stopPropagation();
+            void props.onUpdateNote(note, { pinned: !note.pinned });
+          }}
         >
           <PushPinIcon filled={note.pinned} />
           <span className="icon-button-text">{note.pinned ? "Pinned" : "Pin"}</span>
         </button>
-        <label className="note-card-move">
-          <span>Move</span>
-          <select
-            aria-label={`Move ${note.title} to folder`}
-            value={note.folderId ?? ""}
-            disabled={disabled}
-            onClick={(event) => event.stopPropagation()}
-            onChange={(event) =>
-              void props.onUpdateNote(note, { folderId: event.currentTarget.value || null })
-            }
-          >
-            <option value="">Unfiled</option>
-            {props.folders.map((folder) => (
-              <option key={folder.id} value={folder.id}>
-                {folder.name}
-              </option>
-            ))}
-          </select>
-        </label>
       </div>
       <div className="note-meta">
         <span>{note.kind}</span>
