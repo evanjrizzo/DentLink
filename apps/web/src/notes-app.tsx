@@ -542,16 +542,15 @@ export function DentLinkNotesApp(): ReactElement {
       } catch (caught) {
         const message = refreshMessageFor(caught);
         await refreshDentLinkData("refresh-all-failed");
-        const surfaceError = reason !== "scheduled" || debugMode;
         setRefreshState((current) => ({
           ...current,
           running: false,
           message: null,
           result: null,
-          error: surfaceError ? message : null,
+          error: message,
           lastAttemptAt: new Date().toISOString()
         }));
-        if (surfaceError) setError(message);
+        setError(message);
       } finally {
         refreshAllPromise.current = null;
       }
