@@ -85,14 +85,23 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(noteCard(page, secondNote)).toHaveCount(0);
     await page.locator(".notes-search-field input").fill("");
 
-    await makeNoteConflict(page, firstNote, "Server-side conflict title");
+    const conflictSeed = await makeNoteConflict(page, firstNote);
+    const localConflictTitle = `Stale ${runId}`;
     await noteCard(page, firstNote)
       .getByRole("button", { name: new RegExp(firstNote) })
       .click();
-    await page.locator(".note-title").fill(`Stale ${runId}`);
-    await expect(page.getByRole("alert")).toContainText("changed on the server");
-    await resolveOpenConflict(page);
+    await page.locator(".note-title").fill(localConflictTitle);
+    await expect
+      .poll(async () => (await fetchNoteById(page, conflictSeed.id)).title)
+      .toBe(localConflictTitle);
+    await expect(page.locator(".note-title")).toHaveValue(localConflictTitle);
     await page.getByRole("button", { name: "Close note details" }).click();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(noteCard(page, localConflictTitle)).toBeVisible();
+    const reconciled = await fetchNoteById(page, conflictSeed.id);
+    expect(reconciled.title).toBe(localConflictTitle);
+    expect(reconciled.priority).toBe(conflictSeed.serverPriority);
+    expect(reconciled.version).toBeGreaterThan(conflictSeed.serverVersion);
 
     await page.getByRole("button", { name: "Notifications" }).click();
     await expect(page.getByRole("button", { name: "Notifications" })).toBeVisible();
@@ -1557,7 +1566,10 @@ async function deliverWebhook(
   return response.status();
 }
 
-async function makeNoteConflict(page: Page, title: string, nextTitle: string): Promise<void> {
+async function makeNoteConflict(
+  page: Page,
+  title: string
+): Promise<{ id: string; serverPriority: "low"; serverVersion: number }> {
   const session = JSON.parse(await dentlinkStorage(page)) as { session: { token: string } };
   const notesResponse = await fetch(`${apiBaseUrl}/v1/notes?search=${encodeURIComponent(title)}`, {
     headers: { Authorization: `Bearer ${session.session.token}` }
@@ -1565,34 +1577,37 @@ async function makeNoteConflict(page: Page, title: string, nextTitle: string): P
   const notes = (await notesResponse.json()) as { notes: Array<{ id: string; version: number }> };
   const note = notes.notes[0];
   expect(note).toBeTruthy();
-  await fetch(`${apiBaseUrl}/v1/notes/${note.id}`, {
+  const response = await fetch(`${apiBaseUrl}/v1/notes/${note.id}`, {
     method: "PATCH",
     headers: {
       Authorization: `Bearer ${session.session.token}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ expectedVersion: note.version, patch: { title: nextTitle } })
+    body: JSON.stringify({
+      expectedVersion: note.version,
+      patch: { priority: "low" }
+    })
   });
+  expect(response.status).toBe(200);
+  const updated = (await response.json()) as { version: number };
+  return { id: note.id, serverPriority: "low", serverVersion: updated.version };
 }
 
-async function resolveOpenConflict(page: Page): Promise<void> {
+async function fetchNoteById(
+  page: Page,
+  noteId: string
+): Promise<{ id: string; title: string; body: string; priority: string; version: number }> {
   const session = JSON.parse(await dentlinkStorage(page)) as { session: { token: string } };
-  const conflictsResponse = await fetch(`${apiBaseUrl}/v1/conflicts`, {
+  const notesResponse = await fetch(`${apiBaseUrl}/v1/notes`, {
     headers: { Authorization: `Bearer ${session.session.token}` }
   });
-  const conflicts = (await conflictsResponse.json()) as Array<{
-    conflict: { id: string; version: number };
-  }>;
-  const conflict = conflicts[0]?.conflict;
-  expect(conflict).toBeTruthy();
-  await fetch(`${apiBaseUrl}/v1/conflicts/${conflict.id}/resolve`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${session.session.token}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ expectedVersion: conflict.version, resolution: "keep_theirs" })
-  });
+  expect(notesResponse.status).toBe(200);
+  const notes = (await notesResponse.json()) as {
+    notes: Array<{ id: string; title: string; body: string; priority: string; version: number }>;
+  };
+  const note = notes.notes.find((item) => item.id === noteId);
+  expect(note).toBeTruthy();
+  return note!;
 }
 
 async function dentlinkStorage(page: Page): Promise<string> {

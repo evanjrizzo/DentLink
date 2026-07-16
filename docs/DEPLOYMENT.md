@@ -77,15 +77,16 @@ Use these steps for the first real preview deployment. Do not reuse production i
    pnpm deploy:preview
    ```
 
-8. Configure the web client to use the deployed preview API origin:
+8. Deploy the preview web client:
 
    ```bash
-   VITE_DENTLINK_API_BASE_URL=https://dentlink-api-preview.evanjrizzo.workers.dev pnpm --filter @dentlink/web build
    pnpm deploy:web:preview
    ```
 
-   For hosted web deployments, set `VITE_DENTLINK_API_BASE_URL` in the web hosting environment
-   instead of committing it.
+   The preview web script performs a fresh `@dentlink/web` build, injects
+   `https://dentlink-api-preview.evanjrizzo.workers.dev`, verifies the generated browser bundle, and
+   deploys the existing `dentlink-web-preview` Pages project. Use `pnpm build:web:preview` when you
+   need the same deterministic preview build without uploading it.
 
 9. Run the remote API smoke test against the actual preview API URL:
 
@@ -300,6 +301,7 @@ include approximately 390x844, 844x390, 1280x720, standard desktop, and large de
   data.
 - Disable or replace a broken preview deployment before promoting changes.
 - Confirm the active deployment with Wrangler or the Cloudflare dashboard before and after rollback.
+
 # Custom domain migration status
 
 Target normal-use URL: `https://link.dentlabs.net`.

@@ -654,7 +654,7 @@ export function DentLinkNotesApp(): ReactElement {
     try {
       return await client.updateNote(noteId, expectedVersion, patch);
     } catch (caught) {
-      if (!(caught instanceof DentLinkApiError) || caught.code !== "version_mismatch") throw caught;
+      if (!isRecoverableNoteConflict(caught)) throw caught;
       const latest = await client.listNotes({ search: undefined, folderId: undefined, tagIds: [] });
       const server = latest.notes.find((item) => item.id === noteId);
       if (!server) throw caught;
@@ -1418,6 +1418,13 @@ export function DentLinkNotesApp(): ReactElement {
         />
       ) : null}
     </>
+  );
+}
+
+function isRecoverableNoteConflict(caught: unknown): caught is DentLinkApiError {
+  return (
+    caught instanceof DentLinkApiError &&
+    (caught.code === "version_mismatch" || caught.code === "conflict")
   );
 }
 
