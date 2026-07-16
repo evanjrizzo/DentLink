@@ -7,7 +7,12 @@ import { describe, expect, it } from "vitest";
 import { hashPassword, hashSessionToken } from "./auth";
 import { D1DentLinkStore } from "./d1-storage";
 import type { GoogleCalendarApiClient } from "./google-calendar";
-import { createGoogleGmailClient, type GmailApiClient, type GmailImapClient } from "./gmail";
+import {
+  createGoogleGmailClient,
+  syncConnectedGmailAccounts,
+  type GmailApiClient,
+  type GmailImapClient
+} from "./gmail";
 import apiDefaultForTest, { handleApiRequest, type ApiEnv } from "./index";
 import { SqliteD1TestDatabase } from "./sqlite-d1-test";
 import { MemoryDentLinkStore, StoreError, type DentLinkStore } from "./storage";
@@ -2041,6 +2046,116 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       undefined,
       owner.session.token
     );
+    expect(accounts.accounts[0]?.settings).toMatchObject({
+      gmailIngestionEngine: "gmail_imap",
+      gmailLastSyncEngine: "gmail_imap",
+      gmailLastSyncCreated: 1
+    });
+  });
+
+  it("retries stale Gmail IMAP sync locks while skipping fresh in-progress syncs", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-stale-imap@example.com");
+    const env = gmailTestEnv(fakeGmailClient(), fakeGmailImapClient());
+    const start = await requestJson<{ authorizationUrl: string }>(
+      store,
+      "POST",
+      "/v1/connectors/gmail/start",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const authorizationUrl = new URL(start.authorizationUrl);
+    const callback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/gmail/callback?code=valid-code&state=${authorizationUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    const linked = (await callback.json()) as { account: ConnectorAccount };
+    const granted = await store.updateConnectorAccount(
+      owner.user.id,
+      linked.account.id,
+      linked.account.version,
+      {
+        settings: {
+          ...linked.account.settings,
+          gmailGrantedScopes: "https://mail.google.com/",
+          gmailImapGranted: true,
+          gmailReconnectRequired: false
+        }
+      },
+      "2026-07-14T20:00:00.000Z"
+    );
+    const imap = await requestJson<ConnectorAccount>(
+      store,
+      "PUT",
+      `/v1/connectors/gmail/${linked.account.id}/engine`,
+      { expectedVersion: granted?.version, engine: "gmail_imap" },
+      owner.session.token,
+      200,
+      env
+    );
+
+    const freshSyncing = await store.updateConnectorAccount(
+      owner.user.id,
+      imap.id,
+      imap.version,
+      { syncStatus: "syncing" },
+      "2026-07-14T20:09:00.000Z"
+    );
+    expect(freshSyncing).not.toBeNull();
+    expect(await syncConnectedGmailAccounts(store, env, "2026-07-14T20:10:00.000Z")).toMatchObject({
+      attempted: 0,
+      skipped: 1
+    });
+    expect(
+      (
+        await requestJson<{ notifications: Notification[] }>(
+          store,
+          "GET",
+          "/v1/notifications",
+          undefined,
+          owner.session.token
+        )
+      ).notifications
+    ).toHaveLength(0);
+
+    const latest = await store.getConnectorAccount(owner.user.id, imap.id);
+    expect(latest).not.toBeNull();
+    const staleSyncing = await store.updateConnectorAccount(
+      owner.user.id,
+      imap.id,
+      latest?.version ?? 0,
+      { syncStatus: "syncing" },
+      "2026-07-14T20:00:00.000Z"
+    );
+    expect(staleSyncing).not.toBeNull();
+    expect(await syncConnectedGmailAccounts(store, env, "2026-07-14T20:20:00.000Z")).toMatchObject({
+      attempted: 1,
+      succeeded: 1
+    });
+
+    const notifications = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(notifications.notifications).toHaveLength(1);
+    const accounts = await requestJson<{ accounts: ConnectorAccount[] }>(
+      store,
+      "GET",
+      "/v1/connectors/accounts",
+      undefined,
+      owner.session.token
+    );
+    expect(accounts.accounts[0]?.syncStatus).toBe("idle");
     expect(accounts.accounts[0]?.settings).toMatchObject({
       gmailIngestionEngine: "gmail_imap",
       gmailLastSyncEngine: "gmail_imap",

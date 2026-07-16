@@ -55,6 +55,9 @@ const INITIAL_SYNC_PAGE_SIZE = 25;
 const HISTORY_PAGE_SIZE = 100;
 const GMAIL_IMAP_RECENT_WINDOW_DAYS = 2;
 const GMAIL_IMAP_MAX_MESSAGES = 25;
+const GMAIL_SYNC_STALE_MS = 10 * 60 * 1000;
+const GMAIL_IMAP_POLL_TIMEOUT_MS = 25 * 1000;
+const GMAIL_IMAP_COMPARISON_TIMEOUT_MS = 8 * 1000;
 const GMAIL_READONLY_RECONNECT_MESSAGE =
   "Reconnect Gmail to grant read-only mailbox access required for backfill.";
 const GMAIL_IMAP_RECONNECT_MESSAGE =
@@ -403,6 +406,9 @@ export async function syncGmailAccount(
   now: string
 ): Promise<GmailSyncResult> {
   const account = await requireGmailAccount(store, userId, accountId);
+  if (account.syncStatus === "syncing" && !isStaleGmailSync(account, now)) {
+    throw new StoreError("sync_in_progress", "Gmail sync is already in progress");
+  }
   const syncing = await store.updateConnectorAccount(
     userId,
     account.id,
@@ -787,7 +793,11 @@ export async function syncConnectedGmailAccounts(
   let failed = 0;
   let skipped = 0;
   for (const account of accounts) {
-    if (account.status !== "connected" || account.syncStatus === "syncing") {
+    if (account.status !== "connected") {
+      skipped += 1;
+      continue;
+    }
+    if (account.syncStatus === "syncing" && !isStaleGmailSync(account, now)) {
       skipped += 1;
       continue;
     }
@@ -809,6 +819,38 @@ export async function syncConnectedGmailAccounts(
     }
   }
   return { attempted, succeeded, failed, skipped };
+}
+
+function isStaleGmailSync(account: ConnectorAccount, now: string): boolean {
+  const reference = Date.parse(
+    account.updatedAt ?? account.lastSyncAt ?? account.lastHealthAt ?? ""
+  );
+  const current = Date.parse(now);
+  if (!Number.isFinite(reference) || !Number.isFinite(current)) return false;
+  return current - reference > GMAIL_SYNC_STALE_MS;
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, timeoutValue: T): Promise<T>;
+async function withTimeout<T>(promise: Promise<T>, ms: number, timeoutError: Error): Promise<T>;
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  timeoutResult: T | Error
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve, reject) => {
+        timeoutId = setTimeout(() => {
+          if (timeoutResult instanceof Error) reject(timeoutResult);
+          else resolve(timeoutResult);
+        }, ms);
+      })
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
 }
 
 export { GoogleConfigError as GmailConfigError };
@@ -952,13 +994,17 @@ async function syncGmailImapAccount(
     throw new StoreError("gmail_profile_missing", "Gmail account email is missing");
   const startedAt = Date.now();
   const imap = gmailImapClient(env);
-  const poll = await imap.poll({
-    user: emailAddress,
-    accessToken,
-    now,
-    recentWindowDays: GMAIL_IMAP_RECENT_WINDOW_DAYS,
-    maxMessages: GMAIL_IMAP_MAX_MESSAGES
-  });
+  const poll = await withTimeout(
+    imap.poll({
+      user: emailAddress,
+      accessToken,
+      now,
+      recentWindowDays: GMAIL_IMAP_RECENT_WINDOW_DAYS,
+      maxMessages: GMAIL_IMAP_MAX_MESSAGES
+    }),
+    GMAIL_IMAP_POLL_TIMEOUT_MS,
+    new StoreError("gmail_imap_timeout", "Gmail IMAP sync timed out. Try again.")
+  );
   const result = await processGmailImapMessages(store, userId, account, poll.messages, env, now);
   const latest = await store.getConnectorAccount(userId, account.id);
   if (!latest) throw new StoreError("not_found", "Gmail account not found");
@@ -967,7 +1013,11 @@ async function syncGmailImapAccount(
   const elapsedMs = Date.now() - startedAt;
   const comparison =
     latest.settings.gmailImapComparisonMode === true
-      ? await gmailImapApiComparison(env, accessToken, account, poll, summary)
+      ? await withTimeout(
+          gmailImapApiComparison(env, accessToken, account, poll, summary),
+          GMAIL_IMAP_COMPARISON_TIMEOUT_MS,
+          null
+        )
       : null;
   const updated = await store.updateConnectorAccount(
     userId,
