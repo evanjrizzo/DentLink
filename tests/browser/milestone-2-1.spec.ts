@@ -1282,7 +1282,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
       .getByRole("button", { name: "Day", exact: true })
       .click();
     await expect(page.getByRole("grid", { name: "Day schedule" })).toBeVisible();
-    await expect(page.getByText("6 AM")).toBeVisible();
+    await expect(page.getByText("6 AM", { exact: true })).toBeVisible();
     await expect(calendarGridEvent(page, "Calendar all-day planning")).toBeVisible();
     await expect(calendarGridEvent(page, "Calendar timed consult")).toBeVisible();
     await page
