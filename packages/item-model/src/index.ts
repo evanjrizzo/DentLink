@@ -94,6 +94,12 @@ export type UserPreferences = {
     selected: string;
   };
   ai: EmailAiPreferenceSettings;
+  appearance: AccountAppearancePreference;
+};
+
+export type AccountAppearancePreference = {
+  profile: Record<string, unknown> | null;
+  updatedAt: IsoDateTime | null;
 };
 
 export type EmailAiPromptPreset = {
@@ -125,6 +131,9 @@ export type UserPreferencesPatch = {
     selected?: string;
   };
   ai?: Partial<EmailAiPreferenceSettings>;
+  appearance?: {
+    profile?: Record<string, unknown> | null;
+  };
 };
 
 export type Note = {

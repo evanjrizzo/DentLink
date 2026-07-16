@@ -2239,7 +2239,7 @@ function emailAiPreferencesFromStoredJson(
     return {
       globalPrompt:
         typeof parsed.globalPrompt === "string" && parsed.globalPrompt.trim()
-          ? parsed.globalPrompt.trim().slice(0, 2000)
+          ? Array.from(parsed.globalPrompt.trim()).slice(0, 2000).join("")
           : fallback.globalPrompt,
       threshold:
         typeof parsed.threshold === "number" && Number.isFinite(parsed.threshold)

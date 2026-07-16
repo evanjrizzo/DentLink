@@ -75,20 +75,149 @@ type QueuedNoteMutation = {
 };
 
 type AppearancePreferences = {
-  preset: "light" | "soft-gray" | "neutral-gray" | "dark" | "charcoal" | "oled" | "purple";
-  mode: "light" | "dark" | "system";
+  version: 2;
+  preset:
+    "light" | "soft-gray" | "neutral-gray" | "dark" | "charcoal" | "oled" | "purple" | "system";
+  loadedProfileId: string | null;
+  loadedProfileName: string;
+  profiles: AppearanceProfile[];
   accent: string;
+  colors: AppearanceColorSettings;
+  typography: AppearanceTypographySettings;
+  surfaces: AppearanceSurfaceSettings;
+  inputs: AppearanceInputSettings;
+  buttons: AppearanceButtonSettings;
+  cards: AppearanceCardSettings;
+  borders: AppearanceBorderSettings;
+  statusColors: AppearanceStatusSettings;
+  branding: AppearanceBrandingSettings;
   roundedness: number;
-  spacing: "compact" | "comfortable" | "spacious";
   animations: boolean;
-  density: "compact" | "comfortable";
   sourceColors: Record<string, string>;
+};
+
+type AppearanceProfile = {
+  id: string;
+  name: string;
+  builtIn: boolean;
+  settings: AppearanceSnapshot;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type AppearanceSnapshot = Omit<
+  AppearancePreferences,
+  "profiles" | "loadedProfileId" | "loadedProfileName"
+>;
+
+type AppearanceColorSettings = {
+  primaryText: string;
+  secondaryText: string;
+  mutedText: string;
+  headings: string;
+  navigationText: string;
+  cardTitles: string;
+  bodyText: string;
+  metadataText: string;
+  links: string;
+  successText: string;
+  warningText: string;
+  dangerText: string;
+  notificationMetadata: string;
+};
+
+type AppearanceTypographySettings = {
+  base: number;
+  small: number;
+  cardTitle: number;
+  pageHeading: number;
+  navigation: number;
+  control: number;
+};
+
+type AppearanceSurfaceSettings = {
+  appBackground: string;
+  headerBackground: string;
+  toolbarBackground: string;
+  cardBackground: string;
+  elevatedPanel: string;
+  modalBackground: string;
+  selectedBackground: string;
+  hoverBackground: string;
+  divider: string;
+};
+
+type AppearanceInputSettings = {
+  background: string;
+  text: string;
+  placeholder: string;
+  border: string;
+  focusBorder: string;
+  invalidBorder: string;
+  disabledBackground: string;
+  disabledText: string;
+};
+
+type AppearanceButtonSettings = {
+  primaryBackground: string;
+  primaryText: string;
+  secondaryBackground: string;
+  secondaryText: string;
+  destructiveBackground: string;
+  destructiveText: string;
+  iconBackground: string;
+  iconColor: string;
+  hoverBackground: string;
+  pressedBackground: string;
+  disabledBackground: string;
+  disabledText: string;
+  focusRing: string;
+};
+
+type AppearanceCardSettings = {
+  background: string;
+  border: string;
+  title: string;
+  body: string;
+  metadata: string;
+  pinnedAccent: string;
+  hover: string;
+  shadow: number;
+  radius: number;
+  borderWidth: number;
+  noteMinWidth: number;
+};
+
+type AppearanceBorderSettings = {
+  globalRadius: number;
+  cardRadius: number;
+  borderWidth: number;
+  shadowIntensity: number;
+};
+
+type AppearanceStatusSettings = {
+  success: string;
+  warning: string;
+  danger: string;
+  info: string;
+  suppressed: string;
+};
+
+type AppearanceBrandingSettings = {
+  logoVariant: "standard" | "dark" | "auto";
+  logoBackground: string;
+  logoBorder: string;
+  logoRadius: number;
+  showLogoBorder: boolean;
 };
 
 type IconName = "check" | "close" | "external" | "pin" | "restore";
 
 const API_BASE_URL = import.meta.env.VITE_DENTLINK_API_BASE_URL ?? "";
 const UI_REFRESH_INTERVAL_MS = 45_000;
+const DEFAULT_IMPORTANCE_INSTRUCTION =
+  "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.";
+const MAX_PROMPT_CHARS = 2000;
 
 export function DentLinkNotesApp(): ReactElement {
   const [client] = useState(
@@ -178,14 +307,7 @@ export function DentLinkNotesApp(): ReactElement {
 
   useEffect(() => {
     localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify(appearance));
-    document.documentElement.dataset.theme = appearance.preset;
-    document.documentElement.dataset.density = appearance.density;
-    document.documentElement.style.setProperty("--accent", appearance.accent);
-    document.documentElement.style.setProperty("--radius", `${appearance.roundedness}px`);
-    document.documentElement.style.setProperty(
-      "--space-mobile",
-      appearance.spacing === "compact" ? "8px" : appearance.spacing === "spacious" ? "16px" : "12px"
-    );
+    applyAppearanceToDocument(appearance);
   }, [appearance]);
 
   useEffect(() => {
@@ -1261,11 +1383,22 @@ export function DentLinkNotesApp(): ReactElement {
   return (
     <>
       <header className="app-header">
-        <span className="brand-mark">
-          <img src="/icons/DentLink.png" alt="DentLink" />
+        <span
+          className={`brand-mark ${appearance.branding.showLogoBorder ? "with-border" : ""}`}
+          style={
+            {
+              "--logo-bg": appearance.branding.logoBackground,
+              "--logo-border": appearance.branding.logoBorder,
+              "--logo-radius": `${appearance.branding.logoRadius}px`
+            } as CSSProperties
+          }
+        >
+          <img src={logoSource(appearance)} alt="DentLink" />
         </span>
         <AppNavigation view={view} onViewChange={setView} variant="top" />
-        <span className="account-email">{auth.user.email}</span>
+        <span className="account-email truncate" title={auth.user.email}>
+          {auth.user.email}
+        </span>
         <button onClick={() => void logout()}>Log out</button>
       </header>
       <AppNavigation view={view} onViewChange={setView} variant="bottom" />
@@ -1539,14 +1672,107 @@ function storedDebugMode(): boolean {
 }
 
 function defaultAppearance(): AppearancePreferences {
-  return {
+  const base: AppearancePreferences = {
+    version: 2,
     preset: "light",
-    mode: "light",
+    loadedProfileId: "builtin-light",
+    loadedProfileName: "Light",
+    profiles: [],
     accent: "#7c3aed",
-    roundedness: 8,
-    spacing: "comfortable",
+    colors: {
+      primaryText: "#171a20",
+      secondaryText: "#3f4854",
+      mutedText: "#6b7280",
+      headings: "#171a20",
+      navigationText: "#171a20",
+      cardTitles: "#171a20",
+      bodyText: "#3f4854",
+      metadataText: "#6b7280",
+      links: "#2563eb",
+      successText: "#15803d",
+      warningText: "#b45309",
+      dangerText: "#b42318",
+      notificationMetadata: "#6b7280"
+    },
+    typography: {
+      base: 15,
+      small: 13,
+      cardTitle: 16,
+      pageHeading: 22,
+      navigation: 14,
+      control: 15
+    },
+    surfaces: {
+      appBackground: "#f5f6f8",
+      headerBackground: "#ffffff",
+      toolbarBackground: "#fbfcff",
+      cardBackground: "#ffffff",
+      elevatedPanel: "#fbfcff",
+      modalBackground: "#ffffff",
+      selectedBackground: "#eee9ff",
+      hoverBackground: "#f3f4f6",
+      divider: "#d8dee8"
+    },
+    inputs: {
+      background: "#ffffff",
+      text: "#171a20",
+      placeholder: "#6b7280",
+      border: "#d8dee8",
+      focusBorder: "#7c3aed",
+      invalidBorder: "#b42318",
+      disabledBackground: "#f3f4f6",
+      disabledText: "#6b7280"
+    },
+    buttons: {
+      primaryBackground: "#7c3aed",
+      primaryText: "#ffffff",
+      secondaryBackground: "#ffffff",
+      secondaryText: "#171a20",
+      destructiveBackground: "#b42318",
+      destructiveText: "#ffffff",
+      iconBackground: "#ffffff",
+      iconColor: "#171a20",
+      hoverBackground: "#f3f4f6",
+      pressedBackground: "#eee9ff",
+      disabledBackground: "#e5e7eb",
+      disabledText: "#6b7280",
+      focusRing: "#7c3aed"
+    },
+    cards: {
+      background: "#ffffff",
+      border: "#d8dee8",
+      title: "#171a20",
+      body: "#3f4854",
+      metadata: "#6b7280",
+      pinnedAccent: "#7c3aed",
+      hover: "#fbfcff",
+      shadow: 1,
+      radius: 12,
+      borderWidth: 1,
+      noteMinWidth: 300
+    },
+    borders: {
+      globalRadius: 10,
+      cardRadius: 12,
+      borderWidth: 1,
+      shadowIntensity: 1
+    },
+    statusColors: {
+      success: "#15803d",
+      warning: "#b45309",
+      danger: "#b42318",
+      info: "#2563eb",
+      suppressed: "#92400e"
+    },
+    branding: {
+      logoVariant: "auto",
+      logoBackground: "#ffffff",
+      logoBorder: "#d8dee8",
+      logoRadius: 8,
+      showLogoBorder: false
+    },
+    roundedness: 10,
     animations: true,
-    density: "comfortable",
     sourceColors: {
       gmail: "#1d4ed8",
       "google-calendar": "#2563eb",
@@ -1555,6 +1781,7 @@ function defaultAppearance(): AppearancePreferences {
       webhook: "#b45309"
     }
   };
+  return { ...base, profiles: builtInAppearanceProfiles(base) };
 }
 
 function storedAppearance(): AppearancePreferences {
@@ -1563,14 +1790,269 @@ function storedAppearance(): AppearancePreferences {
     const parsed = JSON.parse(
       localStorage.getItem(APPEARANCE_STORAGE_KEY) ?? "{}"
     ) as Partial<AppearancePreferences>;
-    return {
-      ...defaultAppearance(),
-      ...parsed,
-      sourceColors: { ...defaultAppearance().sourceColors, ...(parsed.sourceColors ?? {}) }
-    };
+    return normalizeAppearance(parsed);
   } catch {
     return defaultAppearance();
   }
+}
+
+function normalizeAppearance(parsed: Partial<AppearancePreferences>): AppearancePreferences {
+  const fallback = defaultAppearance();
+  const merged = {
+    ...fallback,
+    ...parsed,
+    version: 2 as const,
+    colors: { ...fallback.colors, ...(parsed.colors ?? {}) },
+    typography: { ...fallback.typography, ...(parsed.typography ?? {}) },
+    surfaces: { ...fallback.surfaces, ...(parsed.surfaces ?? {}) },
+    inputs: { ...fallback.inputs, ...(parsed.inputs ?? {}) },
+    buttons: { ...fallback.buttons, ...(parsed.buttons ?? {}) },
+    cards: { ...fallback.cards, ...(parsed.cards ?? {}) },
+    borders: { ...fallback.borders, ...(parsed.borders ?? {}) },
+    statusColors: { ...fallback.statusColors, ...(parsed.statusColors ?? {}) },
+    branding: { ...fallback.branding, ...(parsed.branding ?? {}) },
+    sourceColors: { ...fallback.sourceColors, ...(parsed.sourceColors ?? {}) }
+  };
+  merged.cards.noteMinWidth = clampNumber(merged.cards.noteMinWidth, 220, 480);
+  merged.profiles = [
+    ...builtInAppearanceProfiles(merged),
+    ...(Array.isArray(parsed.profiles) ? parsed.profiles.filter((profile) => !profile.builtIn) : [])
+  ];
+  return merged;
+}
+
+function builtInAppearanceProfiles(base: AppearancePreferences): AppearanceProfile[] {
+  const now = "built-in";
+  const profiles: Array<[string, string, AppearancePreferences["preset"]]> = [
+    ["builtin-light", "Light", "light"],
+    ["builtin-soft-gray", "Soft Gray", "soft-gray"],
+    ["builtin-neutral-gray", "Neutral Gray", "neutral-gray"],
+    ["builtin-dark", "Dark", "dark"],
+    ["builtin-charcoal", "Charcoal", "charcoal"],
+    ["builtin-oled", "OLED", "oled"],
+    ["builtin-purple", "Purple/Cosmic", "purple"],
+    ["builtin-system", "Follow System", "system"]
+  ];
+  return profiles.map(([id, name, preset]) => ({
+    id,
+    name,
+    builtIn: true,
+    settings: appearanceSnapshotForPreset(base, preset),
+    createdAt: now,
+    updatedAt: now
+  }));
+}
+
+function appearanceSnapshotForPreset(
+  base: AppearancePreferences,
+  preset: AppearancePreferences["preset"]
+): AppearanceSnapshot {
+  const snapshot = appearanceSnapshot({ ...base, preset });
+  const darkText = {
+    primaryText: "#f8fafc",
+    secondaryText: "#d1d5db",
+    mutedText: "#9ca3af",
+    headings: "#ffffff",
+    navigationText: "#f8fafc",
+    cardTitles: "#ffffff",
+    bodyText: "#d1d5db",
+    metadataText: "#9ca3af",
+    links: "#93c5fd",
+    successText: "#86efac",
+    warningText: "#fbbf24",
+    dangerText: "#fca5a5",
+    notificationMetadata: "#9ca3af"
+  };
+  if (preset === "soft-gray") {
+    return {
+      ...snapshot,
+      surfaces: {
+        ...snapshot.surfaces,
+        appBackground: "#eef1f5",
+        headerBackground: "#f8fafc",
+        toolbarBackground: "#f1f5f9",
+        cardBackground: "#ffffff",
+        elevatedPanel: "#f8fafc",
+        selectedBackground: "#e7e5ff",
+        hoverBackground: "#e5e7eb"
+      }
+    };
+  }
+  if (preset === "neutral-gray") {
+    return {
+      ...snapshot,
+      surfaces: {
+        ...snapshot.surfaces,
+        appBackground: "#eeeeee",
+        headerBackground: "#fafafa",
+        toolbarBackground: "#f5f5f5",
+        cardBackground: "#ffffff",
+        elevatedPanel: "#fafafa",
+        selectedBackground: "#e5e5e5",
+        hoverBackground: "#eeeeee",
+        divider: "#d4d4d4"
+      },
+      accent: "#525252"
+    };
+  }
+  if (preset === "purple") {
+    return {
+      ...snapshot,
+      accent: "#7c3aed",
+      surfaces: {
+        ...snapshot.surfaces,
+        appBackground: "#f7f4ff",
+        headerBackground: "#ffffff",
+        toolbarBackground: "#fbfaff",
+        selectedBackground: "#ede9fe",
+        hoverBackground: "#f3f0ff"
+      }
+    };
+  }
+  if (preset === "dark" || preset === "charcoal" || preset === "oled" || preset === "system") {
+    const oled = preset === "oled";
+    const charcoal = preset === "charcoal";
+    const appBackground = oled ? "#000000" : charcoal ? "#111111" : "#111827";
+    const panel = oled ? "#050505" : charcoal ? "#181818" : "#1f2937";
+    const elevated = oled ? "#080808" : charcoal ? "#202020" : "#253244";
+    return {
+      ...snapshot,
+      colors: darkText,
+      surfaces: {
+        appBackground,
+        headerBackground: panel,
+        toolbarBackground: panel,
+        cardBackground: panel,
+        elevatedPanel: elevated,
+        modalBackground: elevated,
+        selectedBackground: oled ? "#1f1634" : "#312e81",
+        hoverBackground: oled ? "#111111" : "#374151",
+        divider: oled ? "#262626" : "#4b5563"
+      },
+      inputs: {
+        background: oled ? "#050505" : "#111827",
+        text: "#f8fafc",
+        placeholder: "#9ca3af",
+        border: oled ? "#262626" : "#4b5563",
+        focusBorder: "#a78bfa",
+        invalidBorder: "#fca5a5",
+        disabledBackground: "#1f2937",
+        disabledText: "#9ca3af"
+      },
+      buttons: {
+        primaryBackground: "#7c3aed",
+        primaryText: "#ffffff",
+        secondaryBackground: panel,
+        secondaryText: "#f8fafc",
+        destructiveBackground: "#dc2626",
+        destructiveText: "#ffffff",
+        iconBackground: panel,
+        iconColor: "#f8fafc",
+        hoverBackground: oled ? "#111111" : "#374151",
+        pressedBackground: "#312e81",
+        disabledBackground: "#374151",
+        disabledText: "#9ca3af",
+        focusRing: "#a78bfa"
+      },
+      cards: {
+        ...snapshot.cards,
+        background: panel,
+        border: oled ? "#262626" : "#4b5563",
+        title: "#ffffff",
+        body: "#d1d5db",
+        metadata: "#9ca3af",
+        hover: elevated
+      },
+      branding: {
+        ...snapshot.branding,
+        logoBackground: "#ffffff",
+        logoBorder: oled ? "#262626" : "#4b5563"
+      }
+    };
+  }
+  return snapshot;
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
+}
+
+function applyAppearanceToDocument(appearance: AppearancePreferences): void {
+  const root = document.documentElement;
+  const preset =
+    appearance.preset === "system"
+      ? window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light"
+      : appearance.preset;
+  root.dataset.theme = preset;
+  const vars: Record<string, string> = {
+    "--accent": appearance.accent,
+    "--app-bg": appearance.surfaces.appBackground,
+    "--surface-bg": appearance.surfaces.cardBackground,
+    "--surface-elevated": appearance.surfaces.elevatedPanel,
+    "--header-bg": appearance.surfaces.headerBackground,
+    "--toolbar-bg": appearance.surfaces.toolbarBackground,
+    "--modal-bg": appearance.surfaces.modalBackground,
+    "--selected-bg": appearance.surfaces.selectedBackground,
+    "--hover-bg": appearance.surfaces.hoverBackground,
+    "--border": appearance.surfaces.divider,
+    "--border-subtle": appearance.surfaces.divider,
+    "--text-primary": appearance.colors.primaryText,
+    "--text-secondary": appearance.colors.secondaryText,
+    "--text-muted": appearance.colors.mutedText,
+    "--heading-text": appearance.colors.headings,
+    "--navigation-text": appearance.colors.navigationText,
+    "--card-title": appearance.cards.title,
+    "--card-body": appearance.cards.body,
+    "--metadata-text": appearance.cards.metadata,
+    "--link-text": appearance.colors.links,
+    "--success": appearance.statusColors.success,
+    "--warning": appearance.statusColors.warning,
+    "--error": appearance.statusColors.danger,
+    "--info": appearance.statusColors.info,
+    "--input-bg": appearance.inputs.background,
+    "--input-text": appearance.inputs.text,
+    "--input-placeholder": appearance.inputs.placeholder,
+    "--input-border": appearance.inputs.border,
+    "--input-focus-border": appearance.inputs.focusBorder,
+    "--input-invalid-border": appearance.inputs.invalidBorder,
+    "--input-disabled-bg": appearance.inputs.disabledBackground,
+    "--input-disabled-text": appearance.inputs.disabledText,
+    "--button-primary-bg": appearance.buttons.primaryBackground,
+    "--button-primary-text": appearance.buttons.primaryText,
+    "--button-secondary-bg": appearance.buttons.secondaryBackground,
+    "--button-secondary-text": appearance.buttons.secondaryText,
+    "--button-danger-bg": appearance.buttons.destructiveBackground,
+    "--button-danger-text": appearance.buttons.destructiveText,
+    "--button-icon-bg": appearance.buttons.iconBackground,
+    "--button-icon-color": appearance.buttons.iconColor,
+    "--button-hover-bg": appearance.buttons.hoverBackground,
+    "--button-pressed-bg": appearance.buttons.pressedBackground,
+    "--button-disabled-bg": appearance.buttons.disabledBackground,
+    "--button-disabled-text": appearance.buttons.disabledText,
+    "--focus-color": appearance.buttons.focusRing,
+    "--card-bg": appearance.cards.background,
+    "--card-border": appearance.cards.border,
+    "--card-hover": appearance.cards.hover,
+    "--pin-active": appearance.cards.pinnedAccent,
+    "--radius": `${appearance.borders.globalRadius}px`,
+    "--card-radius": `${appearance.cards.radius}px`,
+    "--border-width": `${appearance.borders.borderWidth}px`,
+    "--card-border-width": `${appearance.cards.borderWidth}px`,
+    "--font-sm": `${appearance.typography.small}px`,
+    "--font-base": `${appearance.typography.base}px`,
+    "--font-lg": `${appearance.typography.pageHeading}px`,
+    "--font-card-title": `${appearance.typography.cardTitle}px`,
+    "--font-navigation": `${appearance.typography.navigation}px`,
+    "--font-control": `${appearance.typography.control}px`,
+    "--note-card-min-width": `${appearance.cards.noteMinWidth}px`,
+    "--logo-bg": appearance.branding.logoBackground,
+    "--logo-border": appearance.branding.logoBorder,
+    "--logo-radius": `${appearance.branding.logoRadius}px`,
+    "--shadow": `0 ${Math.round(8 + appearance.borders.shadowIntensity * 8)}px ${Math.round(24 + appearance.borders.shadowIntensity * 24)}px rgb(15 23 42 / ${Math.min(0.32, 0.08 + appearance.borders.shadowIntensity * 0.08)})`
+  };
+  for (const [key, value] of Object.entries(vars)) root.style.setProperty(key, value);
 }
 
 function AppNavigation(props: {
@@ -1602,6 +2084,18 @@ function AppNavigation(props: {
       ))}
     </nav>
   );
+}
+
+function logoSource(appearance: AppearancePreferences): string {
+  if (appearance.branding.logoVariant === "dark") return "/icons/DentLinkDark.png";
+  if (appearance.branding.logoVariant === "auto") {
+    const darkSurface =
+      appearance.preset === "dark" ||
+      appearance.preset === "charcoal" ||
+      appearance.preset === "oled";
+    return darkSurface ? "/icons/DentLinkDark.png" : "/icons/DentLink.png";
+  }
+  return "/icons/DentLink.png";
 }
 
 function NotificationsView(props: {
@@ -2081,10 +2575,9 @@ function Icon(props: { name: IconName; filled?: boolean }): ReactElement {
   if (props.name === "pin") {
     return (
       <svg {...common} fill={props.filled ? "currentColor" : "none"}>
-        <path d="M12 17v5" />
-        <path d="M7 9l-2 2 8 8 2-2" />
-        <path d="M14 4l6 6" />
-        <path d="M9 9l6-6 6 6-6 6" />
+        <path d="M15.5 3.5 20.5 8.5" />
+        <path d="M8 14 3.5 18.5" />
+        <path d="M7 8.5 11.5 4 20 12.5 15.5 17 7 8.5Z" />
       </svg>
     );
   }
@@ -3904,6 +4397,8 @@ function SettingsView(props: {
         <AppearanceSettingsPanel
           appearance={props.appearance}
           onAppearanceChange={props.onAppearanceChange}
+          preferences={props.preferences}
+          onPreferencesChange={props.onPreferencesChange}
           accounts={props.accounts}
           webhooks={props.webhooks}
         />
@@ -4050,106 +4545,436 @@ function TimezoneSettingsPanel(props: {
 function AppearanceSettingsPanel(props: {
   appearance: AppearancePreferences;
   onAppearanceChange: (appearance: AppearancePreferences) => void;
+  preferences: UserPreferences | null;
+  onPreferencesChange: (
+    patch: Parameters<DentLinkApiClient["updatePreferences"]>[0]
+  ) => Promise<void>;
   accounts: ConnectorAccount[];
   webhooks: Array<WebhookEndpoint & { ingestUrl: string }>;
 }): ReactElement {
-  const update = (patch: Partial<AppearancePreferences>) =>
-    props.onAppearanceChange({ ...props.appearance, ...patch });
+  const [profileName, setProfileName] = useState("");
+  const [importError, setImportError] = useState<string | null>(null);
+  const update = (patch: Partial<AppearancePreferences>) => {
+    props.onAppearanceChange(normalizeAppearance({ ...props.appearance, ...patch }));
+  };
+  const updateSection = <K extends keyof AppearancePreferences>(
+    key: K,
+    value: AppearancePreferences[K]
+  ) => update({ [key]: value } as Partial<AppearancePreferences>);
+  const dirty = appearanceProfileDirty(props.appearance);
+  const accountProfile = props.preferences?.appearance?.profile ?? null;
   return (
     <section className="settings-panel" aria-label="Appearance settings">
       <h2>Appearance</h2>
-      <div className="settings-grid">
-        <label>
-          Preset
-          <select
-            value={props.appearance.preset}
-            onChange={(event) =>
-              update({ preset: event.currentTarget.value as AppearancePreferences["preset"] })
-            }
-          >
-            <option value="light">Light</option>
-            <option value="soft-gray">Soft Gray</option>
-            <option value="neutral-gray">Neutral Gray</option>
-            <option value="dark">Dark</option>
-            <option value="charcoal">Charcoal</option>
-            <option value="oled">OLED</option>
-            <option value="purple">Purple/Cosmic</option>
-          </select>
-        </label>
-        <label>
-          Mode
-          <select
-            value={props.appearance.mode}
-            onChange={(event) =>
-              update({ mode: event.currentTarget.value as AppearancePreferences["mode"] })
-            }
-          >
-            <option value="light">Light</option>
-            <option value="system">Follow system</option>
-            <option value="dark">Dark</option>
-          </select>
-        </label>
-        <label>
-          Accent
+      <details className="appearance-section" open>
+        <summary>
+          Presets and Profiles · {props.appearance.loadedProfileName}
+          {dirty ? " modified" : ""}
+        </summary>
+        <div className="appearance-profile-grid">
+          {props.appearance.profiles.map((profile) => (
+            <button
+              type="button"
+              key={profile.id}
+              className={profile.id === props.appearance.loadedProfileId ? "selected" : ""}
+              onClick={() =>
+                props.onAppearanceChange(loadAppearanceProfile(props.appearance, profile))
+              }
+            >
+              <strong>{profile.name}</strong>
+              <span>{profile.builtIn ? "Built-in" : "Custom"}</span>
+            </button>
+          ))}
+        </div>
+        <div className="inline-form">
           <input
-            type="color"
-            value={props.appearance.accent}
-            onChange={(event) => update({ accent: event.currentTarget.value })}
+            aria-label="Appearance profile name"
+            placeholder="Profile name"
+            value={profileName}
+            onChange={(event) => setProfileName(event.currentTarget.value)}
           />
+          <button
+            type="button"
+            onClick={() => {
+              if (!profileName.trim()) return;
+              props.onAppearanceChange(saveAppearanceProfile(props.appearance, profileName.trim()));
+              setProfileName("");
+            }}
+          >
+            Save profile
+          </button>
+          <button
+            type="button"
+            disabled={!props.appearance.loadedProfileId}
+            onClick={() => props.onAppearanceChange(duplicateAppearanceProfile(props.appearance))}
+          >
+            Duplicate
+          </button>
+          <button
+            type="button"
+            disabled={!currentCustomProfile(props.appearance)}
+            onClick={() => {
+              const name = window.prompt("Rename profile", props.appearance.loadedProfileName);
+              if (name?.trim())
+                props.onAppearanceChange(renameAppearanceProfile(props.appearance, name.trim()));
+            }}
+          >
+            Rename
+          </button>
+          <button
+            type="button"
+            disabled={!currentCustomProfile(props.appearance)}
+            onClick={() =>
+              props.onAppearanceChange(deleteCurrentAppearanceProfile(props.appearance))
+            }
+          >
+            Delete
+          </button>
+        </div>
+      </details>
+
+      <details className="appearance-section">
+        <summary>Text Colors · {props.appearance.colors.primaryText}</summary>
+        <ColorControlGrid
+          values={props.appearance.colors}
+          defaults={defaultAppearance().colors}
+          labels={{
+            primaryText: "Primary text",
+            secondaryText: "Secondary text",
+            mutedText: "Muted text",
+            headings: "Headings",
+            navigationText: "Navigation text",
+            cardTitles: "Card titles",
+            bodyText: "Body text",
+            metadataText: "Metadata text",
+            links: "Links",
+            successText: "Success text",
+            warningText: "Warning text",
+            dangerText: "Danger/error text",
+            notificationMetadata: "Notification metadata"
+          }}
+          onChange={(colors) => updateSection("colors", colors)}
+        />
+      </details>
+      <details className="appearance-section">
+        <summary>Typography · base {props.appearance.typography.base}px</summary>
+        <RangeControlGrid
+          values={props.appearance.typography}
+          defaults={defaultAppearance().typography}
+          labels={{
+            base: "Base/body font size",
+            small: "Small metadata font size",
+            cardTitle: "Card-title font size",
+            pageHeading: "Page-heading font size",
+            navigation: "Navigation font size",
+            control: "Button and input font size"
+          }}
+          min={11}
+          max={28}
+          unit="px"
+          onChange={(typography) => updateSection("typography", typography)}
+        />
+      </details>
+      <details className="appearance-section">
+        <summary>Backgrounds and Surfaces · {props.appearance.surfaces.appBackground}</summary>
+        <ColorControlGrid
+          values={props.appearance.surfaces}
+          defaults={defaultAppearance().surfaces}
+          labels={{
+            appBackground: "Application background",
+            headerBackground: "Top header background",
+            toolbarBackground: "Toolbar surface",
+            cardBackground: "Standard card background",
+            elevatedPanel: "Elevated panel/sheet background",
+            modalBackground: "Modal/dialog background",
+            selectedBackground: "Selected item background",
+            hoverBackground: "Hover background",
+            divider: "Divider/border color"
+          }}
+          onChange={(surfaces) => updateSection("surfaces", surfaces)}
+        />
+      </details>
+      <details className="appearance-section">
+        <summary>Inputs · {props.appearance.inputs.background}</summary>
+        <ColorControlGrid
+          values={props.appearance.inputs}
+          defaults={defaultAppearance().inputs}
+          labels={{
+            background: "Input background",
+            text: "Input text",
+            placeholder: "Placeholder text",
+            border: "Input border",
+            focusBorder: "Focused border",
+            invalidBorder: "Invalid/error border",
+            disabledBackground: "Disabled input background",
+            disabledText: "Disabled input text"
+          }}
+          onChange={(inputs) => updateSection("inputs", inputs)}
+        />
+      </details>
+      <details className="appearance-section">
+        <summary>Buttons and Controls · {props.appearance.buttons.primaryBackground}</summary>
+        <ColorControlGrid
+          values={props.appearance.buttons}
+          defaults={defaultAppearance().buttons}
+          labels={{
+            primaryBackground: "Primary button background",
+            primaryText: "Primary button text",
+            secondaryBackground: "Secondary button background",
+            secondaryText: "Secondary button text",
+            destructiveBackground: "Destructive button background",
+            destructiveText: "Destructive button text",
+            iconBackground: "Icon-button background",
+            iconColor: "Icon color",
+            hoverBackground: "Hover state",
+            pressedBackground: "Pressed state",
+            disabledBackground: "Disabled state",
+            disabledText: "Disabled text",
+            focusRing: "Focus ring"
+          }}
+          onChange={(buttons) => updateSection("buttons", buttons)}
+        />
+      </details>
+      <details className="appearance-section">
+        <summary>Cards · min {props.appearance.cards.noteMinWidth}px</summary>
+        <ColorControlGrid
+          values={{
+            background: props.appearance.cards.background,
+            border: props.appearance.cards.border,
+            title: props.appearance.cards.title,
+            body: props.appearance.cards.body,
+            metadata: props.appearance.cards.metadata,
+            pinnedAccent: props.appearance.cards.pinnedAccent,
+            hover: props.appearance.cards.hover
+          }}
+          defaults={{
+            background: defaultAppearance().cards.background,
+            border: defaultAppearance().cards.border,
+            title: defaultAppearance().cards.title,
+            body: defaultAppearance().cards.body,
+            metadata: defaultAppearance().cards.metadata,
+            pinnedAccent: defaultAppearance().cards.pinnedAccent,
+            hover: defaultAppearance().cards.hover
+          }}
+          labels={{
+            background: "Card background",
+            border: "Card border",
+            title: "Card title color",
+            body: "Card body color",
+            metadata: "Metadata color",
+            pinnedAccent: "Selected/pinned accent",
+            hover: "Hover state"
+          }}
+          onChange={(colors) => updateSection("cards", { ...props.appearance.cards, ...colors })}
+        />
+        <RangeControlGrid
+          values={{
+            shadow: props.appearance.cards.shadow,
+            radius: props.appearance.cards.radius,
+            borderWidth: props.appearance.cards.borderWidth,
+            noteMinWidth: props.appearance.cards.noteMinWidth
+          }}
+          defaults={{
+            shadow: defaultAppearance().cards.shadow,
+            radius: defaultAppearance().cards.radius,
+            borderWidth: defaultAppearance().cards.borderWidth,
+            noteMinWidth: defaultAppearance().cards.noteMinWidth
+          }}
+          labels={{
+            shadow: "Shadow intensity",
+            radius: "Corner radius",
+            borderWidth: "Border thickness",
+            noteMinWidth: "Note card minimum width"
+          }}
+          min={0}
+          max={480}
+          unit="px"
+          bounds={{
+            shadow: [0, 4],
+            radius: [0, 24],
+            borderWidth: [0, 4],
+            noteMinWidth: [220, 480]
+          }}
+          onChange={(values) => updateSection("cards", { ...props.appearance.cards, ...values })}
+        />
+      </details>
+      <details className="appearance-section">
+        <summary>Borders, Corners, and Shadows · {props.appearance.borders.globalRadius}px</summary>
+        <RangeControlGrid
+          values={props.appearance.borders}
+          defaults={defaultAppearance().borders}
+          labels={{
+            globalRadius: "Global corner radius",
+            cardRadius: "Card corner radius",
+            borderWidth: "Border thickness",
+            shadowIntensity: "Shadow intensity"
+          }}
+          min={0}
+          max={32}
+          unit="px"
+          bounds={{ shadowIntensity: [0, 4], borderWidth: [0, 4] }}
+          onChange={(borders) => updateSection("borders", borders)}
+        />
+      </details>
+      <details className="appearance-section">
+        <summary>Status Colors · {props.appearance.statusColors.info}</summary>
+        <ColorControlGrid
+          values={props.appearance.statusColors}
+          defaults={defaultAppearance().statusColors}
+          labels={{
+            success: "Success",
+            warning: "Warning",
+            danger: "Danger/error",
+            info: "Info",
+            suppressed: "Suppressed"
+          }}
+          onChange={(statusColors) => updateSection("statusColors", statusColors)}
+        />
+      </details>
+      <details className="appearance-section">
+        <summary>
+          Source Colors · {Object.keys(props.appearance.sourceColors).length} values
+        </summary>
+        <SourceColorSettings
+          appearance={props.appearance}
+          onAppearanceChange={props.onAppearanceChange}
+          accounts={props.accounts}
+          webhooks={props.webhooks}
+        />
+      </details>
+      <details className="appearance-section">
+        <summary>DentLink Branding · {props.appearance.branding.logoVariant}</summary>
+        <label className="field">
+          <span>Logo variant</span>
+          <select
+            value={props.appearance.branding.logoVariant}
+            onChange={(event) =>
+              updateSection("branding", {
+                ...props.appearance.branding,
+                logoVariant: event.currentTarget.value as AppearanceBrandingSettings["logoVariant"]
+              })
+            }
+          >
+            <option value="standard">Standard logo</option>
+            <option value="dark">Dark logo</option>
+            <option value="auto">Automatic based on surface</option>
+          </select>
         </label>
-        <label>
-          Roundedness
+        <ColorControlGrid
+          values={{
+            logoBackground: props.appearance.branding.logoBackground,
+            logoBorder: props.appearance.branding.logoBorder
+          }}
+          defaults={{
+            logoBackground: defaultAppearance().branding.logoBackground,
+            logoBorder: defaultAppearance().branding.logoBorder
+          }}
+          labels={{ logoBackground: "Logo background", logoBorder: "Logo border" }}
+          onChange={(colors) =>
+            updateSection("branding", { ...props.appearance.branding, ...colors })
+          }
+        />
+        <RangeControlGrid
+          values={{ logoRadius: props.appearance.branding.logoRadius }}
+          defaults={{ logoRadius: defaultAppearance().branding.logoRadius }}
+          labels={{ logoRadius: "Logo container corner radius" }}
+          min={0}
+          max={24}
+          unit="px"
+          onChange={(values) =>
+            updateSection("branding", { ...props.appearance.branding, ...values })
+          }
+        />
+        <label className="debug-toggle">
           <input
-            type="range"
-            min="4"
-            max="16"
-            value={props.appearance.roundedness}
-            onChange={(event) => update({ roundedness: Number(event.currentTarget.value) })}
-          />
-        </label>
-        <label>
-          Spacing
-          <select
-            value={props.appearance.spacing}
+            type="checkbox"
+            checked={props.appearance.branding.showLogoBorder}
             onChange={(event) =>
-              update({ spacing: event.currentTarget.value as AppearancePreferences["spacing"] })
+              updateSection("branding", {
+                ...props.appearance.branding,
+                showLogoBorder: event.currentTarget.checked
+              })
+            }
+          />{" "}
+          Show logo container border
+        </label>
+      </details>
+      <details className="appearance-section">
+        <summary>Advanced · animations {props.appearance.animations ? "on" : "off"}</summary>
+        <label className="debug-toggle">
+          <input
+            type="checkbox"
+            checked={props.appearance.animations}
+            onChange={(event) => update({ animations: event.currentTarget.checked })}
+          />{" "}
+          Animations
+        </label>
+      </details>
+      <details className="appearance-section">
+        <summary>Reset and Transfer · local by default</summary>
+        <div className="inline-form">
+          <button type="button" onClick={() => props.onAppearanceChange(defaultAppearance())}>
+            Reset all
+          </button>
+          <button type="button" onClick={() => exportAppearance(props.appearance)}>
+            Export JSON
+          </button>
+          <label className="import-button">
+            Import JSON
+            <input
+              type="file"
+              accept="application/json"
+              onChange={(event) => {
+                const file = event.currentTarget.files?.[0];
+                if (!file) return;
+                void importAppearance(file)
+                  .then((next) => {
+                    setImportError(null);
+                    if (window.confirm(`Apply appearance profile "${next.loadedProfileName}"?`)) {
+                      props.onAppearanceChange(next);
+                    }
+                  })
+                  .catch((error) =>
+                    setImportError(error instanceof Error ? error.message : "Import failed.")
+                  );
+                event.currentTarget.value = "";
+              }}
+            />
+          </label>
+          <button
+            type="button"
+            onClick={() =>
+              void props.onPreferencesChange({
+                appearance: { profile: appearanceExportPayload(props.appearance) }
+              })
             }
           >
-            <option value="compact">Compact</option>
-            <option value="comfortable">Comfortable</option>
-            <option value="spacious">Spacious</option>
-          </select>
-        </label>
-        <label>
-          Density
-          <select
-            value={props.appearance.density}
-            onChange={(event) =>
-              update({ density: event.currentTarget.value as AppearancePreferences["density"] })
-            }
+            Set for all devices
+          </button>
+          <button
+            type="button"
+            disabled={!accountProfile}
+            onClick={() => {
+              if (!accountProfile) return;
+              props.onAppearanceChange(appearanceFromExport(accountProfile));
+            }}
           >
-            <option value="compact">Compact</option>
-            <option value="comfortable">Comfortable</option>
-          </select>
-        </label>
-      </div>
-      <SourceColorSettings
-        appearance={props.appearance}
-        onAppearanceChange={props.onAppearanceChange}
-        accounts={props.accounts}
-        webhooks={props.webhooks}
-      />
-      <label className="debug-toggle">
-        <input
-          type="checkbox"
-          checked={props.appearance.animations}
-          onChange={(event) => update({ animations: event.currentTarget.checked })}
-        />{" "}
-        Animations
-      </label>
-      <button type="button" onClick={() => props.onAppearanceChange(defaultAppearance())}>
-        Reset to default
-      </button>
+            Apply account profile
+          </button>
+          <button
+            type="button"
+            disabled={!accountProfile}
+            onClick={() => void props.onPreferencesChange({ appearance: { profile: null } })}
+          >
+            Return this device to local-only
+          </button>
+        </div>
+        {importError ? <p role="alert">{importError}</p> : null}
+        <p>
+          Appearance remains local on this device unless you explicitly set or apply an account
+          profile.
+        </p>
+      </details>
     </section>
   );
 }
@@ -4182,18 +5007,26 @@ function SourceColorSettings(props: {
       <div className="source-color-grid">
         {entries.map((entry) => (
           <div key={entry.key} className="source-color-row">
-            <label>
-              <span>{entry.label}</span>
-              <small>{entry.kind}</small>
-              <input
-                type="color"
+            <div className="source-color-copy">
+              <strong className="truncate" title={entry.label}>
+                {entry.label}
+              </strong>
+              <small className="truncate" title={entry.key}>
+                {entry.key}
+              </small>
+              <span>{entry.kind}</span>
+            </div>
+            <div className="source-color-actions">
+              <ColorDraftControl
+                label={`${entry.label} color`}
                 value={entry.color}
-                onChange={(event) => updateColor(entry.key, event.currentTarget.value)}
+                defaultValue={defaultColors[entry.key] ?? entry.color}
+                onChange={(value) => updateColor(entry.key, value)}
               />
-            </label>
-            <button type="button" onClick={() => resetColor(entry.key)}>
-              Reset
-            </button>
+              <button type="button" onClick={() => resetColor(entry.key)}>
+                Reset
+              </button>
+            </div>
           </div>
         ))}
       </div>
@@ -4210,6 +5043,255 @@ function SourceColorSettings(props: {
       </button>
     </section>
   );
+}
+
+function ColorControlGrid<T extends Record<string, string>>(props: {
+  values: T;
+  defaults: T;
+  labels: Record<keyof T, string>;
+  onChange: (values: T) => void;
+}): ReactElement {
+  return (
+    <div className="appearance-control-grid">
+      {(Object.keys(props.values) as Array<keyof T>).map((key) => (
+        <ColorDraftControl
+          key={String(key)}
+          label={props.labels[key]}
+          value={props.values[key] ?? "#000000"}
+          defaultValue={props.defaults[key] ?? props.values[key] ?? "#000000"}
+          onChange={(value) => props.onChange({ ...props.values, [key]: value })}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ColorDraftControl(props: {
+  label: string;
+  value: string;
+  defaultValue: string;
+  onChange: (value: string) => void;
+}): ReactElement {
+  const [draft, setDraft] = useState(props.value);
+  useEffect(() => setDraft(props.value), [props.value]);
+  const valid = /^#[0-9a-fA-F]{6}$/.test(draft);
+  const commit = () => {
+    if (valid) props.onChange(draft);
+  };
+  return (
+    <label className="color-control">
+      <span className="truncate" title={props.label}>
+        {props.label}
+      </span>
+      <span className="color-row">
+        <input
+          type="color"
+          value={valid ? draft : props.value}
+          onChange={(event) => {
+            setDraft(event.currentTarget.value);
+            props.onChange(event.currentTarget.value);
+          }}
+        />
+        <input
+          value={draft}
+          aria-invalid={!valid}
+          onChange={(event) => setDraft(event.currentTarget.value)}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") commit();
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => {
+            setDraft(props.defaultValue);
+            props.onChange(props.defaultValue);
+          }}
+        >
+          Reset
+        </button>
+      </span>
+      {!valid ? (
+        <small role="alert">Use #RRGGBB.</small>
+      ) : (
+        <small>Contrast depends on pairing.</small>
+      )}
+    </label>
+  );
+}
+
+function RangeControlGrid<T extends Record<string, number>>(props: {
+  values: T;
+  defaults: T;
+  labels: Record<keyof T, string>;
+  min: number;
+  max: number;
+  unit: string;
+  bounds?: Partial<Record<keyof T, [number, number]>>;
+  onChange: (values: T) => void;
+}): ReactElement {
+  return (
+    <div className="appearance-control-grid">
+      {(Object.keys(props.values) as Array<keyof T>).map((key) => {
+        const [min, max] = props.bounds?.[key] ?? [props.min, props.max];
+        return (
+          <label key={String(key)} className="range-control">
+            <span>
+              {props.labels[key]}: {props.values[key]}
+              {props.unit}
+            </span>
+            <input
+              type="range"
+              min={min}
+              max={max}
+              value={props.values[key]}
+              onChange={(event) =>
+                props.onChange({ ...props.values, [key]: Number(event.currentTarget.value) })
+              }
+            />
+            <button
+              type="button"
+              onClick={() => props.onChange({ ...props.values, [key]: props.defaults[key] })}
+            >
+              Reset
+            </button>
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+function appearanceSnapshot(appearance: AppearancePreferences): AppearanceSnapshot {
+  const snapshot = { ...appearance } as Partial<AppearancePreferences>;
+  delete snapshot.profiles;
+  delete snapshot.loadedProfileId;
+  delete snapshot.loadedProfileName;
+  return JSON.parse(JSON.stringify(snapshot)) as AppearanceSnapshot;
+}
+
+function loadAppearanceProfile(
+  appearance: AppearancePreferences,
+  profile: AppearanceProfile
+): AppearancePreferences {
+  return normalizeAppearance({
+    ...appearance,
+    ...profile.settings,
+    loadedProfileId: profile.id,
+    loadedProfileName: profile.name,
+    profiles: appearance.profiles
+  });
+}
+
+function saveAppearanceProfile(
+  appearance: AppearancePreferences,
+  name: string
+): AppearancePreferences {
+  const now = new Date().toISOString();
+  const profile: AppearanceProfile = {
+    id: crypto.randomUUID(),
+    name,
+    builtIn: false,
+    settings: appearanceSnapshot(appearance),
+    createdAt: now,
+    updatedAt: now
+  };
+  return {
+    ...appearance,
+    loadedProfileId: profile.id,
+    loadedProfileName: name,
+    profiles: [...appearance.profiles, profile]
+  };
+}
+
+function duplicateAppearanceProfile(appearance: AppearancePreferences): AppearancePreferences {
+  return saveAppearanceProfile(appearance, `${appearance.loadedProfileName} copy`);
+}
+
+function currentCustomProfile(appearance: AppearancePreferences): AppearanceProfile | null {
+  return (
+    appearance.profiles.find(
+      (profile) => profile.id === appearance.loadedProfileId && !profile.builtIn
+    ) ?? null
+  );
+}
+
+function renameAppearanceProfile(
+  appearance: AppearancePreferences,
+  name: string
+): AppearancePreferences {
+  const profile = currentCustomProfile(appearance);
+  if (!profile) return appearance;
+  return {
+    ...appearance,
+    loadedProfileName: name,
+    profiles: appearance.profiles.map((item) =>
+      item.id === profile.id ? { ...item, name, updatedAt: new Date().toISOString() } : item
+    )
+  };
+}
+
+function deleteCurrentAppearanceProfile(appearance: AppearancePreferences): AppearancePreferences {
+  const profile = currentCustomProfile(appearance);
+  if (!profile) return appearance;
+  return normalizeAppearance({
+    ...defaultAppearance(),
+    profiles: appearance.profiles.filter((item) => item.id !== profile.id)
+  });
+}
+
+function appearanceProfileDirty(appearance: AppearancePreferences): boolean {
+  const profile = appearance.profiles.find((item) => item.id === appearance.loadedProfileId);
+  if (!profile) return true;
+  return JSON.stringify(profile.settings) !== JSON.stringify(appearanceSnapshot(appearance));
+}
+
+function appearanceExportPayload(appearance: AppearancePreferences): Record<string, unknown> {
+  return {
+    schema: "dentlink.appearance",
+    version: 2,
+    profileName: appearance.loadedProfileName || "DentLink appearance",
+    exportedAt: new Date().toISOString(),
+    settings: appearanceSnapshot(appearance),
+    sourceColors: appearance.sourceColors,
+    typography: appearance.typography,
+    cardLayout: appearance.cards,
+    branding: appearance.branding
+  };
+}
+
+function exportAppearance(appearance: AppearancePreferences): void {
+  const payload = appearanceExportPayload(appearance);
+  const safeName =
+    String(payload.profileName ?? "profile")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "") || "profile";
+  downloadTextFile(
+    `dentlink-appearance-${safeName}.json`,
+    JSON.stringify(payload, null, 2),
+    "application/json"
+  );
+}
+
+async function importAppearance(file: File): Promise<AppearancePreferences> {
+  return appearanceFromExport(JSON.parse(await file.text()) as Record<string, unknown>);
+}
+
+function appearanceFromExport(payload: Record<string, unknown>): AppearancePreferences {
+  if (payload.schema !== "dentlink.appearance" || payload.version !== 2) {
+    throw new Error("Unsupported appearance file.");
+  }
+  if (typeof payload.settings !== "object" || payload.settings === null) {
+    throw new Error("Appearance file is missing settings.");
+  }
+  const name = typeof payload.profileName === "string" ? payload.profileName : "Imported profile";
+  return normalizeAppearance({
+    ...defaultAppearance(),
+    ...(payload.settings as Partial<AppearancePreferences>),
+    loadedProfileId: null,
+    loadedProfileName: name
+  });
 }
 
 function sourceColorEntries(
@@ -4369,11 +5451,24 @@ function AiImportanceControls(props: {
     accountOverrides: []
   };
   const [presetName, setPresetName] = useState("");
+  const [savingPromptKey, setSavingPromptKey] = useState<string | null>(null);
+  const [promptError, setPromptError] = useState<string | null>(null);
   function overrideFor(accountId: EntityId) {
     return ai.accountOverrides.find((override) => override.accountId === accountId);
   }
   async function saveAi(next: typeof ai): Promise<void> {
     await props.onPreferencesChange({ ai: next });
+  }
+  async function savePrompt(key: string, next: typeof ai): Promise<void> {
+    setSavingPromptKey(key);
+    setPromptError(null);
+    try {
+      await saveAi(next);
+    } catch (error) {
+      setPromptError(error instanceof Error ? error.message : "Prompt save failed.");
+    } finally {
+      setSavingPromptKey(null);
+    }
   }
   return (
     <section className="subsettings-panel" aria-label="AI importance settings">
@@ -4382,17 +5477,15 @@ function AiImportanceControls(props: {
         Prompt and threshold changes affect future scoring. Reprocess today to apply them to stored
         same-day Gmail items without refetching Gmail.
       </p>
-      <label className="field">
-        <span>Global importance instruction</span>
-        <textarea
-          maxLength={2000}
-          value={ai.globalPrompt}
-          onChange={(event) =>
-            void saveAi({ ...ai, globalPrompt: event.currentTarget.value.slice(0, 2000) })
-          }
-        />
-        <span className="character-count">{2000 - ai.globalPrompt.length} characters left</span>
-      </label>
+      {promptError ? <p role="alert">{promptError}</p> : null}
+      <PromptDraftEditor
+        label="Global importance instruction"
+        ariaLabel="Global importance instruction"
+        value={ai.globalPrompt}
+        defaultValue={DEFAULT_IMPORTANCE_INSTRUCTION}
+        saving={savingPromptKey === "global"}
+        onSave={(prompt) => savePrompt("global", { ...ai, globalPrompt: prompt })}
+      />
       <label className="field">
         <span>Notification threshold: {ai.threshold}</span>
         <input
@@ -4465,33 +5558,30 @@ function AiImportanceControls(props: {
                 </label>
                 {!inherited ? (
                   <>
-                    <label className="field">
-                      <span>Account importance instruction</span>
-                      <textarea
-                        maxLength={2000}
-                        value={prompt}
-                        onChange={(event) => {
-                          const rest = ai.accountOverrides.filter(
-                            (item) => item.accountId !== account.id
-                          );
-                          void saveAi({
-                            ...ai,
-                            accountOverrides: [
-                              ...rest,
-                              {
-                                accountId: account.id,
-                                enabled: true,
-                                prompt: event.currentTarget.value.slice(0, 2000),
-                                threshold
-                              }
-                            ]
-                          });
-                        }}
-                      />
-                      <span className="character-count">
-                        {2000 - prompt.length} characters left
-                      </span>
-                    </label>
+                    <PromptDraftEditor
+                      label="Account importance instruction"
+                      ariaLabel="Account importance instruction"
+                      value={prompt}
+                      defaultValue={ai.globalPrompt}
+                      saving={savingPromptKey === account.id}
+                      onSave={(nextPrompt) => {
+                        const rest = ai.accountOverrides.filter(
+                          (item) => item.accountId !== account.id
+                        );
+                        return savePrompt(account.id, {
+                          ...ai,
+                          accountOverrides: [
+                            ...rest,
+                            {
+                              accountId: account.id,
+                              enabled: true,
+                              prompt: nextPrompt,
+                              threshold
+                            }
+                          ]
+                        });
+                      }}
+                    />
                     <label className="field">
                       <span>Account threshold: {threshold}</span>
                       <input
@@ -4601,8 +5691,7 @@ function AiImportanceControls(props: {
         onClick={() =>
           void saveAi({
             ...ai,
-            globalPrompt:
-              "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.",
+            globalPrompt: DEFAULT_IMPORTANCE_INSTRUCTION,
             threshold: 0,
             accountOverrides: []
           })
@@ -4612,6 +5701,88 @@ function AiImportanceControls(props: {
       </button>
     </section>
   );
+}
+
+function PromptDraftEditor(props: {
+  label: string;
+  ariaLabel: string;
+  value: string;
+  defaultValue: string;
+  saving: boolean;
+  onSave: (value: string) => Promise<void>;
+}): ReactElement {
+  const [draft, setDraft] = useState(props.value);
+  const [dirty, setDirty] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!dirty) setDraft(props.value);
+  }, [props.value, dirty]);
+  const normalized = safePromptDraft(draft);
+  const changed = normalized !== props.value;
+  const valid = normalized.trim().length > 0 && normalized.length <= MAX_PROMPT_CHARS;
+  return (
+    <div className="prompt-draft-editor">
+      <label className="field">
+        <span>{props.label}</span>
+        <textarea
+          aria-label={props.ariaLabel}
+          maxLength={MAX_PROMPT_CHARS}
+          value={draft}
+          onChange={(event) => {
+            setDraft(event.currentTarget.value);
+            setDirty(true);
+            setError(null);
+          }}
+        />
+        <span className="character-count">
+          {MAX_PROMPT_CHARS - Array.from(draft).length} characters left
+          {changed ? " · Unsaved changes" : ""}
+        </span>
+      </label>
+      {error ? <p role="alert">{error}</p> : null}
+      <div className="inline-form">
+        <button
+          type="button"
+          disabled={!changed || !valid || props.saving}
+          onClick={() =>
+            void props
+              .onSave(normalized)
+              .then(() => setDirty(false))
+              .catch((caught) =>
+                setError(caught instanceof Error ? caught.message : "Prompt save failed.")
+              )
+          }
+        >
+          {props.saving ? "Saving..." : "Save"}
+        </button>
+        <button
+          type="button"
+          disabled={!changed || props.saving}
+          onClick={() => {
+            setDraft(props.value);
+            setDirty(false);
+            setError(null);
+          }}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          disabled={props.saving}
+          onClick={() => {
+            setDraft(props.defaultValue.slice(0, MAX_PROMPT_CHARS));
+            setDirty(true);
+          }}
+        >
+          Reset
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function safePromptDraft(value: string): string {
+  return Array.from(value).slice(0, MAX_PROMPT_CHARS).join("");
 }
 
 function aiUnavailableLabel(reason: string | null | undefined): string {

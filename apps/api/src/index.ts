@@ -1127,6 +1127,7 @@ function parseAiReprocessBody(value: unknown): { timezone: string; accountId?: s
 
 const TIMEZONE_PREFERENCE_KEY = "timezone_v1";
 const EMAIL_AI_PREFERENCES_KEY = "email_ai_preferences_v1";
+const APPEARANCE_PREFERENCE_KEY = "appearance_profile_v1";
 const DEFAULT_TIMEZONE = "UTC";
 const DEFAULT_IMPORTANCE_PROMPT =
   "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.";
@@ -1150,7 +1151,10 @@ async function getUserPreferences(
     await store.getUserPreference(userId, EMAIL_AI_PREFERENCES_KEY),
     now
   );
-  return { timezone, ai };
+  const appearance = appearancePreferenceFromJson(
+    await store.getUserPreference(userId, APPEARANCE_PREFERENCE_KEY)
+  );
+  return { timezone, ai, appearance };
 }
 
 async function updateUserPreferences(
@@ -1174,14 +1178,50 @@ async function updateUserPreferences(
     typeof patch.ai === "object" && patch.ai !== null
       ? (patch.ai as Record<string, unknown>)
       : null;
+  const appearancePatch =
+    typeof patch.appearance === "object" && patch.appearance !== null
+      ? (patch.appearance as Record<string, unknown>)
+      : null;
 
   const timezone = timezonePatch
     ? normalizeTimezonePatch(current.timezone, timezonePatch)
     : current.timezone;
   const ai = aiPatch ? normalizeAiPreferencePatch(current.ai, aiPatch, now) : current.ai;
+  const appearance = appearancePatch
+    ? normalizeAppearancePreferencePatch(current.appearance, appearancePatch, now)
+    : current.appearance;
   await store.setUserPreference(userId, TIMEZONE_PREFERENCE_KEY, JSON.stringify(timezone), now);
   await store.setUserPreference(userId, EMAIL_AI_PREFERENCES_KEY, JSON.stringify(ai), now);
-  return { timezone, ai };
+  await store.setUserPreference(userId, APPEARANCE_PREFERENCE_KEY, JSON.stringify(appearance), now);
+  return { timezone, ai, appearance };
+}
+
+function appearancePreferenceFromJson(value: string | null): UserPreferences["appearance"] {
+  if (!value) return { profile: null, updatedAt: null };
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const profile =
+      typeof parsed.profile === "object" && parsed.profile !== null
+        ? (parsed.profile as Record<string, unknown>)
+        : null;
+    const updatedAt = typeof parsed.updatedAt === "string" ? parsed.updatedAt : null;
+    return { profile, updatedAt };
+  } catch {
+    return { profile: null, updatedAt: null };
+  }
+}
+
+function normalizeAppearancePreferencePatch(
+  current: UserPreferences["appearance"],
+  patch: Record<string, unknown>,
+  now: string
+): UserPreferences["appearance"] {
+  if (!("profile" in patch)) return current;
+  const profile =
+    typeof patch.profile === "object" && patch.profile !== null
+      ? (JSON.parse(JSON.stringify(patch.profile)) as Record<string, unknown>)
+      : null;
+  return { profile, updatedAt: now };
 }
 
 function timezonePreferenceFromJson(
@@ -1304,7 +1344,7 @@ function normalizeAccountOverride(
 }
 
 function boundedPrompt(value: string): string {
-  return value.trim().replace(/\s+/g, " ").slice(0, MAX_AI_PROMPT_CHARS);
+  return Array.from(value.trim()).slice(0, MAX_AI_PROMPT_CHARS).join("");
 }
 
 function validTimezone(value: string | null): boolean {

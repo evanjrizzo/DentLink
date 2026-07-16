@@ -40,13 +40,13 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     const tagName = `Tag ${runId}`;
     const firstNote = `Task ${runId}`;
     const secondNote = `Reference ${runId}`;
+    await page.getByLabel("New folder name").fill(folderName);
+    await page.getByRole("button", { name: "Add folder" }).click();
+    await expect(page.getByLabel("Folder filter")).toContainText(folderName);
     await page.getByText("Filters").click();
     await page.getByText("Manage folders and tags").click();
-    await page.getByLabel("New folder name").fill(folderName);
-    await page.getByRole("button", { name: "Add" }).first().click();
-    await expect(page.getByLabel("Folder filter")).toContainText(folderName);
     await page.getByLabel("New tag name").fill(tagName);
-    await page.getByRole("button", { name: "Add" }).nth(1).click();
+    await page.getByRole("button", { name: "Add", exact: true }).click();
     await expect(page.getByText(tagName)).toBeVisible();
 
     await page.getByLabel("Create note").click();
@@ -1393,28 +1393,32 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByRole("button", { name: "Appearance", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Notes" }).click();
 
-    const folderBrowser = page.getByLabel("Note folders");
-    await expect(folderBrowser.getByRole("button", { name: /All Notes/ })).toBeVisible();
-    await expect(folderBrowser.getByRole("button", { name: "Unfiled1" })).toBeVisible();
-    await expect(folderBrowser.getByRole("button", { name: "Operations1" })).toBeVisible();
+    const folderContents = page.getByLabel("Folder contents");
+    await expect(folderContents.getByRole("button", { name: /All Notes/ })).toBeVisible();
+    await expect(folderContents.getByRole("button", { name: /^[-+] Unfiled/ })).toBeVisible();
+    await expect(folderContents.getByRole("button", { name: /^[-+] Operations/ })).toBeVisible();
+    await expect(page.getByLabel("Note folders")).toHaveCount(0);
     await expect(noteCard(page, "Filed note")).toHaveCount(0);
-    await page.getByRole("button", { name: "Expand Operations" }).click();
+    await folderContents.getByRole("button", { name: /^[-+] Operations/ }).click();
     await expect(noteCard(page, "Filed note")).toBeVisible();
-    await page.getByRole("button", { name: "Collapse Operations" }).click();
+    await folderContents.getByRole("button", { name: /^[-+] Operations/ }).click();
     await expect(noteCard(page, "Filed note")).toHaveCount(0);
     await page.keyboard.press("Tab");
     await expect(page.locator(":focus")).toBeVisible();
-    await page.getByRole("button", { name: "Expand Operations" }).click();
+    await folderContents.getByRole("button", { name: /^[-+] Operations/ }).click();
     await expect(noteCard(page, "Filed note")).toBeVisible();
 
-    await page.getByText("Filters").click();
-    await page.getByText("Manage folders and tags").click();
-    await page.getByLabel("New folder name").fill("Clinical");
-    await page.getByRole("button", { name: "Add" }).first().click();
-    await expect(folderBrowser.getByRole("button", { name: "Clinical0" })).toBeVisible();
-    await folderBrowser.getByRole("button", { name: "Clinical0" }).click();
-    await expect(noteCard(page, "Filed note")).toHaveCount(0);
-    await folderBrowser.getByRole("button", { name: /All Notes/ }).click();
+    await page.getByLabel("New folder name").last().fill("Clinical");
+    await page.getByRole("button", { name: "Add folder" }).click();
+    await expect(folderContents.getByRole("button", { name: /^[-+] Clinical/ })).toBeVisible();
+    await folderContents.getByRole("button", { name: /^[-+] Clinical/ }).click();
+    await expect(
+      page
+        .locator(".folder-note-group")
+        .filter({ has: page.getByRole("button", { name: /^[-+] Clinical/ }) })
+        .getByRole("article")
+    ).toHaveCount(0);
+    await folderContents.getByRole("button", { name: /All Notes/ }).click();
 
     await page
       .getByRole("article", { name: "Note Unfiled note" })
@@ -1425,41 +1429,35 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await page.getByLabel("Folder for Unfiled note").selectOption({ label: "Clinical" });
     await settleMutation(page);
     await page.getByRole("button", { name: "Close note details" }).click();
-    await folderBrowser.getByRole("button", { name: "Clinical1" }).click();
     await expect(noteCard(page, "Unfiled note")).toBeVisible();
 
-    await folderBrowser.getByRole("button", { name: /All Notes/ }).click();
+    await folderContents.getByRole("button", { name: /All Notes/ }).click();
+    await page.getByLabel("Folder actions for Clinical").click();
     await page
-      .locator(".folder-row")
+      .locator(".folder-note-group")
       .filter({ hasText: "Clinical" })
-      .getByRole("button", { name: "Rename" })
+      .getByRole("menuitem", { name: "Rename" })
       .click();
     await page.getByLabel("Rename Clinical").fill("Treatment");
     await page.getByRole("button", { name: "Save" }).click();
-    await expect(folderBrowser.getByRole("button", { name: "Treatment1" })).toBeVisible();
+    await expect(folderContents.getByRole("button", { name: /^[-+] Treatment/ })).toBeVisible();
     page.once("dialog", async (dialog) => {
       expect(dialog.message()).toContain("move 1 note to Unfiled");
       await dialog.accept();
     });
+    await page.getByLabel("Folder actions for Treatment").click();
     await page
-      .locator(".folder-row")
+      .locator(".folder-note-group")
       .filter({ hasText: "Treatment" })
-      .getByRole("button", { name: "Delete" })
+      .getByRole("menuitem", { name: "Delete" })
       .click();
-    await expect(folderBrowser.getByRole("button", { name: "Treatment1" })).toHaveCount(0);
-    await folderBrowser.getByRole("button", { name: "Unfiled1" }).click();
+    await expect(folderContents.getByRole("button", { name: /^[-+] Treatment/ })).toHaveCount(0);
     await expect(noteCard(page, "Unfiled note")).toBeVisible();
 
     state.failNextFolderCreate = true;
     await page.setViewportSize({ width: 1280, height: 720 });
-    if (!(await page.getByLabel("New folder name").isVisible())) {
-      await page.getByText("Filters").click();
-    }
-    if (!(await page.getByLabel("New folder name").isVisible())) {
-      await page.getByText("Manage folders and tags").click();
-    }
-    await page.getByLabel("New folder name").fill("Broken folder");
-    await page.getByRole("button", { name: "Add" }).first().click();
+    await page.getByLabel("New folder name").last().fill("Broken folder");
+    await page.getByRole("button", { name: "Add folder" }).click();
     await expect(page.getByRole("alert").first()).toContainText("Folder name already exists");
 
     await page.getByRole("button", { name: "Settings" }).click();
@@ -1467,7 +1465,14 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByText("Inheriting global settings")).toBeVisible();
     await page.getByLabel("Override global").click();
     await expect(page.getByText("Using account override")).toBeVisible();
-    await page.getByLabel("Account importance instruction").fill("Prioritize implant messages.");
+    const accountPrompt = page.getByLabel("Account importance instruction");
+    await accountPrompt.fill("Prioritize implant messages with spaces, Pokémon, and emoji ✅.");
+    await page
+      .locator(".prompt-draft-editor")
+      .filter({ has: accountPrompt })
+      .getByRole("button", { name: "Save" })
+      .click();
+    await expect(page.getByText("Unsaved changes")).toHaveCount(0);
     await page.getByLabel(/Account threshold:/).fill("72");
     state.gmailRefetchRequests = 0;
     await page.getByRole("button", { name: "Reprocess this account today" }).click();
@@ -1483,6 +1488,10 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByText("Inheriting global settings")).toBeVisible();
 
     await page.getByRole("button", { name: "Appearance", exact: true }).click();
+    await expect(page.getByText("Presets and Profiles")).toBeVisible();
+    await expect(page.getByText("Text Colors")).toBeVisible();
+    await expect(page.getByText("DentLink Branding")).toBeVisible();
+    await page.locator("summary").filter({ hasText: "Source Colors" }).click();
     await expect(page.getByText("Gmail Account", { exact: true })).toBeVisible();
     await expect(page.getByText("Calendar Account", { exact: true })).toBeVisible();
     await expect(page.getByText("Clinical intake webhook", { exact: true })).toBeVisible();
