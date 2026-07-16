@@ -1038,6 +1038,123 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByText("Refresh All finished.")).toHaveCount(0);
   });
 
+  test("keeps transient scheduled refresh failures quiet outside debug mode", async ({ page }) => {
+    const now = new Date().toISOString();
+    const user = {
+      id: "user_auto_refresh_failure",
+      email: "auto-refresh-failure@example.invalid",
+      createdAt: now
+    };
+    const session = {
+      user,
+      session: {
+        token: "session_auto_refresh_failure",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+      }
+    };
+    let syncAllRequests = 0;
+
+    await page.addInitScript((storedSession) => {
+      window.localStorage.setItem("dentlink.auth.session.v1", JSON.stringify(storedSession));
+      (
+        window as Window & { __DENTLINK_TEST_REFRESH_INTERVAL_MS?: number }
+      ).__DENTLINK_TEST_REFRESH_INTERVAL_MS = 500;
+    }, session);
+
+    await page.route("**/v1/**", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      const path = url.pathname;
+      const method = request.method();
+      if (method === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: corsHeaders() });
+        return;
+      }
+      if (method === "GET" && path === "/v1/auth/session") {
+        await fulfillJson(route, { user, session: { expiresAt: session.session.expiresAt } });
+        return;
+      }
+      if (method === "GET" && path === "/v1/events") {
+        await route.fulfill({
+          status: 200,
+          headers: { ...corsHeaders(), "Content-Type": "text/event-stream" },
+          body: ""
+        });
+        return;
+      }
+      if (method === "GET" && path === "/v1/notes") {
+        await fulfillJson(route, { notes: [], folders: [], tags: [] });
+        return;
+      }
+      if (method === "GET" && path === "/v1/notifications") {
+        await fulfillJson(route, { notifications: [] });
+        return;
+      }
+      if (method === "GET" && path === "/v1/calendar/events") {
+        await fulfillJson(route, { events: [] });
+        return;
+      }
+      if (method === "GET" && path === "/v1/webhooks") {
+        await fulfillJson(route, { webhooks: [] });
+        return;
+      }
+      if (method === "GET" && path === "/v1/connectors/accounts") {
+        await fulfillJson(route, { accounts: [] });
+        return;
+      }
+      if (method === "GET" && path === "/v1/preferences") {
+        await fulfillJson(route, {
+          timezone: {
+            mode: "device",
+            detected: "America/New_York",
+            selected: "America/New_York"
+          },
+          ai: {
+            globalPrompt: "",
+            threshold: 60,
+            presets: [],
+            accountOverrides: []
+          },
+          appearance: { profile: null }
+        });
+        return;
+      }
+      if (method === "GET" && path === "/v1/ai/settings") {
+        await fulfillJson(route, {
+          enabled: true,
+          available: true,
+          provider: "openai",
+          model: "gpt-test-mini",
+          maxInputChars: 6000,
+          unavailableReason: null,
+          requestsThisMonth: 0,
+          inputCharsThisMonth: 0,
+          outputTokensThisMonth: 0,
+          failedRequestsThisMonth: 0,
+          estimatedCostThisMonth: null
+        });
+        return;
+      }
+      if (method === "POST" && path === "/v1/connectors/sync-all") {
+        syncAllRequests += 1;
+        await route.abort("failed");
+        return;
+      }
+      await route.fulfill({
+        status: 404,
+        headers: corsHeaders(),
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "not_found", message: "Not found" } })
+      });
+    });
+
+    await page.goto("/");
+    await expect(page.getByText("next refresh")).toBeVisible();
+    await expect.poll(() => syncAllRequests).toBeGreaterThan(0);
+    await expect(page.getByText("Could not reach DentLink API.")).toHaveCount(0);
+    await expect(page.getByRole("alert")).toHaveCount(0);
+  });
+
   test("renders Google Calendar events after Sync Now without reloading", async ({ page }) => {
     const now = new Date().toISOString();
     const user = {
