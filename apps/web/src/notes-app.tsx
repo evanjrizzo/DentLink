@@ -1420,7 +1420,7 @@ export function DentLinkNotesApp(): ReactElement {
         refreshState={refreshState}
         onRefreshAll={refreshAll}
       />
-      {refreshState.message || refreshState.error ? (
+      {(refreshState.error || debugMode) && (refreshState.message || refreshState.error) ? (
         <section className="refresh-status" aria-live="polite">
           <strong>{refreshState.error ?? refreshState.message}</strong>
           {refreshState.result ? (
