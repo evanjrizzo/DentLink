@@ -214,7 +214,7 @@ type AppearanceBrandingSettings = {
 type IconName = "check" | "close" | "external" | "pin" | "restore";
 
 const API_BASE_URL = import.meta.env.VITE_DENTLINK_API_BASE_URL ?? "";
-const DEFAULT_UI_REFRESH_INTERVAL_MS = 45_000;
+const UI_REFRESH_INTERVAL_MS = 45_000;
 const DEFAULT_IMPORTANCE_INSTRUCTION =
   "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.";
 const MAX_PROMPT_CHARS = 2000;
@@ -282,7 +282,6 @@ export function DentLinkNotesApp(): ReactElement {
   const webhooksRequest = useRef(0);
   const connectorsRequest = useRef(0);
   const refreshPromise = useRef<Promise<void> | null>(null);
-  const refreshAllPromise = useRef<Promise<void> | null>(null);
   const eventsAbort = useRef<AbortController | null>(null);
   const syncCursor = useRef("0");
   const noteMutations = useRef(new Map<EntityId, QueuedNoteMutation>());
@@ -344,11 +343,10 @@ export function DentLinkNotesApp(): ReactElement {
       if (!stopped && document.visibilityState === "visible") void refreshDentLinkData("visible");
     };
     scheduleNextPoll();
-    const refreshIntervalMs = uiRefreshIntervalMs();
     const timer = window.setInterval(() => {
       scheduleNextPoll();
-      if (document.visibilityState === "visible") void refreshAll("scheduled");
-    }, refreshIntervalMs);
+      if (document.visibilityState === "visible") void refreshDentLinkData("poll");
+    }, UI_REFRESH_INTERVAL_MS);
     document.addEventListener("visibilitychange", refreshIfVisible);
     startChangeStream(token, 0);
     return () => {
@@ -497,66 +495,56 @@ export function DentLinkNotesApp(): ReactElement {
   function scheduleNextPoll(): void {
     setRefreshState((current) => ({
       ...current,
-      nextPollAt: new Date(Date.now() + uiRefreshIntervalMs()).toISOString()
+      nextPollAt: new Date(Date.now() + UI_REFRESH_INTERVAL_MS).toISOString()
     }));
   }
 
-  async function refreshAll(reason = "manual"): Promise<void> {
-    if (refreshAllPromise.current) return refreshAllPromise.current;
+  async function refreshAll(): Promise<void> {
+    if (refreshState.running) return;
     setError(null);
-    const work = (async () => {
-      setRefreshState((current) => ({
-        ...current,
-        running: true,
-        message:
-          reason === "scheduled"
-            ? "Automatically refreshing connected services..."
-            : "Refreshing connected services...",
-        result: null,
-        error: null,
+    setRefreshState({
+      running: true,
+      message: "Refreshing connected services...",
+      result: null,
+      error: null,
+      live: refreshState.live,
+      nextPollAt: refreshState.nextPollAt,
+      lastAttemptAt: new Date().toISOString()
+    });
+    try {
+      setRefreshState((current) => ({ ...current, message: "Refreshing Gmail..." }));
+      await refreshStepDelay();
+      const result = await client.syncAllConnectors();
+      setRefreshState((current) => ({ ...current, message: "Updating Notifications...", result }));
+      await refreshStepDelay();
+      await loadNotifications();
+      setRefreshState((current) => ({ ...current, message: "Updating Calendar...", result }));
+      await refreshStepDelay();
+      await Promise.all([loadConnectors(), loadCalendarEvents(), loadNotes(), loadWebhooks()]);
+      setRefreshState({
+        running: false,
+        message: refreshAllSummary(result),
+        result,
+        error: result.status === "failed" ? "Refresh All failed" : null,
+        live: refreshState.live,
+        nextPollAt: refreshState.nextPollAt,
         lastAttemptAt: new Date().toISOString()
-      }));
-      try {
-        setRefreshState((current) => ({ ...current, message: "Refreshing Gmail..." }));
-        await refreshStepDelay();
-        const result = await client.syncAllConnectors();
-        setRefreshState((current) => ({
-          ...current,
-          message: "Updating Notifications...",
-          result
-        }));
-        await refreshStepDelay();
-        await loadNotifications();
-        setRefreshState((current) => ({ ...current, message: "Updating Calendar...", result }));
-        await refreshStepDelay();
-        await Promise.all([loadConnectors(), loadCalendarEvents(), loadNotes(), loadWebhooks()]);
-        setRefreshState((current) => ({
-          ...current,
-          running: false,
-          message: refreshAllSummary(result),
-          result,
-          error: result.status === "failed" ? "Refresh All failed" : null,
-          lastAttemptAt: new Date().toISOString()
-        }));
-        if (result.status === "partial") setError("Partial refresh completed");
-      } catch (caught) {
-        const message = refreshMessageFor(caught);
-        await refreshDentLinkData("refresh-all-failed");
-        setRefreshState((current) => ({
-          ...current,
-          running: false,
-          message: null,
-          result: null,
-          error: message,
-          lastAttemptAt: new Date().toISOString()
-        }));
-        setError(message);
-      } finally {
-        refreshAllPromise.current = null;
-      }
-    })();
-    refreshAllPromise.current = work;
-    return work;
+      });
+      if (result.status === "partial") setError("Partial refresh completed");
+    } catch (caught) {
+      const message = refreshMessageFor(caught);
+      await refreshDentLinkData("refresh-all-failed");
+      setRefreshState({
+        running: false,
+        message: null,
+        result: null,
+        error: message,
+        live: refreshState.live,
+        nextPollAt: refreshState.nextPollAt,
+        lastAttemptAt: new Date().toISOString()
+      });
+      setError(message);
+    }
   }
 
   function startChangeStream(token: string, attempt: number): void {
@@ -1598,7 +1586,7 @@ function PageHeader(props: {
       <span className={`refresh-indicator ${props.refreshState.live}`}>
         Live: {props.refreshState.live}
         {props.refreshState.nextPollAt
-          ? ` · next refresh ${new Date(props.refreshState.nextPollAt).toLocaleTimeString()}`
+          ? ` · next ${new Date(props.refreshState.nextPollAt).toLocaleTimeString()}`
           : ""}
       </span>
       <button
@@ -1677,15 +1665,6 @@ function pageTitle(view: View, settingsTab?: SettingsTab): string {
     default:
       return "Notifications";
   }
-}
-
-function uiRefreshIntervalMs(): number {
-  if (typeof window === "undefined") return DEFAULT_UI_REFRESH_INTERVAL_MS;
-  const testWindow = window as Window & { __DENTLINK_TEST_REFRESH_INTERVAL_MS?: number };
-  const override = testWindow.__DENTLINK_TEST_REFRESH_INTERVAL_MS;
-  return typeof override === "number" && override >= 250
-    ? override
-    : DEFAULT_UI_REFRESH_INTERVAL_MS;
 }
 
 function storedDebugMode(): boolean {
