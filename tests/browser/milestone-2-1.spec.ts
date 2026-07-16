@@ -1035,7 +1035,7 @@ test.describe("Milestone 2.1 preview browser verification", () => {
     await expect(page.getByText("next refresh")).toBeVisible();
     await expect.poll(() => syncAllRequests).toBeGreaterThan(0);
     await expect(notificationCard(page, "Scheduled Refresh All message")).toBeVisible();
-    await expect(page.getByText("Refresh All finished.")).toHaveCount(0);
+    await expect(page.getByText("Refresh All finished.")).toBeVisible();
   });
 
   test("renders Google Calendar events after Sync Now without reloading", async ({ page }) => {
