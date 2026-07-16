@@ -26,6 +26,7 @@ import type {
   EmailAiSettings,
   EntityId,
   Folder,
+  FolderPatch,
   Notification,
   NotificationInput,
   NotificationPatch,
@@ -37,6 +38,7 @@ import type {
   Session,
   SyncChange,
   Tag,
+  TagPatch,
   User,
   WebhookEndpoint,
   WebhookEndpointInput,
@@ -45,20 +47,8 @@ import type {
 } from "@dentlink/item-model";
 
 type Primitive = string | number | null;
-type SyncPayload =
-  | Omit<Extract<SyncChange, { type: "note"; op: "upsert" }>, "cursor">
-  | Omit<Extract<SyncChange, { type: "note"; op: "delete" }>, "cursor">
-  | Omit<Extract<SyncChange, { type: "folder" }>, "cursor">
-  | Omit<Extract<SyncChange, { type: "tag" }>, "cursor">
-  | Omit<Extract<SyncChange, { type: "notification"; op: "upsert" }>, "cursor">
-  | Omit<Extract<SyncChange, { type: "notification"; op: "delete" }>, "cursor">
-  | Omit<Extract<SyncChange, { type: "calendar_event"; op: "upsert" }>, "cursor">
-  | Omit<Extract<SyncChange, { type: "calendar_event"; op: "delete" }>, "cursor">
-  | Omit<Extract<SyncChange, { type: "webhook"; op: "upsert" }>, "cursor">
-  | Omit<Extract<SyncChange, { type: "webhook"; op: "delete" }>, "cursor">
-  | Omit<Extract<SyncChange, { type: "connector_account"; op: "upsert" }>, "cursor">
-  | Omit<Extract<SyncChange, { type: "connector_account"; op: "delete" }>, "cursor">
-  | Omit<Extract<SyncChange, { type: "conflict" }>, "cursor">;
+type WithoutCursor<T> = T extends unknown ? Omit<T, "cursor"> : never;
+type SyncPayload = WithoutCursor<SyncChange>;
 
 export type D1Result<T = unknown> = {
   results?: T[];
@@ -701,6 +691,65 @@ export class D1DentLinkStore implements DentLinkStore {
     return folder;
   }
 
+  async updateFolder(
+    userId: EntityId,
+    folderId: EntityId,
+    patch: FolderPatch,
+    now: string
+  ): Promise<Folder> {
+    const existing = await this.getFolder(userId, folderId);
+    if (!existing) throw new StoreError("not_found", "Folder not found");
+    const folder = { ...existing, name: patch.name?.trim() ?? existing.name, updatedAt: now };
+    await this.batch([
+      this.db
+        .prepare(`UPDATE folders SET name = ?, updated_at = ? WHERE id = ? AND user_id = ?`)
+        .bind(folder.name, folder.updatedAt, folder.id, userId),
+      this.changeStatement(userId, "folder", folder.id, "upsert", {
+        type: "folder",
+        op: "upsert",
+        folder
+      })
+    ]);
+    return folder;
+  }
+
+  async deleteFolder(userId: EntityId, folderId: EntityId, now: string): Promise<void> {
+    const existing = await this.getFolder(userId, folderId);
+    if (!existing) throw new StoreError("not_found", "Folder not found");
+    const notes = await this.all<NoteRow>(
+      `SELECT * FROM notes WHERE user_id = ? AND folder_id = ? AND status != 'deleted'`,
+      [userId, folderId]
+    );
+    const statements = [
+      this.db.prepare(`DELETE FROM folders WHERE id = ? AND user_id = ?`).bind(folderId, userId),
+      this.changeStatement(userId, "folder", folderId, "delete", {
+        type: "folder",
+        op: "delete",
+        id: folderId,
+        userId
+      })
+    ];
+    for (const row of notes) {
+      const note = await this.noteFromRow(row);
+      const next = { ...note, folderId: null, version: note.version + 1, updatedAt: now };
+      statements.push(
+        this.db
+          .prepare(
+            `UPDATE notes SET folder_id = NULL, version = version + 1, updated_at = ?
+             WHERE id = ? AND user_id = ?`
+          )
+          .bind(now, note.id, userId),
+        this.historyStatement(userId, next, "updated", now),
+        this.changeStatement(userId, "note", next.id, "upsert", {
+          type: "note",
+          op: "upsert",
+          note: next
+        })
+      );
+    }
+    await this.batch(statements);
+  }
+
   async createTag(userId: EntityId, name: string, now: string): Promise<Tag> {
     const tag = { id: nextId("tag"), userId, name: name.trim(), createdAt: now, updatedAt: now };
     await this.batch([
@@ -712,6 +761,34 @@ export class D1DentLinkStore implements DentLinkStore {
       this.changeStatement(userId, "tag", tag.id, "upsert", { type: "tag", op: "upsert", tag })
     ]);
     return tag;
+  }
+
+  async updateTag(userId: EntityId, tagId: EntityId, patch: TagPatch, now: string): Promise<Tag> {
+    const existing = await this.getTag(userId, tagId);
+    if (!existing) throw new StoreError("not_found", "Tag not found");
+    const tag = { ...existing, name: patch.name?.trim() ?? existing.name, updatedAt: now };
+    await this.batch([
+      this.db
+        .prepare(`UPDATE tags SET name = ?, updated_at = ? WHERE id = ? AND user_id = ?`)
+        .bind(tag.name, tag.updatedAt, tag.id, userId),
+      this.changeStatement(userId, "tag", tag.id, "upsert", { type: "tag", op: "upsert", tag })
+    ]);
+    return tag;
+  }
+
+  async deleteTag(userId: EntityId, tagId: EntityId): Promise<void> {
+    const existing = await this.getTag(userId, tagId);
+    if (!existing) throw new StoreError("not_found", "Tag not found");
+    await this.batch([
+      this.db.prepare(`DELETE FROM note_tags WHERE tag_id = ? AND user_id = ?`).bind(tagId, userId),
+      this.db.prepare(`DELETE FROM tags WHERE id = ? AND user_id = ?`).bind(tagId, userId),
+      this.changeStatement(userId, "tag", tagId, "delete", {
+        type: "tag",
+        op: "delete",
+        id: tagId,
+        userId
+      })
+    ]);
   }
 
   async listConnectorAccounts(userId: EntityId): Promise<{ accounts: ConnectorAccount[] }> {
@@ -2338,6 +2415,22 @@ export class D1DentLinkStore implements DentLinkStore {
       if (row) tags.push(tagFromRow(row));
     }
     return tags;
+  }
+
+  private async getFolder(userId: EntityId, folderId: EntityId): Promise<Folder | null> {
+    const row = await this.db
+      .prepare(`SELECT * FROM folders WHERE user_id = ? AND id = ?`)
+      .bind(userId, folderId)
+      .first<FolderRow>();
+    return row ? folderFromRow(row) : null;
+  }
+
+  private async getTag(userId: EntityId, tagId: EntityId): Promise<Tag | null> {
+    const row = await this.db
+      .prepare(`SELECT * FROM tags WHERE user_id = ? AND id = ?`)
+      .bind(userId, tagId)
+      .first<TagRow>();
+    return row ? tagFromRow(row) : null;
   }
 
   private async assertFolder(

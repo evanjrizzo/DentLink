@@ -169,6 +169,14 @@ queues, retry, conflict detection, and server reconciliation. Sync responses con
 records and enough metadata for clients to update local caches without recalculating authoritative
 rank.
 
+The web client uses one refresh coordinator for SSE change hints, OAuth return, visibility restore,
+manual Refresh All, connector completion, and a DentLink-state polling fallback. UI polling reloads
+DentLink API resources only; provider polling remains in backend connector sync paths.
+
+Notes text edits and reorders use queued optimistic client mutations. The client may coalesce rapid
+local intent and retry ordinary stale-version conflicts against fresh server versions, but the
+backend remains authoritative and unresolved conflicts remain explicit.
+
 ## Platform capability layers
 
 Shared UI can request capabilities such as opening a source, invoking a desktop action, or launching

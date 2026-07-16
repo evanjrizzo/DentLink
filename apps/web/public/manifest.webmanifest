@@ -1,0 +1,16 @@
+{
+  "name": "DentLink",
+  "short_name": "DentLink",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f6f8",
+  "theme_color": "#ffffff",
+  "icons": [
+    {
+      "src": "/icons/DL.png",
+      "sizes": "111x111",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

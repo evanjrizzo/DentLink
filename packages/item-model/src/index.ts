@@ -33,7 +33,7 @@ export type NoteKind = "task" | "reference";
 export type NoteStatus = "active" | "done" | "deleted";
 export type NotePriority = "none" | "low" | "medium" | "high";
 export type NotificationStatus = "active" | "done" | "dismissed" | "deleted";
-export type CalendarEventSource = "local" | "google-calendar";
+export type CalendarEventSource = "local" | "google-calendar" | "note";
 export type CalendarEventStatus = "active" | "cancelled" | "dismissed" | "deleted";
 export type CalendarSourceFilter = "all" | CalendarEventSource;
 export type NotificationSeverity = "info" | "low" | "medium" | "high";
@@ -71,12 +71,59 @@ export type Folder = {
   updatedAt: IsoDateTime;
 };
 
+export type FolderPatch = {
+  name?: string;
+};
+
 export type Tag = {
   id: EntityId;
   userId: EntityId;
   name: string;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
+};
+
+export type TagPatch = {
+  name?: string;
+};
+
+export type UserPreferences = {
+  timezone: {
+    mode: "device" | "override";
+    detected: string | null;
+    selected: string;
+  };
+  ai: EmailAiPreferenceSettings;
+};
+
+export type EmailAiPromptPreset = {
+  id: EntityId;
+  name: string;
+  prompt: string;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+};
+
+export type EmailAiAccountOverride = {
+  accountId: EntityId;
+  enabled: boolean;
+  prompt: string;
+};
+
+export type EmailAiPreferenceSettings = {
+  globalPrompt: string;
+  threshold: number;
+  presets: EmailAiPromptPreset[];
+  accountOverrides: EmailAiAccountOverride[];
+};
+
+export type UserPreferencesPatch = {
+  timezone?: {
+    mode?: "device" | "override";
+    detected?: string | null;
+    selected?: string;
+  };
+  ai?: Partial<EmailAiPreferenceSettings>;
 };
 
 export type Note = {
@@ -596,6 +643,7 @@ export type EmailAiSettings = {
   model: string;
   maxInputChars: number;
   unavailableReason: string | null;
+  preferences?: EmailAiPreferenceSettings;
   requestsThisMonth: number;
   inputCharsThisMonth: number;
   outputTokensThisMonth: number;
@@ -649,7 +697,9 @@ export type SyncChange =
   | { type: "note"; op: "upsert"; note: Note; cursor: SyncCursor }
   | { type: "note"; op: "delete"; id: EntityId; userId: EntityId; cursor: SyncCursor }
   | { type: "folder"; op: "upsert"; folder: Folder; cursor: SyncCursor }
+  | { type: "folder"; op: "delete"; id: EntityId; userId: EntityId; cursor: SyncCursor }
   | { type: "tag"; op: "upsert"; tag: Tag; cursor: SyncCursor }
+  | { type: "tag"; op: "delete"; id: EntityId; userId: EntityId; cursor: SyncCursor }
   | { type: "notification"; op: "upsert"; notification: Notification; cursor: SyncCursor }
   | { type: "notification"; op: "delete"; id: EntityId; userId: EntityId; cursor: SyncCursor }
   | { type: "calendar_event"; op: "upsert"; event: CalendarEvent; cursor: SyncCursor }

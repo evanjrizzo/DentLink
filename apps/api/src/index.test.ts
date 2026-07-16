@@ -564,6 +564,91 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     );
   });
 
+  it("enforces Unicode-safe note title limits and manages folders, tags, and preferences", async () => {
+    const { store } = createStore();
+    const auth = await register(store, "prefs-notes@example.com");
+    const longTitle = `${"A".repeat(71)}👨‍👩‍👧‍👦extra`;
+    const note = await requestJson<Note>(
+      store,
+      "POST",
+      "/v1/notes",
+      { kind: "task", title: longTitle },
+      auth.session.token,
+      201
+    );
+    expect([
+      ...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(note.title)
+    ]).toHaveLength(72);
+    expect(note.title.endsWith("👨‍👩‍👧‍👦")).toBe(true);
+
+    const folder = await requestJson<{ id: string; name: string }>(
+      store,
+      "POST",
+      "/v1/folders",
+      { name: "Projects" },
+      auth.session.token,
+      201
+    );
+    const renamed = await requestJson<{ name: string }>(
+      store,
+      "PATCH",
+      `/v1/folders/${folder.id}`,
+      { patch: { name: "Archive" } },
+      auth.session.token
+    );
+    expect(renamed.name).toBe("Archive");
+    const tag = await requestJson<{ id: string; name: string }>(
+      store,
+      "POST",
+      "/v1/tags",
+      { name: "Focus" },
+      auth.session.token,
+      201
+    );
+    const renamedTag = await requestJson<{ name: string }>(
+      store,
+      "PATCH",
+      `/v1/tags/${tag.id}`,
+      { patch: { name: "Important" } },
+      auth.session.token
+    );
+    expect(renamedTag.name).toBe("Important");
+    await requestJson<{ ok: true }>(
+      store,
+      "DELETE",
+      `/v1/tags/${tag.id}`,
+      undefined,
+      auth.session.token
+    );
+    await requestJson<{ ok: true }>(
+      store,
+      "DELETE",
+      `/v1/folders/${folder.id}`,
+      undefined,
+      auth.session.token
+    );
+
+    const prefs = await requestJson<{ timezone: { selected: string }; ai: { threshold: number } }>(
+      store,
+      "PATCH",
+      "/v1/preferences",
+      {
+        patch: {
+          timezone: {
+            mode: "override",
+            detected: "America/New_York",
+            selected: "America/Los_Angeles"
+          },
+          ai: { threshold: 67, globalPrompt: "  Prioritize bills and scheduling.  " }
+        }
+      },
+      auth.session.token
+    );
+    expect(prefs.timezone.selected).toBe("America/Los_Angeles");
+    expect(prefs.ai.threshold).toBe(67);
+    expect(JSON.stringify(prefs)).not.toMatch(/system prompt|threshold.*AI/i);
+  });
+
   it("manages connector accounts while rejecting out-of-scope providers", async () => {
     const { store } = createStore();
     const owner = await register(store, "connector-owner@example.com");

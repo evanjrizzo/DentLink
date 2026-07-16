@@ -90,7 +90,7 @@ function mimePart(headers: Map<string, string>, contentType: string, body: strin
   const transferEncoding = headerValue(headers, "content-transfer-encoding")?.toLowerCase() ?? "";
   const disposition = headerValue(headers, "content-disposition");
   const filename = parameter(disposition ?? "", "filename") ?? parameter(contentType, "name");
-  const decodedBody = decodeBody(body, transferEncoding);
+  const decodedBody = decodeBody(body, transferEncoding, parameter(contentType, "charset"));
   return {
     headers,
     contentType: contentType.split(";")[0]?.trim().toLowerCase() ?? "application/octet-stream",
@@ -121,36 +121,57 @@ function parameter(value: string, name: string): string | null {
   return decodeHeader(match?.[1] ?? match?.[2] ?? null);
 }
 
-function decodeBody(body: string, encoding: string): string {
+function decodeBody(body: string, encoding: string, charset: string | null): string {
   if (encoding === "base64") {
     try {
-      return atob(body.replace(/\s+/g, ""));
+      return decodeBytes(binaryStringToBytes(atob(body.replace(/\s+/g, ""))), charset);
     } catch {
       return body;
     }
   }
-  if (encoding === "quoted-printable") return decodeQuotedPrintable(body);
+  if (encoding === "quoted-printable") return decodeQuotedPrintable(body, charset);
   return body;
 }
 
-function decodeQuotedPrintable(value: string): string {
-  return value
+function decodeQuotedPrintable(value: string, charset: string | null = null): string {
+  const binary = value
     .replace(/=\r?\n/g, "")
     .replace(/=([0-9A-F]{2})/gi, (_match, hex: string) =>
       String.fromCharCode(Number.parseInt(hex, 16))
     );
+  return decodeBytes(binaryStringToBytes(binary), charset);
 }
 
 function decodeHeader(value: string | null): string | null {
   if (!value) return null;
   return value.replace(/=\?([^?]+)\?([bqBQ])\?([^?]+)\?=/g, (_match, _charset, encoding, text) => {
+    const charset = String(_charset);
     if (String(encoding).toLowerCase() === "b") {
       try {
-        return atob(String(text));
+        return decodeBytes(binaryStringToBytes(atob(String(text))), charset);
       } catch {
         return String(text);
       }
     }
-    return decodeQuotedPrintable(String(text).replace(/_/g, " "));
+    return decodeQuotedPrintable(String(text).replace(/_/g, " "), charset);
   });
+}
+
+function binaryStringToBytes(value: string): Uint8Array {
+  return Uint8Array.from(value, (char) => char.charCodeAt(0) & 0xff);
+}
+
+function decodeBytes(bytes: Uint8Array, charset: string | null): string {
+  const normalized = (charset ?? "utf-8").trim().toLowerCase();
+  const label =
+    normalized === "utf8"
+      ? "utf-8"
+      : normalized === "latin1" || normalized === "iso8859-1"
+        ? "iso-8859-1"
+        : normalized || "utf-8";
+  try {
+    return new TextDecoder(label, { fatal: false }).decode(bytes);
+  } catch {
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  }
 }

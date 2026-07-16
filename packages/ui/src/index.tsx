@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactElement } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 
 import type { EntityId, Folder, Note, NoteInput, NotePatch, Tag } from "@dentlink/item-model";
 
@@ -13,13 +13,20 @@ export type NotesWorkspaceProps = {
   onFolderChange: (folderId: EntityId | null) => void;
   onTagToggle: (tagId: EntityId) => void;
   onCreateFolder: (name: string) => Promise<void> | void;
+  onUpdateFolder?: (folderId: EntityId, name: string) => Promise<void> | void;
+  onDeleteFolder?: (folderId: EntityId) => Promise<void> | void;
   onCreateTag: (name: string) => Promise<void> | void;
+  onUpdateTag?: (tagId: EntityId, name: string) => Promise<void> | void;
+  onDeleteTag?: (tagId: EntityId) => Promise<void> | void;
   onCreateNote: (input: NoteInput) => Promise<void> | void;
   onUpdateNote: (note: Note, patch: NotePatch) => Promise<void> | void;
   onDeleteNote: (note: Note) => Promise<void> | void;
   onReorderNotes: (orderedNotes: Note[]) => Promise<void> | void;
   updatingNoteIds?: EntityId[];
+  openNoteId?: EntityId | null;
 };
+
+const NOTE_TITLE_LIMIT = 72;
 
 export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
   const [draft, setDraft] = useState<NoteInput>({
@@ -31,11 +38,15 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
   const [composerOpen, setComposerOpen] = useState(false);
   const [editingNoteId, setEditingNoteId] = useState<EntityId | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [moreOptionsOpen, setMoreOptionsOpen] = useState(false);
+  const [moreOptionsOpen, setMoreOptionsOpen] = useState(true);
   const [folderName, setFolderName] = useState("");
   const [tagName, setTagName] = useState("");
   const sortedNotes = useMemo(() => [...props.notes].sort(compareNotes), [props.notes]);
   const editingNote = sortedNotes.find((note) => note.id === editingNoteId) ?? null;
+
+  useEffect(() => {
+    if (props.openNoteId) setEditingNoteId(props.openNoteId);
+  }, [props.openNoteId]);
 
   async function submitDraft(): Promise<void> {
     if (draft.title.trim().length === 0) return;
@@ -74,16 +85,14 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
                 ))}
               </select>
             </label>
-            {props.tags.map((tag) => (
-              <label key={tag.id} className="check-row">
-                <input
-                  type="checkbox"
-                  checked={props.selectedTagIds.includes(tag.id)}
-                  onChange={() => props.onTagToggle(tag.id)}
-                />
-                <span>{tag.name}</span>
-              </label>
-            ))}
+            <TagMultiSelect
+              label="Tags"
+              tags={props.tags}
+              selectedTagIds={props.selectedTagIds}
+              onToggle={props.onTagToggle}
+              onCreateTag={props.onCreateTag}
+              onDeleteTag={props.onDeleteTag}
+            />
             <details className="management-menu">
               <summary>Manage folders and tags</summary>
               <form
@@ -143,6 +152,28 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
           </label>
         ) : null}
 
+        <section className="folder-browser" aria-label="Note folders">
+          <button
+            type="button"
+            className={props.selectedFolderId === null ? "selected" : ""}
+            onClick={() => props.onFolderChange(null)}
+          >
+            <span>Unfiled</span>
+            <strong>{props.notes.filter((note) => !note.folderId).length}</strong>
+          </button>
+          {props.folders.map((folder) => (
+            <button
+              key={folder.id}
+              type="button"
+              className={props.selectedFolderId === folder.id ? "selected" : ""}
+              onClick={() => props.onFolderChange(folder.id)}
+            >
+              <span>{folder.name}</span>
+              <strong>{props.notes.filter((note) => note.folderId === folder.id).length}</strong>
+            </button>
+          ))}
+        </section>
+
         <div className="note-list" aria-label="Notes">
           {sortedNotes.map((note) => (
             <NoteCard key={note.id} note={note} onOpenDetails={setEditingNoteId} {...props} />
@@ -153,9 +184,12 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
         type="button"
         className="floating-action-button"
         aria-label="Create note"
-        onClick={() => setComposerOpen(true)}
+        onClick={() => {
+          setMoreOptionsOpen(true);
+          setComposerOpen(true);
+        }}
       >
-        +
+        <PlusIcon />
       </button>
       {composerOpen ? (
         <div
@@ -190,31 +224,82 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
               }}
             >
               <label>
-                Type
-                <select
-                  value={draft.kind}
-                  onChange={(event) =>
-                    setDraft({ ...draft, kind: event.currentTarget.value as NoteInput["kind"] })
-                  }
-                >
-                  <option value="task">Task</option>
-                  <option value="reference">Reference</option>
-                </select>
-              </label>
-              <label>
                 Title
                 <input
                   aria-label="New note title"
                   placeholder="New note"
+                  maxLength={NOTE_TITLE_LIMIT}
                   value={draft.title}
-                  onChange={(event) => setDraft({ ...draft, title: event.currentTarget.value })}
+                  onChange={(event) =>
+                    setDraft({ ...draft, title: limitTitle(event.currentTarget.value) })
+                  }
+                />
+                <span className="character-count">
+                  {Math.max(0, NOTE_TITLE_LIMIT - graphemeLength(draft.title))} characters left
+                </span>
+              </label>
+              <label>
+                Body
+                <textarea
+                  aria-label="New note body"
+                  placeholder="Details"
+                  value={draft.body ?? ""}
+                  onChange={(event) => setDraft({ ...draft, body: event.currentTarget.value })}
                 />
               </label>
               <details
                 open={moreOptionsOpen}
                 onToggle={(event) => setMoreOptionsOpen(event.currentTarget.open)}
               >
-                <summary>More Options</summary>
+                <summary>
+                  More Options
+                  {draft.folderId || (draft.tagIds?.length ?? 0) > 0 || draft.dueAt ? " •" : ""}
+                </summary>
+                <label>
+                  Type
+                  <select
+                    value={draft.kind}
+                    onChange={(event) =>
+                      setDraft({ ...draft, kind: event.currentTarget.value as NoteInput["kind"] })
+                    }
+                  >
+                    <option value="task">Task</option>
+                    <option value="reference">Reference</option>
+                  </select>
+                </label>
+                <label>
+                  Folder
+                  <select
+                    value={draft.folderId ?? ""}
+                    onChange={(event) =>
+                      setDraft({ ...draft, folderId: event.currentTarget.value || null })
+                    }
+                  >
+                    <option value="">Unfiled</option>
+                    {props.folders.map((folder) => (
+                      <option key={folder.id} value={folder.id}>
+                        {folder.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <TagMultiSelect
+                  label="Tags"
+                  tags={props.tags}
+                  selectedTagIds={draft.tagIds ?? []}
+                  contextLabel={draft.title || "new note"}
+                  onToggle={(tagId) => {
+                    const ids = draft.tagIds ?? [];
+                    setDraft({
+                      ...draft,
+                      tagIds: ids.includes(tagId)
+                        ? ids.filter((id) => id !== tagId)
+                        : [...ids, tagId]
+                    });
+                  }}
+                  onCreateTag={props.onCreateTag}
+                  onDeleteTag={props.onDeleteTag}
+                />
                 <label>
                   Priority
                   <select
@@ -231,6 +316,21 @@ export function NotesWorkspace(props: NotesWorkspaceProps): ReactElement {
                     <option value="medium">Medium</option>
                     <option value="high">High</option>
                   </select>
+                </label>
+                <label>
+                  Due date
+                  <input
+                    type="date"
+                    value={draft.dueAt?.slice(0, 10) ?? ""}
+                    onChange={(event) =>
+                      setDraft({
+                        ...draft,
+                        dueAt: event.currentTarget.value
+                          ? `${event.currentTarget.value}T00:00:00.000Z`
+                          : null
+                      })
+                    }
+                  />
                 </label>
               </details>
               <button type="submit">Create</button>
@@ -312,6 +412,45 @@ function NoteDetailsPanel(
   const { note, sortedNotes } = props;
   const index = sortedNotes.findIndex((item) => item.id === note.id);
   const disabled = props.updatingNoteIds?.includes(note.id) ?? false;
+  const [draft, setDraft] = useState(() => noteDraftFromNote(note));
+  const activeNoteId = useRef(note.id);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (activeNoteId.current !== note.id) {
+      activeNoteId.current = note.id;
+      setDraft(noteDraftFromNote(note));
+      return;
+    }
+    setDraft((current) => ({
+      ...current,
+      version: Math.max(current.version, note.version)
+    }));
+  }, [note]);
+
+  useEffect(
+    () => () => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+    },
+    []
+  );
+
+  function queueTextSave(next: ReturnType<typeof noteDraftFromNote>): void {
+    setDraft(next);
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      void props.onUpdateNote(note, { title: next.title, body: next.body });
+    }, 450);
+  }
+
+  function savePatch(patch: NotePatch): void {
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    void props.onUpdateNote(note, patch);
+  }
+
   return (
     <div className="adaptive-overlay" role="presentation" onClick={props.onClose}>
       <section
@@ -338,25 +477,30 @@ function NoteDetailsPanel(
             Title
             <input
               className="note-title"
-              value={note.title}
+              maxLength={NOTE_TITLE_LIMIT}
+              value={draft.title}
               disabled={disabled}
               onChange={(event) =>
-                void props.onUpdateNote(note, { title: event.currentTarget.value })
+                queueTextSave({ ...draft, title: limitTitle(event.currentTarget.value) })
               }
             />
+            <span className="character-count">
+              {Math.max(0, NOTE_TITLE_LIMIT - graphemeLength(draft.title))} characters left
+            </span>
           </label>
           <label>
             Body
             <textarea
-              value={note.body}
+              value={draft.body}
               disabled={disabled}
-              onChange={(event) =>
-                void props.onUpdateNote(note, { body: event.currentTarget.value })
-              }
+              onChange={(event) => queueTextSave({ ...draft, body: event.currentTarget.value })}
             />
           </label>
           <details>
-            <summary>More Options</summary>
+            <summary>
+              More Options
+              {note.folderId || note.tags.length > 0 || note.dueAt ? " •" : ""}
+            </summary>
             <div className="note-meta note-meta-panel">
               <span>{note.kind}</span>
               <label>
@@ -366,7 +510,7 @@ function NoteDetailsPanel(
                   value={note.priority}
                   disabled={disabled}
                   onChange={(event) =>
-                    void props.onUpdateNote(note, {
+                    savePatch({
                       priority: event.currentTarget.value as NoteInput["priority"]
                     })
                   }
@@ -384,7 +528,7 @@ function NoteDetailsPanel(
                   value={note.folderId ?? ""}
                   disabled={disabled}
                   onChange={(event) =>
-                    void props.onUpdateNote(note, {
+                    savePatch({
                       folderId: event.currentTarget.value || null
                     })
                   }
@@ -405,7 +549,7 @@ function NoteDetailsPanel(
                   value={note.dueAt?.slice(0, 10) ?? ""}
                   disabled={disabled}
                   onChange={(event) =>
-                    void props.onUpdateNote(note, {
+                    savePatch({
                       dueAt: event.currentTarget.value
                         ? `${event.currentTarget.value}T00:00:00.000Z`
                         : null
@@ -413,23 +557,22 @@ function NoteDetailsPanel(
                   }
                 />
               </label>
-              {props.tags.map((tag) => (
-                <label key={tag.id} className="check-row">
-                  <input
-                    aria-label={`${tag.name} tag for ${note.title}`}
-                    type="checkbox"
-                    checked={note.tags.some((item) => item.id === tag.id)}
-                    disabled={disabled}
-                    onChange={(event) => {
-                      const tagIds = event.currentTarget.checked
-                        ? [...note.tags.map((item) => item.id), tag.id]
-                        : note.tags.filter((item) => item.id !== tag.id).map((item) => item.id);
-                      void props.onUpdateNote(note, { tagIds });
-                    }}
-                  />
-                  <span>{tag.name}</span>
-                </label>
-              ))}
+              <TagMultiSelect
+                label="Tags"
+                tags={props.tags}
+                selectedTagIds={note.tags.map((tag) => tag.id)}
+                contextLabel={note.title}
+                initiallyOpen
+                onToggle={(tagId) => {
+                  const ids = note.tags.map((item) => item.id);
+                  savePatch({
+                    tagIds: ids.includes(tagId) ? ids.filter((id) => id !== tagId) : [...ids, tagId]
+                  });
+                }}
+                onCreateTag={props.onCreateTag}
+                onDeleteTag={props.onDeleteTag}
+                disabled={disabled}
+              />
             </div>
             <div className="note-order">
               <button
@@ -461,6 +604,135 @@ function NoteDetailsPanel(
   );
 }
 
+function TagMultiSelect(props: {
+  label: string;
+  tags: Tag[];
+  selectedTagIds: EntityId[];
+  contextLabel?: string;
+  initiallyOpen?: boolean;
+  onToggle: (tagId: EntityId) => void;
+  onCreateTag: (name: string) => Promise<void> | void;
+  onDeleteTag?: (tagId: EntityId) => Promise<void> | void;
+  disabled?: boolean;
+}): ReactElement {
+  const [open, setOpen] = useState(Boolean(props.initiallyOpen));
+  const [query, setQuery] = useState("");
+  const wrapper = useRef<HTMLDivElement | null>(null);
+  const selected = props.tags.filter((tag) => props.selectedTagIds.includes(tag.id));
+  const filtered = props.tags.filter((tag) => tag.name.toLowerCase().includes(query.toLowerCase()));
+  const menuOpen = open || Boolean(props.initiallyOpen);
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      if (props.initiallyOpen) return;
+      if (wrapper.current && !wrapper.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [props.initiallyOpen]);
+  return (
+    <div className="tag-dropdown" ref={wrapper}>
+      <button
+        type="button"
+        aria-expanded={menuOpen}
+        aria-haspopup="listbox"
+        disabled={props.disabled}
+        onClick={() => setOpen((current) => !current)}
+      >
+        {props.label}: {selected.length === 0 ? "None" : selected.map((tag) => tag.name).join(", ")}
+      </button>
+      <div className="selected-tags" aria-label="Selected tags">
+        {(selected.length > 0 ? selected : props.tags).map((tag) => (
+          <span key={tag.id} className="filter-chip">
+            {tag.name}
+          </span>
+        ))}
+      </div>
+      {menuOpen ? (
+        <div className="tag-dropdown-menu" role="listbox" aria-label={props.label}>
+          <input
+            aria-label="Search or create tag"
+            value={query}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") setOpen(false);
+            }}
+            onChange={(event) => setQuery(event.currentTarget.value)}
+          />
+          {filtered.map((tag) => (
+            <label key={tag.id} className="check-row">
+              <input
+                type="checkbox"
+                aria-label={
+                  props.contextLabel
+                    ? `${tag.name} tag for ${props.contextLabel}`
+                    : `${tag.name} tag`
+                }
+                checked={props.selectedTagIds.includes(tag.id)}
+                onChange={() => props.onToggle(tag.id)}
+              />
+              <span>{tag.name}</span>
+              {props.onDeleteTag ? (
+                <button
+                  type="button"
+                  className="mini-danger"
+                  aria-label={`Delete tag ${tag.name}`}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    if (window.confirm(`Delete tag "${tag.name}" from all notes?`)) {
+                      void props.onDeleteTag?.(tag.id);
+                    }
+                  }}
+                >
+                  Delete
+                </button>
+              ) : null}
+            </label>
+          ))}
+          {query.trim() &&
+          !props.tags.some((tag) => tag.name.toLowerCase() === query.trim().toLowerCase()) ? (
+            <button
+              type="button"
+              onClick={() => {
+                void props.onCreateTag(query.trim());
+                setQuery("");
+              }}
+            >
+              Create "{query.trim()}"
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function noteDraftFromNote(note: Note): {
+  id: EntityId;
+  title: string;
+  body: string;
+  version: number;
+} {
+  return { id: note.id, title: note.title, body: note.body, version: note.version };
+}
+
+function limitTitle(value: string): string {
+  if (graphemeLength(value) <= NOTE_TITLE_LIMIT) return value;
+  if (typeof Intl !== "undefined" && "Segmenter" in Intl) {
+    const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+    return [...segmenter.segment(value)]
+      .slice(0, NOTE_TITLE_LIMIT)
+      .map((segment) => segment.segment)
+      .join("");
+  }
+  return Array.from(value).slice(0, NOTE_TITLE_LIMIT).join("");
+}
+
+function graphemeLength(value: string): number {
+  if (typeof Intl !== "undefined" && "Segmenter" in Intl) {
+    return [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value)].length;
+  }
+  return Array.from(value).length;
+}
+
 function compareNotes(left: Note, right: Note): number {
   if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
   return left.globalOrder - right.globalOrder;
@@ -471,4 +743,18 @@ function move<T>(items: T[], from: number, to: number): T[] {
   const [item] = next.splice(from, 1);
   if (item !== undefined) next.splice(to, 0, item);
   return next;
+}
+
+function PlusIcon(): ReactElement {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M12 5v14M5 12h14"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
 }

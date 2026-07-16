@@ -35,6 +35,7 @@ import type {
   ConnectorAccount,
   ConnectorSourceRecord,
   EmailAttachmentMetadata,
+  EmailAiSettings,
   EntityId,
   GmailDiagnostics,
   GmailRule,
@@ -60,6 +61,7 @@ const GMAIL_IMAP_RECONNECT_MESSAGE =
 const GMAIL_RULES_SETTING_KEY = "gmailRulesJson";
 const GMAIL_INGESTION_ENGINE_SETTING_KEY = "gmailIngestionEngine";
 const EMAIL_AI_ENABLED_PREFERENCE_KEY = "email_ai_enabled";
+const EMAIL_AI_PREFERENCES_KEY = "email_ai_preferences_v1";
 
 type GmailOperation =
   | "gmail_token_refresh"
@@ -666,7 +668,7 @@ export async function getEmailAiSettings(
   now: string
 ) {
   const config = await emailAiUserConfig(store, userId, env);
-  return store.getAiUsageSettings(
+  const settings = await store.getAiUsageSettings(
     userId,
     {
       enabled: config.enabled,
@@ -679,6 +681,12 @@ export async function getEmailAiSettings(
     },
     now
   );
+  return {
+    ...settings,
+    preferences: emailAiPreferencesFromStoredJson(
+      await store.getUserPreference(userId, EMAIL_AI_PREFERENCES_KEY)
+    )
+  };
 }
 
 export async function updateEmailAiSettings(
@@ -1924,6 +1932,36 @@ async function emailAiUserConfig(
     ...config,
     enabled: config.available && preference !== "false"
   };
+}
+
+function emailAiPreferencesFromStoredJson(
+  value: string | null
+): NonNullable<EmailAiSettings["preferences"]> {
+  const fallback: NonNullable<EmailAiSettings["preferences"]> = {
+    globalPrompt:
+      "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.",
+    threshold: 0,
+    presets: [],
+    accountOverrides: []
+  };
+  if (!value) return fallback;
+  try {
+    const parsed = JSON.parse(value) as Partial<NonNullable<EmailAiSettings["preferences"]>>;
+    return {
+      globalPrompt:
+        typeof parsed.globalPrompt === "string" && parsed.globalPrompt.trim()
+          ? parsed.globalPrompt.trim().slice(0, 2000)
+          : fallback.globalPrompt,
+      threshold:
+        typeof parsed.threshold === "number" && Number.isFinite(parsed.threshold)
+          ? Math.max(0, Math.min(100, Math.round(parsed.threshold)))
+          : fallback.threshold,
+      presets: Array.isArray(parsed.presets) ? parsed.presets : [],
+      accountOverrides: Array.isArray(parsed.accountOverrides) ? parsed.accountOverrides : []
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 function safeAiMessage(message: string): string {

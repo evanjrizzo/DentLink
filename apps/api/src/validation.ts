@@ -23,6 +23,7 @@ import type {
 const MAX_EMAIL_LENGTH = 254;
 const MAX_PASSWORD_LENGTH = 1024;
 const MAX_TITLE_LENGTH = 200;
+export const MAX_NOTE_TITLE_GRAPHEMES = 72;
 const MAX_BODY_LENGTH = 20_000;
 const MAX_NAME_LENGTH = 80;
 const MAX_SLUG_LENGTH = 80;
@@ -57,7 +58,7 @@ export function parseNoteInput(value: unknown): NoteInput {
   const object = asObject(value);
   const kind = object.kind === "task" || object.kind === "reference" ? object.kind : null;
   if (!kind) throw new ValidationError("invalid_kind", "Note kind must be task or reference");
-  const title = asString(object.title, "title").trim();
+  const title = truncateGraphemes(asString(object.title, "title").trim(), MAX_NOTE_TITLE_GRAPHEMES);
   if (title.length === 0) throw new ValidationError("invalid_title", "Title is required");
   assertMax(title, MAX_TITLE_LENGTH, "title");
   const body = optionalString(object.body, "body") ?? "";
@@ -99,7 +100,13 @@ export function parseNotePatch(value: unknown): { expectedVersion: number; patch
           : patch.kind === "task" || patch.kind === "reference"
             ? patch.kind
             : invalid("invalid_kind"),
-      title: boundedOptionalString(patch.title, "title", MAX_TITLE_LENGTH),
+      title:
+        patch.title === undefined
+          ? undefined
+          : truncateGraphemes(
+              boundedString(patch.title, "title", MAX_TITLE_LENGTH).trim(),
+              MAX_NOTE_TITLE_GRAPHEMES
+            ),
       body: boundedOptionalString(patch.body, "body", MAX_BODY_LENGTH),
       folderId: optionalNullableString(patch.folderId, "folderId"),
       tagIds: boundedOptionalStringArray(patch.tagIds, "tagIds"),
@@ -122,6 +129,34 @@ export function parseName(value: unknown): string {
   if (name.length === 0) throw new ValidationError("invalid_name", "Name is required");
   assertMax(name, MAX_NAME_LENGTH, "name");
   return name;
+}
+
+export function parseNamePatch(value: unknown): { patch: { name?: string } } {
+  const patch = asObject(asObject(value).patch);
+  return {
+    patch: {
+      name: patch.name === undefined ? undefined : parseName({ name: patch.name })
+    }
+  };
+}
+
+export function truncateGraphemes(value: string, max: number): string {
+  if (graphemeLength(value) <= max) return value;
+  if (typeof Intl !== "undefined" && "Segmenter" in Intl) {
+    const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+    return [...segmenter.segment(value)]
+      .slice(0, max)
+      .map((segment) => segment.segment)
+      .join("");
+  }
+  return Array.from(value).slice(0, max).join("");
+}
+
+export function graphemeLength(value: string): number {
+  if (typeof Intl !== "undefined" && "Segmenter" in Intl) {
+    return [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value)].length;
+  }
+  return Array.from(value).length;
 }
 
 export function parseNotificationInput(value: unknown): NotificationInput {
@@ -254,7 +289,7 @@ export function parseCalendarQuery(url: URL): {
     throw new ValidationError("range_too_large", "Calendar range is too large");
   }
   const source = url.searchParams.get("source") ?? "all";
-  if (source !== "all" && source !== "local" && source !== "google-calendar") {
+  if (source !== "all" && source !== "local" && source !== "google-calendar" && source !== "note") {
     throw new ValidationError("invalid_source", "Calendar source filter is invalid");
   }
   return {

@@ -22,6 +22,7 @@ import type {
   NoteInput,
   NotePatch,
   NotesList,
+  UserPreferences,
   WebhookDestination,
   WebhookEndpoint
 } from "@dentlink/item-model";
@@ -30,8 +31,9 @@ import { NotesWorkspace } from "@dentlink/ui";
 const initialList: NotesList = { notes: [], folders: [], tags: [] };
 const SESSION_STORAGE_KEY = "dentlink.auth.session.v1";
 const DEBUG_MODE_STORAGE_KEY = "dentlink.ui.debugMode.v1";
+const APPEARANCE_STORAGE_KEY = "dentlink.appearance.v1";
 type View = "notifications" | "agenda" | "notes" | "settings";
-type SettingsTab = "general" | "ai" | "connections" | "rules" | "debug" | "about";
+type SettingsTab = "general" | "appearance" | "ai" | "connections" | "rules" | "debug" | "about";
 type CalendarMode = "agenda" | "day" | "week" | "month";
 type GmailSyncStage =
   | "Connecting..."
@@ -59,6 +61,27 @@ type RefreshState = {
   message: string | null;
   result: ConnectorSyncAllResult | null;
   error: string | null;
+  live: "connecting" | "connected" | "reconnecting" | "degraded";
+  nextPollAt: string | null;
+  lastAttemptAt: string | null;
+};
+
+type QueuedNoteMutation = {
+  patch: NotePatch;
+  inFlight: boolean;
+  timer: number | null;
+  sequence: number;
+};
+
+type AppearancePreferences = {
+  preset: "light" | "soft-gray" | "neutral-gray" | "dark" | "charcoal" | "oled" | "purple";
+  mode: "light" | "dark" | "system";
+  accent: string;
+  roundedness: number;
+  spacing: "compact" | "comfortable" | "spacious";
+  animations: boolean;
+  density: "compact" | "comfortable";
+  sourceColors: Record<string, string>;
 };
 
 type IconName = "check" | "close" | "external" | "pin" | "restore";
@@ -96,8 +119,12 @@ export function DentLinkNotesApp(): ReactElement {
     running: false,
     message: null,
     result: null,
-    error: null
+    error: null,
+    live: "connecting",
+    nextPollAt: null,
+    lastAttemptAt: null
   });
+  const [preferences, setPreferences] = useState<UserPreferences | null>(null);
   const [gmailEngineSaveStates, setGmailEngineSaveStates] = useState<
     Record<EntityId, GmailEngineSaveState>
   >({});
@@ -110,9 +137,11 @@ export function DentLinkNotesApp(): ReactElement {
   const [view, setView] = useState<View>("notifications");
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [debugMode, setDebugMode] = useState(() => storedDebugMode());
+  const [appearance, setAppearance] = useState<AppearancePreferences>(() => storedAppearance());
   const [search, setSearch] = useState("");
   const [folderId, setFolderId] = useState<EntityId | null>(null);
   const [tagIds, setTagIds] = useState<EntityId[]>([]);
+  const [openNoteId, setOpenNoteId] = useState<EntityId | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [updatingNoteIds, setUpdatingNoteIds] = useState<EntityId[]>([]);
   const notesRequest = useRef(0);
@@ -123,12 +152,39 @@ export function DentLinkNotesApp(): ReactElement {
   const refreshPromise = useRef<Promise<void> | null>(null);
   const eventsAbort = useRef<AbortController | null>(null);
   const syncCursor = useRef("0");
+  const noteMutations = useRef(new Map<EntityId, QueuedNoteMutation>());
+  const noteMutationSequence = useRef(0);
+  const notesListRef = useRef(notesList);
 
   const filteredNotes = useMemo(() => notesList.notes, [notesList.notes]);
+  const effectiveTimezone = preferences?.timezone.selected ?? detectedTimezone();
+  const calendarEventsWithNotes = useMemo(
+    () => [
+      ...calendarEvents,
+      ...dueNoteCalendarEvents(notesList.notes, effectiveTimezone, calendarMode)
+    ],
+    [calendarEvents, notesList.notes, effectiveTimezone, calendarMode, calendarDate]
+  );
+
+  useEffect(() => {
+    notesListRef.current = notesList;
+  }, [notesList]);
 
   useEffect(() => {
     localStorage.setItem(DEBUG_MODE_STORAGE_KEY, debugMode ? "true" : "false");
   }, [debugMode]);
+
+  useEffect(() => {
+    localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify(appearance));
+    document.documentElement.dataset.theme = appearance.preset;
+    document.documentElement.dataset.density = appearance.density;
+    document.documentElement.style.setProperty("--accent", appearance.accent);
+    document.documentElement.style.setProperty("--radius", `${appearance.roundedness}px`);
+    document.documentElement.style.setProperty(
+      "--space-mobile",
+      appearance.spacing === "compact" ? "8px" : appearance.spacing === "spacious" ? "16px" : "12px"
+    );
+  }, [appearance]);
 
   useEffect(() => {
     if (!auth) return;
@@ -162,11 +218,13 @@ export function DentLinkNotesApp(): ReactElement {
     const refreshIfVisible = () => {
       if (!stopped && document.visibilityState === "visible") void refreshDentLinkData("visible");
     };
+    scheduleNextPoll();
     const timer = window.setInterval(() => {
+      scheduleNextPoll();
       if (document.visibilityState === "visible") void refreshDentLinkData("poll");
     }, UI_REFRESH_INTERVAL_MS);
     document.addEventListener("visibilitychange", refreshIfVisible);
-    startChangeStream(token);
+    startChangeStream(token, 0);
     return () => {
       stopped = true;
       window.clearInterval(timer);
@@ -175,6 +233,10 @@ export function DentLinkNotesApp(): ReactElement {
       eventsAbort.current = null;
     };
   }, [auth?.session.token]);
+
+  useEffect(() => {
+    document.title = auth ? `${pageTitle(view, settingsTab)} - DentLink` : "DentLink";
+  }, [auth, view, settingsTab]);
 
   async function loadNotes(
     nextSearch = search,
@@ -239,6 +301,12 @@ export function DentLinkNotesApp(): ReactElement {
     return response.accounts;
   }
 
+  async function loadPreferences(): Promise<void> {
+    const detected = detectedTimezone();
+    const next = await client.getPreferences(detected).catch(() => null);
+    if (next) setPreferences(next);
+  }
+
   async function loadGmailDiagnosticsForAccounts(accounts: ConnectorAccount[]): Promise<void> {
     const gmailAccounts = accounts.filter((account) => account.connectorKey === "gmail");
     const entries = await Promise.all(
@@ -282,6 +350,7 @@ export function DentLinkNotesApp(): ReactElement {
 
   async function refreshDentLinkData(reason: string): Promise<void> {
     if (refreshPromise.current) return refreshPromise.current;
+    setRefreshState((current) => ({ ...current, lastAttemptAt: new Date().toISOString() }));
     const work = (async () => {
       try {
         await Promise.all([
@@ -289,7 +358,8 @@ export function DentLinkNotesApp(): ReactElement {
           loadNotifications(),
           loadCalendarEvents(),
           loadNotes(),
-          loadWebhooks()
+          loadWebhooks(),
+          loadPreferences()
         ]);
         if (reason !== "poll" && reason !== "push") setError(null);
       } catch (caught) {
@@ -303,6 +373,13 @@ export function DentLinkNotesApp(): ReactElement {
     return work;
   }
 
+  function scheduleNextPoll(): void {
+    setRefreshState((current) => ({
+      ...current,
+      nextPollAt: new Date(Date.now() + UI_REFRESH_INTERVAL_MS).toISOString()
+    }));
+  }
+
   async function refreshAll(): Promise<void> {
     if (refreshState.running) return;
     setError(null);
@@ -310,7 +387,10 @@ export function DentLinkNotesApp(): ReactElement {
       running: true,
       message: "Refreshing connected services...",
       result: null,
-      error: null
+      error: null,
+      live: refreshState.live,
+      nextPollAt: refreshState.nextPollAt,
+      lastAttemptAt: new Date().toISOString()
     });
     try {
       setRefreshState((current) => ({ ...current, message: "Refreshing Gmail..." }));
@@ -326,29 +406,66 @@ export function DentLinkNotesApp(): ReactElement {
         running: false,
         message: refreshAllSummary(result),
         result,
-        error: result.status === "failed" ? "Refresh All failed" : null
+        error: result.status === "failed" ? "Refresh All failed" : null,
+        live: refreshState.live,
+        nextPollAt: refreshState.nextPollAt,
+        lastAttemptAt: new Date().toISOString()
       });
       if (result.status === "partial") setError("Partial refresh completed");
     } catch (caught) {
       const message = refreshMessageFor(caught);
       await refreshDentLinkData("refresh-all-failed");
-      setRefreshState({ running: false, message: null, result: null, error: message });
+      setRefreshState({
+        running: false,
+        message: null,
+        result: null,
+        error: message,
+        live: refreshState.live,
+        nextPollAt: refreshState.nextPollAt,
+        lastAttemptAt: new Date().toISOString()
+      });
       setError(message);
     }
   }
 
-  function startChangeStream(token: string): void {
+  function startChangeStream(token: string, attempt: number): void {
     eventsAbort.current?.abort();
     const controller = new AbortController();
     eventsAbort.current = controller;
-    void readDentLinkEvents(token, syncCursor.current, controller.signal, (event) => {
-      syncCursor.current = String(Math.max(Number(syncCursor.current), event.revision));
-      void refreshDentLinkData(`push:${event.type}`);
-    }).catch(() => {
+    setRefreshState((current) => ({
+      ...current,
+      live: attempt === 0 ? "connecting" : "reconnecting"
+    }));
+    void readDentLinkEvents(
+      token,
+      syncCursor.current,
+      controller.signal,
+      (event) => {
+        syncCursor.current = String(Math.max(Number(syncCursor.current), event.revision));
+        void refreshDentLinkData(`push:${event.type}`);
+      },
+      () => {
+        setRefreshState((current) => ({ ...current, live: "connected", message: null }));
+      }
+    ).catch(() => {
       if (!controller.signal.aborted) {
+        const nextAttempt = attempt + 1;
+        const delay = Math.min(30_000, 1000 * 2 ** Math.min(nextAttempt, 5));
         setRefreshState((current) =>
-          current.running ? current : { ...current, message: "Live updates reconnecting..." }
+          current.running
+            ? current
+            : {
+                ...current,
+                live: nextAttempt > 5 ? "degraded" : "reconnecting",
+                message:
+                  nextAttempt > 5
+                    ? "Live updates degraded; polling fallback is active."
+                    : "Live updates reconnecting..."
+              }
         );
+        window.setTimeout(() => {
+          if (!controller.signal.aborted) startChangeStream(token, nextAttempt);
+        }, delay);
       }
     });
   }
@@ -390,6 +507,25 @@ export function DentLinkNotesApp(): ReactElement {
     }
   }
 
+  async function updateFolder(folderId: EntityId, name: string): Promise<void> {
+    try {
+      await client.updateFolder(folderId, { name });
+      await loadNotes();
+    } catch (caught) {
+      handleFailure(caught);
+    }
+  }
+
+  async function deleteFolder(folderId: EntityId): Promise<void> {
+    try {
+      await client.deleteFolder(folderId);
+      setFolderId(null);
+      await loadNotes();
+    } catch (caught) {
+      handleFailure(caught);
+    }
+  }
+
   async function createTag(name: string): Promise<void> {
     try {
       await client.createTag({ name });
@@ -399,24 +535,114 @@ export function DentLinkNotesApp(): ReactElement {
     }
   }
 
-  async function updateNote(note: Note, patch: NotePatch): Promise<void> {
-    const previous = notesList;
-    const current = notesList.notes.find((item) => item.id === note.id) ?? note;
-    setUpdatingNoteIds((ids) => [...new Set([...ids, note.id])]);
-    setNotesList({
-      ...notesList,
-      notes: notesList.notes.map((item) =>
-        item.id === note.id ? optimisticNote(item, patch, notesList.tags) : item
-      )
-    });
+  async function updateTag(tagId: EntityId, name: string): Promise<void> {
     try {
-      await client.updateNote(note.id, current.version, patch);
+      await client.updateTag(tagId, { name });
       await loadNotes();
     } catch (caught) {
-      setNotesList(previous);
       handleFailure(caught);
-    } finally {
-      setUpdatingNoteIds((ids) => ids.filter((id) => id !== note.id));
+    }
+  }
+
+  async function deleteTag(tagId: EntityId): Promise<void> {
+    try {
+      await client.deleteTag(tagId);
+      setTagIds((ids) => ids.filter((id) => id !== tagId));
+      await loadNotes();
+    } catch (caught) {
+      handleFailure(caught);
+    }
+  }
+
+  async function updatePreferences(patch: Parameters<DentLinkApiClient["updatePreferences"]>[0]) {
+    try {
+      const next = await client.updatePreferences(patch);
+      setPreferences(next);
+      if (patch.ai) await loadNotifications();
+    } catch (caught) {
+      handleFailure(caught);
+    }
+  }
+
+  async function updateNote(note: Note, patch: NotePatch): Promise<void> {
+    setNotesList((current) => ({
+      ...current,
+      notes: current.notes.map((item) =>
+        item.id === note.id ? optimisticNote(item, patch, current.tags) : item
+      )
+    }));
+    queueNoteMutation(note.id, patch);
+  }
+
+  function queueNoteMutation(noteId: EntityId, patch: NotePatch): void {
+    const existing = noteMutations.current.get(noteId);
+    const sequence = noteMutationSequence.current + 1;
+    noteMutationSequence.current = sequence;
+    const merged = { ...(existing?.patch ?? {}), ...patch };
+    if (existing?.timer) window.clearTimeout(existing.timer);
+    const entry: QueuedNoteMutation = {
+      patch: merged,
+      inFlight: existing?.inFlight ?? false,
+      timer: null,
+      sequence
+    };
+    entry.timer = window.setTimeout(() => void flushNoteMutation(noteId), 250);
+    noteMutations.current.set(noteId, entry);
+    setUpdatingNoteIds((ids) => [...new Set([...ids, noteId])]);
+    if (!entry.inFlight) void flushNoteMutation(noteId);
+  }
+
+  async function flushNoteMutation(noteId: EntityId): Promise<void> {
+    const entry = noteMutations.current.get(noteId);
+    if (!entry || entry.inFlight) return;
+    if (entry.timer) window.clearTimeout(entry.timer);
+    const patch = entry.patch;
+    noteMutations.current.set(noteId, { ...entry, inFlight: true, timer: null });
+    try {
+      const latestLocal = notesListRef.current.notes.find((item) => item.id === noteId);
+      if (!latestLocal) return;
+      const response = await saveNotePatchWithRetry(noteId, latestLocal.version, patch);
+      setNotesList((current) => ({
+        ...current,
+        notes: current.notes.map((item) =>
+          item.id === noteId && response.version >= item.version ? response : item
+        )
+      }));
+      const currentEntry = noteMutations.current.get(noteId);
+      if (currentEntry && currentEntry.sequence !== entry.sequence) {
+        noteMutations.current.set(noteId, {
+          ...currentEntry,
+          inFlight: false,
+          patch: currentEntry.patch
+        });
+        void flushNoteMutation(noteId);
+      } else {
+        noteMutations.current.delete(noteId);
+        setUpdatingNoteIds((ids) => ids.filter((id) => id !== noteId));
+      }
+    } catch (caught) {
+      const currentEntry = noteMutations.current.get(noteId);
+      if (currentEntry) noteMutations.current.set(noteId, { ...currentEntry, inFlight: false });
+      setUpdatingNoteIds((ids) => ids.filter((id) => id !== noteId));
+      await loadNotes().catch(() => undefined);
+      handleFailure(caught);
+    }
+  }
+
+  async function saveNotePatchWithRetry(
+    noteId: EntityId,
+    expectedVersion: number,
+    patch: NotePatch
+  ): Promise<Note> {
+    try {
+      return await client.updateNote(noteId, expectedVersion, patch);
+    } catch (caught) {
+      if (!(caught instanceof DentLinkApiError) || caught.code !== "version_mismatch") throw caught;
+      const latest = await client.listNotes({ search: undefined, folderId: undefined, tagIds: [] });
+      const server = latest.notes.find((item) => item.id === noteId);
+      if (!server) throw caught;
+      setNotesList(latest);
+      return client.updateNote(noteId, server.version, patch);
     }
   }
 
@@ -449,6 +675,23 @@ export function DentLinkNotesApp(): ReactElement {
       await client.updateNotification(notification.id, notification.version, patch);
       await loadNotifications();
     } catch (caught) {
+      if (caught instanceof DentLinkApiError && caught.code === "version_mismatch") {
+        try {
+          const latest = await client.listNotifications();
+          const current = latest.notifications.find((item) => item.id === notification.id);
+          if (!current) {
+            setNotifications(latest.notifications);
+            return;
+          }
+          await client.updateNotification(current.id, current.version, patch);
+          await loadNotifications();
+          return;
+        } catch (retryError) {
+          setNotifications(previous);
+          handleFailure(retryError);
+          return;
+        }
+      }
       setNotifications(previous);
       handleFailure(caught);
     }
@@ -502,6 +745,35 @@ export function DentLinkNotesApp(): ReactElement {
       );
       await loadNotifications();
     } catch (caught) {
+      if (caught instanceof DentLinkApiError && caught.code === "version_mismatch") {
+        try {
+          const latest = await client.listNotifications();
+          const latestById = new Map(latest.notifications.map((item) => [item.id, item]));
+          await client.reorderNotifications(
+            orderedNotifications
+              .map((notification, index) => {
+                const current = latestById.get(notification.id);
+                return current
+                  ? {
+                      id: notification.id,
+                      expectedVersion: current.version,
+                      globalOrder: (index + 1) * 1000
+                    }
+                  : null;
+              })
+              .filter(
+                (item): item is { id: EntityId; expectedVersion: number; globalOrder: number } =>
+                  Boolean(item)
+              )
+          );
+          await loadNotifications();
+          return;
+        } catch (retryError) {
+          setNotifications(previous);
+          handleFailure(retryError);
+          return;
+        }
+      }
       setNotifications(previous);
       handleFailure(caught);
     }
@@ -852,7 +1124,15 @@ export function DentLinkNotesApp(): ReactElement {
       setCalendarEvents([]);
       setWebhooks([]);
       setConnectorAccounts([]);
-      setRefreshState({ running: false, message: null, result: null, error: null });
+      setRefreshState({
+        running: false,
+        message: null,
+        result: null,
+        error: null,
+        live: "connecting",
+        nextPollAt: null,
+        lastAttemptAt: null
+      });
       setLastWebhookSecret(null);
       setSearch("");
       setFolderId(null);
@@ -875,6 +1155,35 @@ export function DentLinkNotesApp(): ReactElement {
       await client.reorderNotes(noteOrders);
       await loadNotes();
     } catch (caught) {
+      if (caught instanceof DentLinkApiError && caught.code === "version_mismatch") {
+        try {
+          const latest = await client.listNotes();
+          const latestById = new Map(latest.notes.map((note) => [note.id, note]));
+          await client.reorderNotes(
+            orderedNotes
+              .map((note, index) => {
+                const latestNote = latestById.get(note.id);
+                return latestNote
+                  ? {
+                      id: note.id,
+                      expectedVersion: latestNote.version,
+                      globalOrder: (index + 1) * 1000
+                    }
+                  : null;
+              })
+              .filter(
+                (item): item is { id: EntityId; expectedVersion: number; globalOrder: number } =>
+                  Boolean(item)
+              )
+          );
+          await loadNotes();
+          return;
+        } catch (retryError) {
+          setNotesList(previous);
+          handleFailure(retryError);
+          return;
+        }
+      }
       setNotesList(previous);
       handleFailure(caught);
     }
@@ -899,7 +1208,7 @@ export function DentLinkNotesApp(): ReactElement {
             void authenticate("login");
           }}
         >
-          <h1>DentLink Notes</h1>
+          <h1>DentLink</h1>
           <label>
             Email
             <input
@@ -935,15 +1244,18 @@ export function DentLinkNotesApp(): ReactElement {
   return (
     <>
       <header className="app-header">
-        <strong>DentLink</strong>
+        <span className="brand-mark">
+          <img src="/icons/DentLink.png" alt="DentLink" />
+        </span>
         <AppNavigation view={view} onViewChange={setView} variant="top" />
         <span className="account-email">{auth.user.email}</span>
         <button onClick={() => void logout()}>Log out</button>
       </header>
       <AppNavigation view={view} onViewChange={setView} variant="bottom" />
       <PageHeader
-        title={pageTitle(view)}
+        title={pageTitle(view, settingsTab)}
         refreshRunning={refreshState.running}
+        refreshState={refreshState}
         onRefreshAll={refreshAll}
       />
       {refreshState.message || refreshState.error ? (
@@ -970,6 +1282,7 @@ export function DentLinkNotesApp(): ReactElement {
         <NotificationsView
           notifications={notifications}
           aiSettings={emailAiSettings}
+          importanceThreshold={preferences?.ai.threshold ?? 0}
           onCreateNotification={createNotification}
           onUpdateNotification={updateNotification}
           onDeleteNotification={deleteNotification}
@@ -979,7 +1292,7 @@ export function DentLinkNotesApp(): ReactElement {
       ) : null}
       {view === "agenda" ? (
         <CalendarWorkspace
-          events={calendarEvents}
+          events={calendarEventsWithNotes}
           accounts={connectorAccounts}
           mode={calendarMode}
           selectedDate={calendarDate}
@@ -1001,6 +1314,10 @@ export function DentLinkNotesApp(): ReactElement {
           onConnectGoogleCalendar={connectGoogleCalendar}
           onSyncGoogleCalendar={syncGoogleCalendar}
           onDismissEvent={dismissCalendarEvent}
+          onOpenNote={(noteId) => {
+            setOpenNoteId(noteId);
+            setView("notes");
+          }}
         />
       ) : null}
       {view === "notes" ? (
@@ -1027,12 +1344,17 @@ export function DentLinkNotesApp(): ReactElement {
             void loadNotes(search, folderId, nextTagIds);
           }}
           onCreateFolder={createFolder}
+          onUpdateFolder={updateFolder}
+          onDeleteFolder={deleteFolder}
           onCreateTag={createTag}
+          onUpdateTag={updateTag}
+          onDeleteTag={deleteTag}
           onCreateNote={createNote}
           onUpdateNote={updateNote}
           onDeleteNote={deleteNote}
           onReorderNotes={reorderNotes}
           updatingNoteIds={updatingNoteIds}
+          openNoteId={openNoteId}
         />
       ) : null}
       {view === "settings" ? (
@@ -1041,6 +1363,10 @@ export function DentLinkNotesApp(): ReactElement {
           onTabChange={setSettingsTab}
           debugMode={debugMode}
           onDebugModeChange={setDebugMode}
+          appearance={appearance}
+          onAppearanceChange={setAppearance}
+          preferences={preferences}
+          onPreferencesChange={updatePreferences}
           aiSettings={emailAiSettings}
           onEmailAiEnabledChange={updateEmailAiEnabled}
           accounts={connectorAccounts}
@@ -1089,29 +1415,89 @@ function optimisticNote(note: Note, patch: NotePatch, tags: NotesList["tags"]): 
 function PageHeader(props: {
   title: string;
   refreshRunning: boolean;
+  refreshState: RefreshState;
   onRefreshAll: () => Promise<void>;
 }): ReactElement {
   return (
     <section className="page-header" aria-label={`${props.title} page controls`}>
       <h1>{props.title}</h1>
+      <span className={`refresh-indicator ${props.refreshState.live}`}>
+        Live: {props.refreshState.live}
+        {props.refreshState.nextPollAt
+          ? ` · next ${new Date(props.refreshState.nextPollAt).toLocaleTimeString()}`
+          : ""}
+      </span>
       <button
         type="button"
+        className="icon-refresh-button"
+        aria-label="Refresh All"
+        title="Refresh all connected services"
+        aria-busy={props.refreshRunning}
         onClick={() => void props.onRefreshAll()}
         disabled={props.refreshRunning}
       >
-        {props.refreshRunning ? "Refreshing..." : "Refresh All"}
+        <RefreshIcon />
       </button>
     </section>
   );
 }
 
-function pageTitle(view: View): string {
+function RefreshIcon(): ReactElement {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M20 12a8 8 0 0 1-13.7 5.6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+      <path
+        d="M4 12A8 8 0 0 1 17.7 6.4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+      <path d="M17 3v4h4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path
+        d="M7 21v-4H3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function PlusIcon(): ReactElement {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M12 5v14M5 12h14"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function pageTitle(view: View, settingsTab?: SettingsTab): string {
   switch (view) {
     case "agenda":
       return "Agenda";
     case "notes":
       return "Notes";
     case "settings":
+      if (settingsTab === "appearance") return "Appearance";
+      if (settingsTab === "ai") return "AI";
+      if (settingsTab === "connections") return "Connections";
+      if (settingsTab === "rules") return "Notification Rules";
+      if (settingsTab === "debug") return "Debug";
+      if (settingsTab === "about") return "About";
       return "Settings";
     case "notifications":
     default:
@@ -1121,6 +1507,41 @@ function pageTitle(view: View): string {
 
 function storedDebugMode(): boolean {
   return localStorage.getItem(DEBUG_MODE_STORAGE_KEY) === "true";
+}
+
+function defaultAppearance(): AppearancePreferences {
+  return {
+    preset: "light",
+    mode: "light",
+    accent: "#7c3aed",
+    roundedness: 8,
+    spacing: "comfortable",
+    animations: true,
+    density: "comfortable",
+    sourceColors: {
+      gmail: "#1d4ed8",
+      "google-calendar": "#2563eb",
+      local: "#137a3a",
+      note: "#7c3aed",
+      webhook: "#b45309"
+    }
+  };
+}
+
+function storedAppearance(): AppearancePreferences {
+  if (typeof window === "undefined") return defaultAppearance();
+  try {
+    const parsed = JSON.parse(
+      localStorage.getItem(APPEARANCE_STORAGE_KEY) ?? "{}"
+    ) as Partial<AppearancePreferences>;
+    return {
+      ...defaultAppearance(),
+      ...parsed,
+      sourceColors: { ...defaultAppearance().sourceColors, ...(parsed.sourceColors ?? {}) }
+    };
+  } catch {
+    return defaultAppearance();
+  }
 }
 
 function AppNavigation(props: {
@@ -1157,6 +1578,7 @@ function AppNavigation(props: {
 function NotificationsView(props: {
   notifications: Notification[];
   aiSettings: EmailAiSettings | null;
+  importanceThreshold: number;
   onCreateNotification: (input: NotificationInput) => Promise<void>;
   onUpdateNotification: (
     notification: Notification,
@@ -1179,7 +1601,11 @@ function NotificationsView(props: {
   const visibleNotifications = props.notifications.filter((notification) =>
     listMode === "history"
       ? notification.status === "dismissed" || notification.status === "done"
-      : notification.status === "active"
+      : notification.status === "active" &&
+        (props.debugMode ||
+          notification.ai.importance === null ||
+          notification.ai.importance === undefined ||
+          notification.ai.importance >= props.importanceThreshold)
   );
   const sorted = sortNotifications(visibleNotifications, sortMode);
   const selectedNotification = sorted.find((item) => item.id === expandedId) ?? null;
@@ -1777,6 +2203,7 @@ function CalendarWorkspace(props: {
   onConnectGoogleCalendar: () => Promise<void>;
   onSyncGoogleCalendar: (account: ConnectorAccount) => Promise<void>;
   onDismissEvent: (event: CalendarEvent) => Promise<void>;
+  onOpenNote: (noteId: EntityId) => void;
 }): ReactElement {
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
   const [calendarAction, setCalendarAction] = useState<null | "menu" | "new-event" | "ics">(null);
@@ -1790,7 +2217,8 @@ function CalendarWorkspace(props: {
     onUpdateLocalEvent: props.onUpdateLocalEvent,
     onDeleteLocalEvent: props.onDeleteLocalEvent,
     onAnnotateEvent: props.onAnnotateEvent,
-    onDismissEvent: props.onDismissEvent
+    onDismissEvent: props.onDismissEvent,
+    onOpenNote: props.onOpenNote
   };
   return (
     <main className="calendar-shell">
@@ -1818,7 +2246,7 @@ function CalendarWorkspace(props: {
         aria-label="Calendar actions"
         onClick={() => setCalendarAction("menu")}
       >
-        +
+        <PlusIcon />
       </button>
       {props.mode === "agenda" ? (
         <AgendaCalendarView events={visibleEvents} actions={eventActions} />
@@ -1926,6 +2354,7 @@ type CalendarEventActions = {
     patch: { notes?: string; pinned?: boolean; completed?: boolean; hidden?: boolean }
   ) => Promise<void>;
   onDismissEvent: (event: CalendarEvent) => Promise<void>;
+  onOpenNote: (noteId: EntityId) => void;
 };
 
 function CalendarToolbar(props: {
@@ -2581,6 +3010,18 @@ function EventActions(props: {
   actions: CalendarEventActions;
 }): ReactElement {
   const event = props.event;
+  if (event.source === "note") {
+    return (
+      <div className="event-actions">
+        <button
+          type="button"
+          onClick={() => props.actions.onOpenNote(noteIdFromCalendarEvent(event))}
+        >
+          Open note
+        </button>
+      </div>
+    );
+  }
   return (
     <div className="event-actions">
       {event.sourceUrl ? (
@@ -2789,11 +3230,17 @@ function compareEventsByStart(left: CalendarEvent, right: CalendarEvent): number
 }
 
 function eventAccentStyle(event: CalendarEvent): CSSProperties {
-  const color = event.source === "local" ? event.color || "#2f855a" : "#2563eb";
+  const color =
+    event.source === "note"
+      ? event.color || "#7c3aed"
+      : event.source === "local"
+        ? event.color || "#2f855a"
+        : "#2563eb";
   return { "--event-accent": color } as CSSProperties;
 }
 
 function sourceLabel(event: CalendarEvent): string {
+  if (event.source === "note") return "Note";
   return event.source === "local" ? "DentLink Local" : "Google Calendar";
 }
 
@@ -2818,8 +3265,42 @@ function formatEventTime(event: CalendarEvent): string {
   })}-${new Date(event.endAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
 }
 
-function todayKey(): string {
-  return new Date().toISOString().slice(0, 10);
+function todayKey(timeZone = detectedTimezone()): string {
+  return dateKeyInTimezone(new Date(), timeZone);
+}
+
+function dateKeyInTimezone(date: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+  const year = parts.find((part) => part.type === "year")?.value ?? date.getUTCFullYear();
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  const day = parts.find((part) => part.type === "day")?.value ?? "01";
+  return `${year}-${month}-${day}`;
+}
+
+function detectedTimezone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
+function timezoneOptions(): string[] {
+  const supported =
+    typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
+  return supported.length > 0
+    ? supported
+    : [
+        "UTC",
+        "America/New_York",
+        "America/Chicago",
+        "America/Denver",
+        "America/Los_Angeles",
+        "Europe/London",
+        "Europe/Paris",
+        "Asia/Tokyo"
+      ];
 }
 
 function downloadTextFile(filename: string, contents: string, type: string): void {
@@ -2845,7 +3326,8 @@ async function readDentLinkEvents(
   token: string,
   cursor: string,
   signal: AbortSignal,
-  onEvent: (event: DentLinkChangeEvent) => void
+  onEvent: (event: DentLinkChangeEvent) => void,
+  onReady: () => void
 ): Promise<void> {
   const params = new URLSearchParams({ cursor });
   const response = await fetch(`${API_BASE_URL}/v1/events?${params.toString()}`, {
@@ -2867,6 +3349,7 @@ async function readDentLinkEvents(
     while (boundary !== -1) {
       const chunk = buffer.slice(0, boundary);
       buffer = buffer.slice(boundary + 2);
+      if (chunk.includes("event: ready")) onReady();
       const event = parseDentLinkSseChunk(chunk);
       if (event) onEvent(event);
       boundary = buffer.indexOf("\n\n");
@@ -3147,6 +3630,12 @@ function SettingsView(props: {
   onTabChange: (tab: SettingsTab) => void;
   debugMode: boolean;
   onDebugModeChange: (enabled: boolean) => void;
+  appearance: AppearancePreferences;
+  onAppearanceChange: (appearance: AppearancePreferences) => void;
+  preferences: UserPreferences | null;
+  onPreferencesChange: (
+    patch: Parameters<DentLinkApiClient["updatePreferences"]>[0]
+  ) => Promise<void>;
   aiSettings: EmailAiSettings | null;
   onEmailAiEnabledChange: (enabled: boolean) => Promise<void>;
   accounts: ConnectorAccount[];
@@ -3192,6 +3681,7 @@ function SettingsView(props: {
         {(
           [
             ["general", "General"],
+            ["appearance", "Appearance"],
             ["ai", "AI"],
             ["connections", "Connections"],
             ["rules", "Notification Rules"],
@@ -3214,11 +3704,23 @@ function SettingsView(props: {
           <h2>General</h2>
           <p>DentLink uses backend events and a polling fallback to keep this dashboard current.</p>
           <p>Use Refresh All for a manual sync across connected services.</p>
+          <TimezoneSettingsPanel
+            preferences={props.preferences}
+            onPreferencesChange={props.onPreferencesChange}
+          />
         </section>
+      ) : null}
+      {props.selectedTab === "appearance" ? (
+        <AppearanceSettingsPanel
+          appearance={props.appearance}
+          onAppearanceChange={props.onAppearanceChange}
+        />
       ) : null}
       {props.selectedTab === "ai" ? (
         <AiSettingsPanel
           settings={props.aiSettings}
+          preferences={props.preferences}
+          onPreferencesChange={props.onPreferencesChange}
           onEnabledChange={props.onEmailAiEnabledChange}
         />
       ) : null}
@@ -3294,8 +3796,202 @@ function SettingsView(props: {
   );
 }
 
+function TimezoneSettingsPanel(props: {
+  preferences: UserPreferences | null;
+  onPreferencesChange: (
+    patch: Parameters<DentLinkApiClient["updatePreferences"]>[0]
+  ) => Promise<void>;
+}): ReactElement {
+  const detected = detectedTimezone();
+  const timezone = props.preferences?.timezone ?? {
+    mode: "device" as const,
+    detected,
+    selected: detected
+  };
+  const zones = timezoneOptions();
+  return (
+    <section className="subsettings-panel" aria-label="Timezone settings">
+      <h3>Timezone</h3>
+      <p>Detected device timezone: {detected}</p>
+      <label className="debug-toggle">
+        <input
+          type="checkbox"
+          checked={timezone.mode === "device"}
+          onChange={(event) =>
+            void props.onPreferencesChange({
+              timezone: {
+                mode: event.currentTarget.checked ? "device" : "override",
+                detected,
+                selected: event.currentTarget.checked ? detected : timezone.selected
+              }
+            })
+          }
+        />{" "}
+        Use device timezone
+      </label>
+      <label className="field">
+        <span>Timezone override</span>
+        <select
+          value={timezone.selected}
+          disabled={timezone.mode === "device"}
+          onChange={(event) =>
+            void props.onPreferencesChange({
+              timezone: { mode: "override", detected, selected: event.currentTarget.value }
+            })
+          }
+        >
+          {zones.map((zone) => (
+            <option key={zone} value={zone}>
+              {zone}
+            </option>
+          ))}
+        </select>
+      </label>
+    </section>
+  );
+}
+
+function AppearanceSettingsPanel(props: {
+  appearance: AppearancePreferences;
+  onAppearanceChange: (appearance: AppearancePreferences) => void;
+}): ReactElement {
+  const update = (patch: Partial<AppearancePreferences>) =>
+    props.onAppearanceChange({ ...props.appearance, ...patch });
+  return (
+    <section className="settings-panel" aria-label="Appearance settings">
+      <h2>Appearance</h2>
+      <div className="settings-grid">
+        <label>
+          Preset
+          <select
+            value={props.appearance.preset}
+            onChange={(event) =>
+              update({ preset: event.currentTarget.value as AppearancePreferences["preset"] })
+            }
+          >
+            <option value="light">Light</option>
+            <option value="soft-gray">Soft Gray</option>
+            <option value="neutral-gray">Neutral Gray</option>
+            <option value="dark">Dark</option>
+            <option value="charcoal">Charcoal</option>
+            <option value="oled">OLED</option>
+            <option value="purple">Purple/Cosmic</option>
+          </select>
+        </label>
+        <label>
+          Mode
+          <select
+            value={props.appearance.mode}
+            onChange={(event) =>
+              update({ mode: event.currentTarget.value as AppearancePreferences["mode"] })
+            }
+          >
+            <option value="light">Light</option>
+            <option value="system">Follow system</option>
+            <option value="dark">Dark</option>
+          </select>
+        </label>
+        <label>
+          Accent
+          <input
+            type="color"
+            value={props.appearance.accent}
+            onChange={(event) => update({ accent: event.currentTarget.value })}
+          />
+        </label>
+        <label>
+          Roundedness
+          <input
+            type="range"
+            min="4"
+            max="16"
+            value={props.appearance.roundedness}
+            onChange={(event) => update({ roundedness: Number(event.currentTarget.value) })}
+          />
+        </label>
+        <label>
+          Spacing
+          <select
+            value={props.appearance.spacing}
+            onChange={(event) =>
+              update({ spacing: event.currentTarget.value as AppearancePreferences["spacing"] })
+            }
+          >
+            <option value="compact">Compact</option>
+            <option value="comfortable">Comfortable</option>
+            <option value="spacious">Spacious</option>
+          </select>
+        </label>
+        <label>
+          Density
+          <select
+            value={props.appearance.density}
+            onChange={(event) =>
+              update({ density: event.currentTarget.value as AppearancePreferences["density"] })
+            }
+          >
+            <option value="compact">Compact</option>
+            <option value="comfortable">Comfortable</option>
+          </select>
+        </label>
+      </div>
+      <SourceColorSettings
+        appearance={props.appearance}
+        onAppearanceChange={props.onAppearanceChange}
+      />
+      <label className="debug-toggle">
+        <input
+          type="checkbox"
+          checked={props.appearance.animations}
+          onChange={(event) => update({ animations: event.currentTarget.checked })}
+        />{" "}
+        Animations
+      </label>
+      <button type="button" onClick={() => props.onAppearanceChange(defaultAppearance())}>
+        Reset to default
+      </button>
+    </section>
+  );
+}
+
+function SourceColorSettings(props: {
+  appearance: AppearancePreferences;
+  onAppearanceChange: (appearance: AppearancePreferences) => void;
+}): ReactElement {
+  const entries = Object.entries(props.appearance.sourceColors);
+  return (
+    <section className="subsettings-panel" aria-label="Source colors">
+      <h3>Source Colors</h3>
+      <div className="source-color-grid">
+        {entries.map(([source, color]) => (
+          <label key={source}>
+            {source}
+            <input
+              type="color"
+              value={color}
+              onChange={(event) =>
+                props.onAppearanceChange({
+                  ...props.appearance,
+                  sourceColors: {
+                    ...props.appearance.sourceColors,
+                    [source]: event.currentTarget.value
+                  }
+                })
+              }
+            />
+          </label>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function AiSettingsPanel(props: {
   settings: EmailAiSettings | null;
+  preferences: UserPreferences | null;
+  onPreferencesChange: (
+    patch: Parameters<DentLinkApiClient["updatePreferences"]>[0]
+  ) => Promise<void>;
   onEnabledChange: (enabled: boolean) => Promise<void>;
 }): ReactElement {
   const settings = props.settings;
@@ -3334,11 +4030,134 @@ function AiSettingsPanel(props: {
             : `$${settings.estimatedCostThisMonth.toFixed(4)}`}
         </span>
       </div>
+      <AiImportanceControls
+        preferences={props.preferences}
+        onPreferencesChange={props.onPreferencesChange}
+      />
       <p>
         When enabled, DentLink sends bounded normalized email text, subject, and safe metadata to
         the configured AI provider after deterministic rules allow notification creation.
       </p>
       <p>Tokens, OAuth data, credentials, raw MIME, and attachment contents are never sent.</p>
+    </section>
+  );
+}
+
+function AiImportanceControls(props: {
+  preferences: UserPreferences | null;
+  onPreferencesChange: (
+    patch: Parameters<DentLinkApiClient["updatePreferences"]>[0]
+  ) => Promise<void>;
+}): ReactElement {
+  const ai = props.preferences?.ai ?? {
+    globalPrompt: "",
+    threshold: 0,
+    presets: [],
+    accountOverrides: []
+  };
+  const [presetName, setPresetName] = useState("");
+  return (
+    <section className="subsettings-panel" aria-label="AI importance settings">
+      <h3>Importance Scoring</h3>
+      <label className="field">
+        <span>Global importance instruction</span>
+        <textarea
+          maxLength={2000}
+          value={ai.globalPrompt}
+          onChange={(event) =>
+            void props.onPreferencesChange({
+              ai: { ...ai, globalPrompt: event.currentTarget.value }
+            })
+          }
+        />
+        <span className="character-count">{2000 - ai.globalPrompt.length} characters left</span>
+      </label>
+      <label className="field">
+        <span>Notification threshold: {ai.threshold}</span>
+        <input
+          type="range"
+          min="0"
+          max="100"
+          value={ai.threshold}
+          onChange={(event) =>
+            void props.onPreferencesChange({
+              ai: { ...ai, threshold: Number(event.currentTarget.value) }
+            })
+          }
+        />
+      </label>
+      <div className="inline-form">
+        <input
+          aria-label="Preset name"
+          placeholder="Preset name"
+          value={presetName}
+          onChange={(event) => setPresetName(event.currentTarget.value)}
+        />
+        <button
+          type="button"
+          onClick={() => {
+            if (!presetName.trim()) return;
+            void props.onPreferencesChange({
+              ai: {
+                ...ai,
+                presets: [
+                  ...ai.presets,
+                  {
+                    id: crypto.randomUUID(),
+                    name: presetName.trim(),
+                    prompt: ai.globalPrompt,
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString()
+                  }
+                ]
+              }
+            });
+            setPresetName("");
+          }}
+        >
+          Save preset
+        </button>
+      </div>
+      <div className="preset-list">
+        {ai.presets.map((preset) => (
+          <span key={preset.id} className="filter-chip">
+            {preset.name}
+            <button
+              type="button"
+              onClick={() =>
+                void props.onPreferencesChange({ ai: { ...ai, globalPrompt: preset.prompt } })
+              }
+            >
+              Load
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                void props.onPreferencesChange({
+                  ai: { ...ai, presets: ai.presets.filter((item) => item.id !== preset.id) }
+                })
+              }
+            >
+              Delete
+            </button>
+          </span>
+        ))}
+      </div>
+      <button
+        type="button"
+        onClick={() =>
+          void props.onPreferencesChange({
+            ai: {
+              ...ai,
+              globalPrompt:
+                "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.",
+              threshold: 0
+            }
+          })
+        }
+      >
+        Reset to DentLink default
+      </button>
     </section>
   );
 }
@@ -4311,13 +5130,69 @@ function emptyCalendarDraft(): CalendarEventInput {
   };
 }
 
+function dueNoteCalendarEvents(
+  notes: Note[],
+  timezone: string,
+  mode: CalendarMode
+): CalendarEvent[] {
+  const today = todayKey(timezone);
+  return notes
+    .filter((note) => note.dueAt && note.status !== "deleted")
+    .map((note) => {
+      const dueDate = note.dueAt?.slice(0, 10) ?? today;
+      const agendaDate =
+        mode === "agenda" && note.status === "active" && dueDate < today ? today : dueDate;
+      const end = new Date(`${agendaDate}T00:00:00.000Z`);
+      end.setUTCDate(end.getUTCDate() + 1);
+      return {
+        id: `note-due-${note.id}`,
+        userId: note.userId,
+        source: "note" as const,
+        connectorAccountId: null,
+        provider: null,
+        providerEventId: note.id,
+        calendarId: "notes",
+        calendarSummary: "Notes",
+        title: note.title,
+        description: note.body,
+        location: null,
+        sourceUrl: null,
+        startAt: `${agendaDate}T00:00:00.000Z`,
+        endAt: end.toISOString(),
+        startDate: agendaDate,
+        endDate: end.toISOString().slice(0, 10),
+        timezone,
+        allDay: true,
+        recurrenceRule: null,
+        category: "note",
+        color: note.priority === "high" ? "#b42318" : "#7c3aed",
+        reminderMinutes: null,
+        importedUid: null,
+        annotation: null,
+        status: note.status === "done" ? "dismissed" : "active",
+        version: note.version,
+        createdAt: note.createdAt,
+        updatedAt: note.updatedAt,
+        dismissedAt: note.completedAt
+      };
+    });
+}
+
+function noteIdFromCalendarEvent(event: CalendarEvent): EntityId {
+  return event.providerEventId ?? event.id.replace(/^note-due-/, "");
+}
+
 function calendarRange(
   mode: CalendarMode,
   selectedDate: string
 ): { timeMin: string; timeMax: string } {
   const start = new Date(`${selectedDate}T00:00:00.000Z`);
-  if (mode === "week") start.setUTCDate(start.getUTCDate() - start.getUTCDay());
-  if (mode === "month") start.setUTCDate(1);
+  if (mode === "week" || mode === "agenda")
+    start.setUTCDate(start.getUTCDate() - start.getUTCDay());
+  if (mode === "month") {
+    start.setUTCDate(1);
+    start.setUTCDate(1 - start.getUTCDay());
+  }
   if (mode === "agenda") {
     const end = new Date(start);
     end.setUTCDate(end.getUTCDate() + 30);
@@ -4326,7 +5201,7 @@ function calendarRange(
   const end = new Date(start);
   if (mode === "day") end.setUTCDate(end.getUTCDate() + 1);
   if (mode === "week") end.setUTCDate(end.getUTCDate() + 7);
-  if (mode === "month") end.setUTCMonth(end.getUTCMonth() + 1);
+  if (mode === "month") end.setUTCDate(end.getUTCDate() + 42);
   return { timeMin: start.toISOString(), timeMax: end.toISOString() };
 }
 

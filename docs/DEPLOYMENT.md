@@ -300,3 +300,22 @@ include approximately 390x844, 844x390, 1280x720, standard desktop, and large de
   data.
 - Disable or replace a broken preview deployment before promoting changes.
 - Confirm the active deployment with Wrangler or the Cloudflare dashboard before and after rollback.
+# Custom domain migration status
+
+Target normal-use URL: `https://link.dentlabs.net`.
+
+The migration is intentionally deferred until these prerequisites are verified end to end:
+
+- `dentlabs.net` zone ownership and DNS write access in the accessible Cloudflare account.
+- Pages custom-domain attachment for `link.dentlabs.net`.
+- Worker route or API hostname decision for the preview-equivalent API.
+- Continued binding to existing `dentlink-preview` D1 data or a documented production-equivalent D1
+  migration plan that preserves user data.
+- Updated allowed origins, web origin, API base URL, CSP/service-worker scope, and manifest URLs.
+- Gmail and Google Calendar OAuth redirect URIs added in Google Cloud before switching ordinary
+  traffic.
+- Cookie/session behavior verified across old and new origins.
+- SSE and CORS verified from the new origin.
+- Safe canonical redirect plan from `dentlink-web-preview.pages.dev` after the new domain is proven.
+
+Do not make partial DNS, OAuth, cookie, redirect, or Worker-route changes before these checks pass.

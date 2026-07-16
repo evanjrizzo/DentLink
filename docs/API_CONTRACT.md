@@ -97,7 +97,13 @@ Implemented in the Worker-style API handler:
 - `GET /v1/notes/:id/history`: list authenticated user's history events for a note.
 - `POST /v1/notes/reorder`: update global ordering with per-note `expectedVersion`.
 - `POST /v1/folders`: create one user-scoped folder.
+- `PATCH /v1/folders/:id`: rename one owned folder.
+- `DELETE /v1/folders/:id`: delete one owned folder and move its notes to Unfiled.
 - `POST /v1/tags`: create a user-scoped tag.
+- `PATCH /v1/tags/:id`: rename one owned tag.
+- `DELETE /v1/tags/:id`: delete one owned tag and remove it from notes.
+- `GET /v1/preferences`: return account-level timezone and AI importance preferences.
+- `PATCH /v1/preferences`: update account-level timezone and AI importance preferences.
 - `GET /v1/sync`: return cursor-based changes for the authenticated user. Empty cursor means `0`;
   invalid cursor values return `invalid_cursor`.
 - `GET /v1/events`: authenticated Server-Sent Events stream for DentLink-owned change metadata.

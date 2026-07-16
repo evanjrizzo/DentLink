@@ -68,6 +68,52 @@ body {
   background: var(--app-bg);
 }
 
+:root[data-theme="soft-gray"] {
+  --app-bg: #eef1f4;
+  --surface-bg: #ffffff;
+  --surface-elevated: #f7f8fa;
+}
+
+:root[data-theme="neutral-gray"] {
+  --app-bg: #ececec;
+  --surface-bg: #ffffff;
+  --surface-elevated: #f5f5f5;
+  --text-primary: #181818;
+}
+
+:root[data-theme="dark"],
+:root[data-theme="charcoal"] {
+  --app-bg: #111318;
+  --surface-bg: #1d2129;
+  --surface-elevated: #171a21;
+  --text-primary: #f4f6fb;
+  --text-secondary: #d7dce8;
+  --text-muted: #a9b1c0;
+  --border: #363d4a;
+  --border-subtle: #2a303a;
+}
+
+:root[data-theme="oled"] {
+  --app-bg: #000000;
+  --surface-bg: #090909;
+  --surface-elevated: #050505;
+  --text-primary: #f8fafc;
+  --text-secondary: #d9dee7;
+  --border: #2b2b2b;
+}
+
+:root[data-theme="purple"] {
+  --app-bg: #f6f3fb;
+  --surface-bg: #ffffff;
+  --surface-elevated: #fbf9ff;
+  --accent: #7c3aed;
+}
+
+:root[data-density="compact"] {
+  --control-height: 38px;
+  --font-base: 14px;
+}
+
 button,
 input,
 select,
@@ -156,6 +202,22 @@ textarea {
   padding: 12px 20px;
 }
 
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 5px 8px;
+}
+
+.brand-mark img {
+  display: block;
+  width: 128px;
+  height: auto;
+}
+
 .app-tabs {
   display: flex;
   flex-wrap: wrap;
@@ -186,6 +248,31 @@ textarea {
   border-bottom: 1px solid var(--border);
   background: var(--surface-elevated);
   padding: 12px 20px;
+}
+
+.refresh-indicator {
+  color: var(--text-muted);
+  font-size: var(--font-sm);
+}
+
+.refresh-indicator.degraded {
+  color: var(--warning);
+  font-weight: 700;
+}
+
+.icon-refresh-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--icon-button-size);
+  min-width: var(--icon-button-size);
+  padding: 0;
+}
+
+.icon-refresh-button svg,
+.floating-action-button svg {
+  width: 22px;
+  height: 22px;
 }
 
 .page-header h1 {
@@ -302,6 +389,62 @@ textarea {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+}
+
+.folder-browser {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.folder-browser button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  border-left: 4px solid var(--accent);
+  text-align: left;
+}
+
+.tag-dropdown {
+  position: relative;
+  display: grid;
+  gap: 6px;
+}
+
+.tag-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  z-index: 20;
+  display: grid;
+  gap: 8px;
+  width: min(320px, calc(100vw - 32px));
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-bg);
+  box-shadow: var(--shadow);
+  padding: 10px;
+}
+
+.selected-tags,
+.preset-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mini-danger {
+  min-height: 28px;
+  margin-left: auto;
+  color: var(--dismiss-action);
+  font-size: 12px;
+}
+
+.character-count {
+  color: var(--text-muted);
+  font-size: var(--font-sm);
 }
 
 .notes-filter-menu,
@@ -451,9 +594,11 @@ textarea {
   border-radius: 999px;
   background: var(--accent);
   color: var(--accent-contrast);
-  font-size: 28px;
-  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   box-shadow: var(--shadow);
+  padding: 0;
 }
 
 .calendar-add-button {
@@ -605,12 +750,13 @@ textarea {
 }
 
 .notification-detail-panel,
-.settings-panel {
+.settings-panel,
+.subsettings-panel {
   display: grid;
   gap: 12px;
-  border: 1px solid #d7dce5;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--surface-bg);
   padding: 14px;
 }
 
@@ -640,10 +786,22 @@ textarea {
 }
 
 .settings-tabs {
-  border: 1px solid #d7dce5;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--surface-bg);
   padding: 10px;
+}
+
+.source-color-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.settings-grid label,
+.source-color-grid label {
+  display: grid;
+  gap: 6px;
 }
 
 .settings-tabs button,
@@ -1094,6 +1252,11 @@ textarea {
   color: #137a3a;
 }
 
+.source-badge.note {
+  background: #f3e8ff;
+  color: #6d28d9;
+}
+
 .annotation-flags {
   background: #fff7ed;
   color: #9a3412;
@@ -1194,6 +1357,11 @@ textarea {
   background: #ffffff;
   padding: 5px 7px;
   text-align: left;
+}
+
+.event-chip.note,
+.calendar-card.note {
+  background: color-mix(in srgb, var(--event-accent, #7c3aed) 8%, var(--surface-bg));
 }
 
 .event-chip span,
@@ -1439,12 +1607,21 @@ textarea {
 
   .settings-tabs button,
   .connection-actions button {
-    flex: 1 1 100%;
+    flex: 1 1 auto;
   }
 
   .settings-tabs {
+    display: grid;
+    grid-template-columns: 1fr;
     align-items: stretch;
-    flex-direction: column;
+    max-width: 100%;
+  }
+
+  .settings-tabs button {
+    min-width: 0;
+    min-height: 42px;
+    justify-content: flex-start;
+    text-align: left;
   }
 
   .local-event-form,

@@ -51,6 +51,7 @@ import {
   parseLocalCalendarEventInput,
   parseLocalCalendarEventPatch,
   parseName,
+  parseNamePatch,
   parseNotificationInput,
   parseNotificationPatch,
   parseNoteInput,
@@ -71,7 +72,8 @@ import type {
   DentLinkChangeEvent,
   GmailRule,
   NoteConflict,
-  SyncChange
+  SyncChange,
+  UserPreferences
 } from "@dentlink/item-model";
 
 export type ApiEnv = GmailRuntimeEnv & {
@@ -304,11 +306,35 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
         201
       );
     }
+    const folderMatch = path.match(/^\/v1\/folders\/([^/]+)$/);
+    if (folderMatch && method === "PATCH") {
+      const { patch } = parseNamePatch(await readJson(request));
+      return json(await store.updateFolder(auth.user.id, folderMatch[1] ?? "", patch, now));
+    }
+    if (folderMatch && method === "DELETE") {
+      await store.deleteFolder(auth.user.id, folderMatch[1] ?? "", now);
+      return json({ ok: true });
+    }
     if (method === "POST" && path === "/v1/tags") {
       return json(
         await store.createTag(auth.user.id, parseName(await readJson(request)), now),
         201
       );
+    }
+    const tagMatch = path.match(/^\/v1\/tags\/([^/]+)$/);
+    if (tagMatch && method === "PATCH") {
+      const { patch } = parseNamePatch(await readJson(request));
+      return json(await store.updateTag(auth.user.id, tagMatch[1] ?? "", patch, now));
+    }
+    if (tagMatch && method === "DELETE") {
+      await store.deleteTag(auth.user.id, tagMatch[1] ?? "", now);
+      return json({ ok: true });
+    }
+    if (method === "GET" && path === "/v1/preferences") {
+      return json(await getUserPreferences(store, auth.user.id, url.searchParams, now));
+    }
+    if (method === "PATCH" && path === "/v1/preferences") {
+      return json(await updateUserPreferences(store, auth.user.id, await readJson(request), now));
     }
     if (method === "GET" && path === "/v1/connectors/catalog") {
       return json({ connectors: connectorCatalog });
@@ -1051,6 +1077,189 @@ function parseEmailAiSettingsPatch(value: unknown): { enabled: boolean } {
     throw new ValidationError("invalid_ai_settings", "AI enabled must be a boolean");
   }
   return { enabled };
+}
+
+const TIMEZONE_PREFERENCE_KEY = "timezone_v1";
+const EMAIL_AI_PREFERENCES_KEY = "email_ai_preferences_v1";
+const DEFAULT_TIMEZONE = "UTC";
+const DEFAULT_IMPORTANCE_PROMPT =
+  "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.";
+const DEFAULT_IMPORTANCE_THRESHOLD = 0;
+const MAX_AI_PROMPT_CHARS = 2000;
+
+async function getUserPreferences(
+  store: DentLinkStore,
+  userId: string,
+  searchParams: URLSearchParams,
+  now: string
+): Promise<UserPreferences> {
+  const detected = validTimezone(searchParams.get("detectedTimezone"))
+    ? searchParams.get("detectedTimezone")
+    : null;
+  const timezone = timezonePreferenceFromJson(
+    await store.getUserPreference(userId, TIMEZONE_PREFERENCE_KEY),
+    detected
+  );
+  const ai = aiPreferencesFromJson(
+    await store.getUserPreference(userId, EMAIL_AI_PREFERENCES_KEY),
+    now
+  );
+  return { timezone, ai };
+}
+
+async function updateUserPreferences(
+  store: DentLinkStore,
+  userId: string,
+  value: unknown,
+  now: string
+): Promise<UserPreferences> {
+  const object =
+    typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  const patch =
+    typeof object.patch === "object" && object.patch !== null
+      ? (object.patch as Record<string, unknown>)
+      : {};
+  const current = await getUserPreferences(store, userId, new URLSearchParams(), now);
+  const timezonePatch =
+    typeof patch.timezone === "object" && patch.timezone !== null
+      ? (patch.timezone as Record<string, unknown>)
+      : null;
+  const aiPatch =
+    typeof patch.ai === "object" && patch.ai !== null
+      ? (patch.ai as Record<string, unknown>)
+      : null;
+
+  const timezone = timezonePatch
+    ? normalizeTimezonePatch(current.timezone, timezonePatch)
+    : current.timezone;
+  const ai = aiPatch ? normalizeAiPreferencePatch(current.ai, aiPatch, now) : current.ai;
+  await store.setUserPreference(userId, TIMEZONE_PREFERENCE_KEY, JSON.stringify(timezone), now);
+  await store.setUserPreference(userId, EMAIL_AI_PREFERENCES_KEY, JSON.stringify(ai), now);
+  return { timezone, ai };
+}
+
+function timezonePreferenceFromJson(
+  value: string | null,
+  detected: string | null
+): UserPreferences["timezone"] {
+  const fallback = detected ?? DEFAULT_TIMEZONE;
+  try {
+    const parsed = value ? (JSON.parse(value) as Record<string, unknown>) : {};
+    const selected =
+      typeof parsed.selected === "string" && validTimezone(parsed.selected)
+        ? parsed.selected
+        : fallback;
+    const mode = parsed.mode === "override" ? "override" : "device";
+    return { mode, detected, selected: mode === "device" ? fallback : selected };
+  } catch {
+    return { mode: "device", detected, selected: fallback };
+  }
+}
+
+function normalizeTimezonePatch(
+  current: UserPreferences["timezone"],
+  patch: Record<string, unknown>
+): UserPreferences["timezone"] {
+  const mode =
+    patch.mode === "override" ? "override" : patch.mode === "device" ? "device" : current.mode;
+  const detected =
+    patch.detected === null
+      ? null
+      : typeof patch.detected === "string" && validTimezone(patch.detected)
+        ? patch.detected
+        : current.detected;
+  const selected =
+    typeof patch.selected === "string" && validTimezone(patch.selected)
+      ? patch.selected
+      : current.selected;
+  return { mode, detected, selected: mode === "device" ? (detected ?? selected) : selected };
+}
+
+function aiPreferencesFromJson(value: string | null, now: string): UserPreferences["ai"] {
+  try {
+    return normalizeAiPreferencePatch(defaultAiPreferences(), value ? JSON.parse(value) : {}, now);
+  } catch {
+    return defaultAiPreferences();
+  }
+}
+
+function defaultAiPreferences(): UserPreferences["ai"] {
+  return {
+    globalPrompt: DEFAULT_IMPORTANCE_PROMPT,
+    threshold: DEFAULT_IMPORTANCE_THRESHOLD,
+    presets: [],
+    accountOverrides: []
+  };
+}
+
+function normalizeAiPreferencePatch(
+  current: UserPreferences["ai"],
+  patch: Record<string, unknown>,
+  now: string
+): UserPreferences["ai"] {
+  const globalPrompt =
+    typeof patch.globalPrompt === "string"
+      ? boundedPrompt(patch.globalPrompt) || DEFAULT_IMPORTANCE_PROMPT
+      : current.globalPrompt;
+  const threshold =
+    typeof patch.threshold === "number" && Number.isFinite(patch.threshold)
+      ? Math.max(0, Math.min(100, Math.round(patch.threshold)))
+      : current.threshold;
+  const presets = Array.isArray(patch.presets)
+    ? patch.presets
+        .map((preset) => normalizePreset(preset, now))
+        .filter((preset): preset is UserPreferences["ai"]["presets"][number] => Boolean(preset))
+    : current.presets;
+  const accountOverrides = Array.isArray(patch.accountOverrides)
+    ? patch.accountOverrides
+        .map((override) => normalizeAccountOverride(override))
+        .filter((override): override is UserPreferences["ai"]["accountOverrides"][number] =>
+          Boolean(override)
+        )
+    : current.accountOverrides;
+  return { globalPrompt, threshold, presets, accountOverrides };
+}
+
+function normalizePreset(
+  value: unknown,
+  now: string
+): UserPreferences["ai"]["presets"][number] | null {
+  if (typeof value !== "object" || value === null) return null;
+  const object = value as Record<string, unknown>;
+  const name = typeof object.name === "string" ? object.name.trim().slice(0, 80) : "";
+  const prompt = typeof object.prompt === "string" ? boundedPrompt(object.prompt) : "";
+  if (!name || !prompt) return null;
+  return {
+    id: typeof object.id === "string" && object.id ? object.id : crypto.randomUUID(),
+    name,
+    prompt,
+    createdAt: typeof object.createdAt === "string" ? object.createdAt : now,
+    updatedAt: now
+  };
+}
+
+function normalizeAccountOverride(
+  value: unknown
+): UserPreferences["ai"]["accountOverrides"][number] | null {
+  if (typeof value !== "object" || value === null) return null;
+  const object = value as Record<string, unknown>;
+  if (typeof object.accountId !== "string" || !object.accountId) return null;
+  const prompt = typeof object.prompt === "string" ? boundedPrompt(object.prompt) : "";
+  return { accountId: object.accountId, enabled: object.enabled === true, prompt };
+}
+
+function boundedPrompt(value: string): string {
+  return value.trim().replace(/\s+/g, " ").slice(0, MAX_AI_PROMPT_CHARS);
+}
+
+function validTimezone(value: string | null): boolean {
+  if (!value) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format(new Date());
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function readJson(request: Request): Promise<unknown> {

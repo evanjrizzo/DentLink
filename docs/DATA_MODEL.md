@@ -27,6 +27,13 @@ Use a common item envelope with type-specific details.
 
 Notes belong to at most one folder and may have multiple tags.
 
+Folder deletion moves notes to Unfiled rather than deleting notes. Tag deletion removes the tag
+relationship from notes and does not delete the notes themselves.
+
+Account-level preferences currently use `user_preferences` for timezone and AI importance
+configuration. Appearance presets, density, source colors, and animation preferences are local
+per-device browser settings.
+
 Provider IDs are external identities, not DentLink primary keys.
 
 Editable records use versions. Every user-owned record must include or derive user scope.

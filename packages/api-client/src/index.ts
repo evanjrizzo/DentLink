@@ -20,6 +20,7 @@ import type {
   EmailAiSettings,
   EntityId,
   Folder,
+  FolderPatch,
   GmailDiagnostics,
   GmailRule,
   GmailRulesResponse,
@@ -36,6 +37,9 @@ import type {
   NotesList,
   SyncResponse,
   Tag,
+  TagPatch,
+  UserPreferences,
+  UserPreferencesPatch,
   WebhookEndpoint,
   WebhookEndpointInput,
   WebhookEndpointPatch,
@@ -157,8 +161,35 @@ export class DentLinkApiClient {
     return this.request<Folder>("/v1/folders", { method: "POST", body: input });
   }
 
+  async updateFolder(folderId: EntityId, patch: FolderPatch): Promise<Folder> {
+    return this.request<Folder>(`/v1/folders/${folderId}`, { method: "PATCH", body: { patch } });
+  }
+
+  async deleteFolder(folderId: EntityId): Promise<{ ok: true }> {
+    return this.request<{ ok: true }>(`/v1/folders/${folderId}`, { method: "DELETE" });
+  }
+
   async createTag(input: CreateTagInput): Promise<Tag> {
     return this.request<Tag>("/v1/tags", { method: "POST", body: input });
+  }
+
+  async updateTag(tagId: EntityId, patch: TagPatch): Promise<Tag> {
+    return this.request<Tag>(`/v1/tags/${tagId}`, { method: "PATCH", body: { patch } });
+  }
+
+  async deleteTag(tagId: EntityId): Promise<{ ok: true }> {
+    return this.request<{ ok: true }>(`/v1/tags/${tagId}`, { method: "DELETE" });
+  }
+
+  async getPreferences(detectedTimezone?: string): Promise<UserPreferences> {
+    const params = new URLSearchParams();
+    if (detectedTimezone) params.set("detectedTimezone", detectedTimezone);
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    return this.request<UserPreferences>(`/v1/preferences${suffix}`);
+  }
+
+  async updatePreferences(patch: UserPreferencesPatch): Promise<UserPreferences> {
+    return this.request<UserPreferences>("/v1/preferences", { method: "PATCH", body: { patch } });
   }
 
   async listConnectorCatalog(): Promise<{ connectors: ConnectorDefinition[] }> {

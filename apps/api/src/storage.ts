@@ -19,6 +19,7 @@ import type {
   EmailAiSettings,
   EntityId,
   Folder,
+  FolderPatch,
   Notification,
   NotificationInput,
   NotificationPatch,
@@ -30,6 +31,7 @@ import type {
   Session,
   SyncChange,
   Tag,
+  TagPatch,
   User,
   WebhookEndpoint,
   WebhookEndpointInput,
@@ -87,7 +89,16 @@ export interface DentLinkStore {
     now: string
   ): Promise<Note[] | NoteConflict>;
   createFolder(userId: EntityId, name: string, now: string): Promise<Folder>;
+  updateFolder(
+    userId: EntityId,
+    folderId: EntityId,
+    patch: FolderPatch,
+    now: string
+  ): Promise<Folder>;
+  deleteFolder(userId: EntityId, folderId: EntityId, now: string): Promise<void>;
   createTag(userId: EntityId, name: string, now: string): Promise<Tag>;
+  updateTag(userId: EntityId, tagId: EntityId, patch: TagPatch, now: string): Promise<Tag>;
+  deleteTag(userId: EntityId, tagId: EntityId, now: string): Promise<void>;
   listConnectorAccounts(userId: EntityId): Promise<{ accounts: ConnectorAccount[] }>;
   listConnectorAccountsByKey(connectorKey: string): Promise<ConnectorAccount[]>;
   createConnectorAccount(
@@ -558,6 +569,38 @@ export class MemoryDentLinkStore implements DentLinkStore {
     return { ...folder };
   }
 
+  async updateFolder(
+    userId: EntityId,
+    folderId: EntityId,
+    patch: FolderPatch,
+    now: string
+  ): Promise<Folder> {
+    const existing = this.folders.get(folderId);
+    if (!existing || existing.userId !== userId)
+      throw new StoreError("not_found", "Folder not found");
+    const folder = { ...existing, name: patch.name?.trim() ?? existing.name, updatedAt: now };
+    this.folders.set(folder.id, folder);
+    this.recordChange({ type: "folder", op: "upsert", folder, cursor: "0" });
+    return { ...folder };
+  }
+
+  async deleteFolder(userId: EntityId, folderId: EntityId, now: string): Promise<void> {
+    const existing = this.folders.get(folderId);
+    if (!existing || existing.userId !== userId)
+      throw new StoreError("not_found", "Folder not found");
+    this.folders.delete(folderId);
+    for (const note of this.notes.values()) {
+      if (note.userId === userId && note.folderId === folderId && note.status !== "deleted") {
+        const next = { ...note, folderId: null, version: note.version + 1, updatedAt: now };
+        this.notes.set(next.id, next);
+        const stored = this.withTags(next);
+        this.recordHistory(userId, stored, "updated", now);
+        this.recordChange({ type: "note", op: "upsert", note: stored, cursor: "0" });
+      }
+    }
+    this.recordChange({ type: "folder", op: "delete", id: folderId, userId, cursor: "0" });
+  }
+
   async createTag(userId: EntityId, name: string, now: string): Promise<Tag> {
     const tag = {
       id: this.nextId("tag"),
@@ -569,6 +612,26 @@ export class MemoryDentLinkStore implements DentLinkStore {
     this.tags.set(tag.id, tag);
     this.recordChange({ type: "tag", op: "upsert", tag, cursor: "0" });
     return { ...tag };
+  }
+
+  async updateTag(userId: EntityId, tagId: EntityId, patch: TagPatch, now: string): Promise<Tag> {
+    const existing = this.tags.get(tagId);
+    if (!existing || existing.userId !== userId) throw new StoreError("not_found", "Tag not found");
+    const tag = { ...existing, name: patch.name?.trim() ?? existing.name, updatedAt: now };
+    this.tags.set(tag.id, tag);
+    this.recordChange({ type: "tag", op: "upsert", tag, cursor: "0" });
+    return { ...tag };
+  }
+
+  async deleteTag(userId: EntityId, tagId: EntityId): Promise<void> {
+    const existing = this.tags.get(tagId);
+    if (!existing || existing.userId !== userId) throw new StoreError("not_found", "Tag not found");
+    this.tags.delete(tagId);
+    for (const [noteId, ids] of this.noteTagIds.entries()) {
+      const note = this.notes.get(noteId);
+      if (note?.userId === userId) ids.delete(tagId);
+    }
+    this.recordChange({ type: "tag", op: "delete", id: tagId, userId, cursor: "0" });
   }
 
   async listConnectorAccounts(userId: EntityId): Promise<{ accounts: ConnectorAccount[] }> {
@@ -1805,8 +1868,10 @@ function actionForPatch(patch: NotePatch): NoteHistoryEvent["action"] {
 function changeBelongsTo(change: SyncChange, userId: EntityId): boolean {
   if (change.type === "note" && change.op === "upsert") return change.note.userId === userId;
   if (change.type === "note" && change.op === "delete") return change.userId === userId;
-  if (change.type === "folder") return change.folder.userId === userId;
-  if (change.type === "tag") return change.tag.userId === userId;
+  if (change.type === "folder" && change.op === "upsert") return change.folder.userId === userId;
+  if (change.type === "folder" && change.op === "delete") return change.userId === userId;
+  if (change.type === "tag" && change.op === "upsert") return change.tag.userId === userId;
+  if (change.type === "tag" && change.op === "delete") return change.userId === userId;
   if (change.type === "notification" && change.op === "upsert")
     return change.notification.userId === userId;
   if (change.type === "notification" && change.op === "delete") return change.userId === userId;

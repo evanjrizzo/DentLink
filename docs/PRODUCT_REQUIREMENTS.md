@@ -25,6 +25,9 @@ Tasks and reference notes with title, body, one folder, multiple tags, due date,
 
 Notes may be created manually, through clients, named webhooks, future voice/Pebble capture, or approved AI task suggestions. AI-created task suggestions require approval before becoming user tasks.
 
+Note titles are limited to 72 Unicode grapheme clusters. Notes may appear as all-day calendar items
+when they have due dates; overdue active notes continue to appear in today's agenda until completed.
+
 ## Calendar
 
 Google, Microsoft, ICS, and DentLink-local events. Day/week/month/agenda views, filtering, colors, annotations, source links, ICS export, and later explicit provider sync. Agenda dismissal does not remove grid events.
@@ -54,6 +57,9 @@ Summaries and history retained until deletion. Raw email body cached for a limit
 Optional OpenAI integration using one administrator key initially. AI task suggestions require approval.
 
 The system must record provider, model, prompt or rule version, timestamp, confidence where available, source item, and usage metadata for AI outputs.
+
+Custom AI importance instructions supplement DentLink's fixed scoring instructions. Notification
+thresholds are applied after scoring and are not sent to the AI provider.
 
 ## Offline
 
