@@ -111,7 +111,8 @@ function macroButton(label: string, action: string, icon: string): HTMLButtonEle
 
 async function runMacro(action: string): Promise<void> {
   if (action === "refresh") {
-    frame.src = frame.src;
+    const currentUrl = frame.src;
+    frame.src = currentUrl;
     setStatus("Refreshed DentLink", true);
     return;
   }
@@ -156,7 +157,9 @@ async function refreshContext(): Promise<void> {
   }
 }
 
-function setStatus(_message: string, _ok: boolean): void {
+function setStatus(message: string, ok: boolean): void {
+  void message;
+  void ok;
   // Status is intentionally hidden on the touchscreen macro pad.
 }
 
