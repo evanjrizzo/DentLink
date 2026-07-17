@@ -228,14 +228,18 @@ const DEFAULT_IMPORTANCE_INSTRUCTION =
 const MAX_PROMPT_CHARS = 2000;
 
 export function DentLinkNotesApp(): ReactElement {
+  const initialSession = useMemo(() => storedSession(), []);
   const [client] = useState(
     () =>
       new DentLinkApiClient({
         baseUrl: API_BASE_URL,
-        token: storedSession()?.session.token ?? null
+        token: initialSession?.session.token ?? null
       })
   );
-  const [auth, setAuth] = useState<AuthSession | null>(() => storedSession());
+  const [auth, setAuth] = useState<AuthSession | null>(() => initialSession);
+  const [desktopSessionHydrating, setDesktopSessionHydrating] = useState(
+    () => isDesktopClient() && !initialSession
+  );
   const [credentials, setCredentials] = useState({ email: "", password: "" });
   const [notesList, setNotesList] = useState<NotesList>(initialList);
   const [notifications, setNotifications] = useState<Notification[]>([]);
@@ -279,6 +283,7 @@ export function DentLinkNotesApp(): ReactElement {
   const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
   const [assistantDraft, setAssistantDraft] = useState("");
   const [assistantRunning, setAssistantRunning] = useState(false);
+  const [desktopAssistantRequest, setDesktopAssistantRequest] = useState(0);
   const [debugMode, setDebugMode] = useState(() => storedDebugMode());
   const [appearance, setAppearance] = useState<AppearancePreferences>(() => storedAppearance());
   const [search, setSearch] = useState("");
@@ -315,6 +320,28 @@ export function DentLinkNotesApp(): ReactElement {
   }, [notesList]);
 
   useEffect(() => {
+    if (!isDesktopClient()) return;
+    document.documentElement.classList.add("dentlink-desktop-client");
+    const removeMomentumScrolling = installDesktopMomentumScrolling();
+    const fallback = window.setTimeout(() => setDesktopSessionHydrating(false), 1000);
+    function handleDesktopSession(event: MessageEvent): void {
+      if (event.source !== window.parent) return;
+      const data = event.data as { type?: string; session?: AuthSession | null } | null;
+      if (!data || data.type !== "dentlink.desktop.session.response") return;
+      window.clearTimeout(fallback);
+      setDesktopSessionHydrating(false);
+      if (data.session) void restoreDesktopSession(data.session);
+    }
+    window.addEventListener("message", handleDesktopSession);
+    window.parent.postMessage({ type: "dentlink.web.session.request" }, "*");
+    return () => {
+      window.clearTimeout(fallback);
+      window.removeEventListener("message", handleDesktopSession);
+      removeMomentumScrolling();
+    };
+  }, []);
+
+  useEffect(() => {
     localStorage.setItem(DEBUG_MODE_STORAGE_KEY, debugMode ? "true" : "false");
   }, [debugMode]);
 
@@ -330,10 +357,12 @@ export function DentLinkNotesApp(): ReactElement {
       .currentSession()
       .then(async (current) => {
         if (cancelled) return;
-        setAuth({
+        const refreshedSession = {
           user: current.user,
           session: { token: auth.session.token, expiresAt: current.session.expiresAt }
-        });
+        };
+        setAuth(refreshedSession);
+        storeSession(refreshedSession);
         await refreshDentLinkData("session");
         if (hasOAuthReturnFlag()) await refreshDentLinkData("oauth");
       })
@@ -370,6 +399,26 @@ export function DentLinkNotesApp(): ReactElement {
       eventsAbort.current = null;
     };
   }, [auth?.session.token]);
+
+  useEffect(() => {
+    function handleDesktopMacro(event: MessageEvent): void {
+      const data = event.data as { type?: string; action?: string } | null;
+      if (!data || data.type !== "dentlink.desktop.macro") return;
+      if (data.action === "settings") {
+        setSettingsTab("general");
+        setView("settings");
+      }
+      if (data.action === "assistant") {
+        setView("home");
+        setDesktopAssistantRequest((current) => current + 1);
+      }
+      if (data.action === "history" || data.action === "rerank") {
+        setView("notifications");
+      }
+    }
+    window.addEventListener("message", handleDesktopMacro);
+    return () => window.removeEventListener("message", handleDesktopMacro);
+  }, []);
 
   useEffect(() => {
     document.title = auth ? `${pageTitle(view, settingsTab)} - DentLink` : "DentLink";
@@ -648,6 +697,13 @@ export function DentLinkNotesApp(): ReactElement {
     } catch (caught) {
       handleFailure(caught);
     }
+  }
+
+  async function restoreDesktopSession(session: AuthSession): Promise<void> {
+    client.setToken(session.session.token);
+    setAuth(session);
+    storeSession(session);
+    await refreshDentLinkData("desktop-session");
   }
 
   async function createNote(input: NoteInput): Promise<void> {
@@ -1443,6 +1499,10 @@ export function DentLinkNotesApp(): ReactElement {
     setError(messageFor(caught));
   }
 
+  if (!auth && desktopSessionHydrating) {
+    return <main className="auth-screen" aria-label="Restoring DentLink session" />;
+  }
+
   if (!auth) {
     return (
       <main className="auth-screen">
@@ -1486,9 +1546,11 @@ export function DentLinkNotesApp(): ReactElement {
     );
   }
 
+  const desktopClient = isDesktopClient();
+
   return (
     <>
-      <header className="app-header">
+      <header className={`app-header ${desktopClient ? "desktop-app-header" : ""}`}>
         <span
           className={`brand-mark ${appearance.branding.showLogoBorder ? "with-border" : ""}`}
           style={
@@ -1502,19 +1564,40 @@ export function DentLinkNotesApp(): ReactElement {
           <img src={logoSource(appearance)} alt="DentLink" />
         </span>
         <AppNavigation view={view} onViewChange={setView} variant="top" />
-        <span className="account-email truncate" title={auth.user.email}>
-          {auth.user.email}
-        </span>
-        <button onClick={() => void logout()}>Log out</button>
+        {desktopClient ? (
+          <button
+            type="button"
+            className="icon-refresh-button desktop-refresh-button"
+            aria-label="Refresh All"
+            title="Refresh all connected services"
+            aria-busy={refreshState.running}
+            onClick={() => void refreshAll()}
+            disabled={refreshState.running}
+          >
+            <RefreshIcon />
+          </button>
+        ) : null}
+        {desktopClient ? null : (
+          <>
+            <span className="account-email truncate" title={auth.user.email}>
+              {auth.user.email}
+            </span>
+            <button className="logout-button" onClick={() => void logout()}>
+              Log out
+            </button>
+          </>
+        )}
       </header>
       <AppNavigation view={view} onViewChange={setView} variant="bottom" />
-      <PageHeader
-        title={pageTitle(view, settingsTab)}
-        refreshRunning={refreshState.running}
-        refreshState={refreshState}
-        onRefreshAll={refreshAll}
-      />
-      {refreshState.message || refreshState.error ? (
+      {desktopClient ? null : (
+        <PageHeader
+          title={pageTitle(view, settingsTab)}
+          refreshRunning={refreshState.running}
+          refreshState={refreshState}
+          onRefreshAll={refreshAll}
+        />
+      )}
+      {(desktopClient ? refreshState.error : refreshState.message || refreshState.error) ? (
         <section className="refresh-status" aria-live="polite">
           <strong>{refreshState.error ?? refreshState.message}</strong>
           {refreshState.result ? (
@@ -1544,6 +1627,7 @@ export function DentLinkNotesApp(): ReactElement {
           messages={assistantMessages}
           draft={assistantDraft}
           running={assistantRunning}
+          assistantRequest={desktopAssistantRequest}
           onDraftChange={setAssistantDraft}
           onSubmit={askAssistant}
           onUpdateNotification={updateNotification}
@@ -1712,6 +1796,7 @@ function HomeView(props: {
   messages: AssistantMessage[];
   draft: string;
   running: boolean;
+  assistantRequest: number;
   onDraftChange: (value: string) => void;
   onSubmit: (message: string) => Promise<void>;
   onUpdateNotification: (
@@ -1726,16 +1811,20 @@ function HomeView(props: {
 }): ReactElement {
   const threadRef = useRef<HTMLDivElement | null>(null);
   const followThreadRef = useRef(true);
+  const desktopClient = isDesktopClient();
+  const [assistantOpen, setAssistantOpen] = useState(() => !isDesktopClient());
   const [quickNoteTitle, setQuickNoteTitle] = useState("");
   const today = todayKey();
+  const activeNotificationLimit = desktopClient ? 10 : 5;
   const activeNotifications = sortNotifications(
     props.notifications.filter((notification) => notification.status === "active"),
     "recommended"
-  ).slice(0, 5);
+  ).slice(0, activeNotificationLimit);
   const todayEvents = props.calendarEvents
     .filter((event) => eventOccursOnDate(event, today))
     .sort(compareEventsByStart)
     .slice(0, 5);
+  const timelineEvents = desktopClient ? upcomingEvents(props.calendarEvents, 10) : todayEvents;
   const nextEvent =
     [...props.calendarEvents]
       .filter((event) => event.status === "active" && event.startAt >= new Date().toISOString())
@@ -1755,6 +1844,11 @@ function HomeView(props: {
     thread.scrollTo({ top: thread.scrollHeight, behavior: "smooth" });
   }, [props.messages.length, props.running]);
 
+  useEffect(() => {
+    if (!desktopClient || props.assistantRequest === 0) return;
+    setAssistantOpen(true);
+  }, [desktopClient, props.assistantRequest]);
+
   function updateThreadFollow(): void {
     const thread = threadRef.current;
     if (!thread) return;
@@ -1767,27 +1861,27 @@ function HomeView(props: {
       <section className="home-main" aria-label="Home overview">
         <section className="home-band today-band" aria-label="Today">
           <div className="home-section-header">
-            <h2>Today</h2>
+            <h2>{desktopClient ? "Upcoming" : "Today"}</h2>
             <button type="button" onClick={props.onOpenCalendar}>
               Open Agenda
             </button>
           </div>
           <div className="today-summary-grid">
             <HomeMetric label="Events" value={todayEvents.length} />
-            <HomeMetric label="Due Notes" value={dueNotes.length} />
-            <HomeMetric label="Active" value={activeNotifications.length} />
+            <HomeMetric label="Inbox" value={activeNotifications.length} />
+            <HomeMetric label="Next" value={nextEvent ? 1 : 0} />
           </div>
-          {nextEvent ? (
+          {!desktopClient && nextEvent ? (
             <button type="button" className="next-event-button" onClick={props.onOpenCalendar}>
               <span>Next</span>
               <strong>{nextEvent.title}</strong>
               <small>{formatEventStart(nextEvent)}</small>
             </button>
-          ) : (
+          ) : !desktopClient ? (
             <p className="home-empty">No upcoming events loaded.</p>
-          )}
+          ) : null}
           <div className="home-row-list">
-            {todayEvents.map((event) => (
+            {timelineEvents.map((event) => (
               <button
                 type="button"
                 key={event.id}
@@ -1795,15 +1889,21 @@ function HomeView(props: {
                 style={eventAccentStyle(event, props.sourceColors)}
                 onClick={props.onOpenCalendar}
               >
-                <span>{event.allDay ? "All day" : formatEventTime(event)}</span>
+                <span>
+                  {formatEventTimelineDate(event)} ·{" "}
+                  {event.allDay ? "All day" : formatEventTime(event)}
+                </span>
                 <strong>{event.title}</strong>
                 <small>{sourceLabel(event)}</small>
               </button>
             ))}
           </div>
+          {desktopClient && timelineEvents.length === 0 ? (
+            <p className="home-empty">No upcoming events loaded.</p>
+          ) : null}
         </section>
 
-        <section className="home-band" aria-label="Priority inbox">
+        <section className="home-band priority-inbox-band" aria-label="Priority inbox">
           <div className="home-section-header">
             <h2>Priority Inbox</h2>
             <button type="button" onClick={props.onOpenNotifications}>
@@ -1825,16 +1925,29 @@ function HomeView(props: {
                   <strong>{notification.email?.subject || notification.title}</strong>
                   <small>{notificationSummary(notification)}</small>
                 </button>
-                <NotificationQuickActions
-                  notification={notification}
-                  onUpdateNotification={props.onUpdateNotification}
-                />
+                <div className="notification-meta-actions home-notification-meta-actions">
+                  <div className="notification-card-meta">
+                    <span className="importance-pill">
+                      Importance: {importanceScore(notification)}
+                    </span>
+                    <span className="notification-card-time">
+                      {relativeTime(notification.email?.receivedAt ?? notification.createdAt)}
+                    </span>
+                    {notification.ai?.requiresAction ? (
+                      <span className="action-required">Action required</span>
+                    ) : null}
+                  </div>
+                  <NotificationQuickActions
+                    notification={notification}
+                    onUpdateNotification={props.onUpdateNotification}
+                  />
+                </div>
               </article>
             ))}
           </div>
         </section>
 
-        <section className="home-band" aria-label="Due notes">
+        <section className="home-band due-notes-band" aria-label="Due notes">
           <div className="home-section-header">
             <h2>Due Notes</h2>
             <button type="button" onClick={() => props.onOpenNotes()}>
@@ -1896,7 +2009,7 @@ function HomeView(props: {
           </div>
         </section>
 
-        <section className="home-band" aria-label="Needs review">
+        <section className="home-band needs-review-band" aria-label="Needs review">
           <div className="home-section-header">
             <h2>Needs Review</h2>
             <button type="button" onClick={props.onOpenNotifications}>
@@ -1923,9 +2036,23 @@ function HomeView(props: {
         </section>
       </section>
 
-      <section className="assistant-panel" aria-label="Assistant">
+      <section
+        className={`assistant-panel ${desktopClient ? "desktop-assistant-panel" : ""}`}
+        aria-label="Assistant"
+        hidden={desktopClient && !assistantOpen}
+      >
         <header className="assistant-header">
           <h2>DentLink Assistant</h2>
+          {desktopClient ? (
+            <button
+              type="button"
+              className="assistant-close"
+              aria-label="Close DentLink Assistant"
+              onClick={() => setAssistantOpen(false)}
+            >
+              Close
+            </button>
+          ) : null}
           <div className="assistant-prompts" aria-label="Suggested prompts">
             {promptSuggestions.map((prompt) => (
               <button
@@ -2050,6 +2177,14 @@ function dueHomeNotes(notes: Note[], today: string): Note[] {
     });
 }
 
+function upcomingEvents(events: CalendarEvent[], limit: number): CalendarEvent[] {
+  const now = new Date().toISOString();
+  return [...events]
+    .filter((event) => event.status === "active" && event.endAt >= now)
+    .sort(compareEventsByStart)
+    .slice(0, limit);
+}
+
 function notePriorityScore(priority: Note["priority"]): number {
   if (priority === "high") return 3;
   if (priority === "medium") return 2;
@@ -2136,29 +2271,22 @@ function PageHeader(props: {
 
 function RefreshIcon(): ReactElement {
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path
-        d="M20 12a8 8 0 0 1-13.7 5.6"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-      <path
-        d="M4 12A8 8 0 0 1 17.7 6.4"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-      <path d="M17 3v4h4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      <path
-        d="M7 21v-4H3"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M21 12a9 9 0 0 1-14.85 6.85" />
+      <path d="M3 12A9 9 0 0 1 17.85 5.15" />
+      <path d="M17.85 5.15H14" />
+      <path d="M17.85 5.15V1.3" />
+      <path d="M6.15 18.85H10" />
+      <path d="M6.15 18.85v3.85" />
     </svg>
   );
 }
@@ -2602,12 +2730,13 @@ function AppNavigation(props: {
   onViewChange: (view: View) => void;
   variant: "top" | "bottom";
 }): ReactElement {
-  const items: Array<{ view: View; label: string }> = [
-    { view: "home", label: "Home" },
-    { view: "notifications", label: "Notifications" },
-    { view: "agenda", label: "Agenda" },
-    { view: "notes", label: "Notes" },
-    { view: "settings", label: "Settings" }
+  const desktopClient = isDesktopClient();
+  const items: Array<{ view: View; label: string; short: string }> = [
+    { view: "home", label: "Home", short: "Home" },
+    { view: "notifications", label: "Notifications", short: "Inbox" },
+    { view: "agenda", label: "Agenda", short: "Agenda" },
+    { view: "notes", label: "Notes", short: "Notes" },
+    { view: "settings", label: "Settings", short: "Settings" }
   ];
   return (
     <nav
@@ -2620,16 +2749,75 @@ function AppNavigation(props: {
           type="button"
           className={props.view === item.view ? "selected" : ""}
           aria-current={props.view === item.view ? "page" : undefined}
+          aria-label={item.label}
+          title={item.label}
           onClick={() => props.onViewChange(item.view)}
         >
-          <span>{item.label}</span>
+          {desktopClient ? <NavIcon view={item.view} /> : null}
+          <span>{desktopClient ? item.short : item.label}</span>
         </button>
       ))}
     </nav>
   );
 }
 
+function NavIcon(props: { view: View }): ReactElement {
+  const common = {
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "2.2",
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+    focusable: false
+  };
+  if (props.view === "home") {
+    return (
+      <svg {...common}>
+        <path d="m3 11 9-7 9 7" />
+        <path d="M5 10v10h14V10" />
+        <path d="M10 20v-6h4v6" />
+      </svg>
+    );
+  }
+  if (props.view === "notifications") {
+    return (
+      <svg {...common}>
+        <path d="M4 5h16v11H7l-3 3V5Z" />
+        <path d="M8 9h8" />
+        <path d="M8 13h5" />
+      </svg>
+    );
+  }
+  if (props.view === "agenda") {
+    return (
+      <svg {...common}>
+        <path d="M7 3v4M17 3v4M4 8h16" />
+        <rect x="4" y="5" width="16" height="16" rx="2" />
+        <path d="M8 12h3M8 16h6" />
+      </svg>
+    );
+  }
+  if (props.view === "notes") {
+    return (
+      <svg {...common}>
+        <path d="M6 3h9l3 3v15H6V3Z" />
+        <path d="M14 3v4h4" />
+        <path d="M9 12h6M9 16h6" />
+      </svg>
+    );
+  }
+  return (
+    <svg {...common}>
+      <path d="M9.6 3.2h4.8l.6 2.5a7.4 7.4 0 0 1 1.4.8l2.4-.8 2.4 4.2-1.8 1.7a7.8 7.8 0 0 1 0 1.7l1.8 1.7-2.4 4.2-2.4-.8a7.4 7.4 0 0 1-1.4.8l-.6 2.5H9.6L9 19.2a7.4 7.4 0 0 1-1.4-.8l-2.4.8-2.4-4.2 1.8-1.7a7.8 7.8 0 0 1 0-1.7L2.8 9.9l2.4-4.2 2.4.8A7.4 7.4 0 0 1 9 5.7l.6-2.5Z" />
+      <circle cx="12" cy="12.5" r="3.1" />
+    </svg>
+  );
+}
+
 function logoSource(appearance: AppearancePreferences): string {
+  if (isDesktopClient()) return "/icons/DentLinkDark.png";
   if (appearance.branding.logoVariant === "dark") return "/icons/DentLinkDark.png";
   if (appearance.branding.logoVariant === "auto") {
     const darkSurface =
@@ -2823,20 +3011,26 @@ function NotificationsView(props: {
               {notification.email?.subject || notification.title || "Email notification"}
             </strong>
             <span className="notification-card-summary">{notificationSummary(notification)}</span>
-            <span className="importance-pill">Importance: {importanceScore(notification)}</span>
-            <span>{relativeTime(notification.email?.receivedAt ?? notification.createdAt)}</span>
-            {notification.ai?.requiresAction ? (
-              <span className="action-required">Action required</span>
-            ) : null}
-            {listMode === "history" ? <HistoryStateBadge notification={notification} /> : null}
-            {notification.status === "suppressed" ? (
-              <span className="history-state suppressed">Below threshold</span>
-            ) : null}
           </button>
-          <NotificationQuickActions
-            notification={notification}
-            onUpdateNotification={props.onUpdateNotification}
-          />
+          <div className="notification-meta-actions">
+            <div className="notification-card-meta">
+              <span className="importance-pill">Importance: {importanceScore(notification)}</span>
+              <span className="notification-card-time">
+                {relativeTime(notification.email?.receivedAt ?? notification.createdAt)}
+              </span>
+              {notification.ai?.requiresAction ? (
+                <span className="action-required">Action required</span>
+              ) : null}
+              {listMode === "history" ? <HistoryStateBadge notification={notification} /> : null}
+              {notification.status === "suppressed" ? (
+                <span className="history-state suppressed">Below threshold</span>
+              ) : null}
+            </div>
+            <NotificationQuickActions
+              notification={notification}
+              onUpdateNotification={props.onUpdateNotification}
+            />
+          </div>
         </article>
       ))}
       {selectedNotification ? (
@@ -3032,7 +3226,7 @@ function NotificationQuickActions(props: {
           />
         </>
       )}
-      {notification.sourceUrl ? (
+      {props.expanded && notification.sourceUrl ? (
         <IconLink
           label={sourceOpenLabel(notification)}
           icon="external"
@@ -3120,7 +3314,7 @@ function Icon(props: { name: IconName; filled?: boolean }): ReactElement {
       ? "M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2Z"
       : "M14 4v8.83L15.17 14H8.83L10 12.83V4h4Zm3-2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2V4h1V2Z";
     return (
-      <svg {...common} fill="currentColor" stroke="none">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
         <path d={path} />
       </svg>
     );
@@ -4159,65 +4353,46 @@ function EventActions(props: {
   if (event.source === "note") {
     return (
       <div className="event-actions">
-        <button
-          type="button"
+        <IconButton
+          label="Open note"
+          icon="external"
           onClick={() => props.actions.onOpenNote(noteIdFromCalendarEvent(event))}
-        >
-          Open note
-        </button>
+        />
       </div>
     );
   }
   return (
     <div className="event-actions">
-      {event.sourceUrl ? (
-        <a href={event.sourceUrl} target="_blank" rel="noreferrer">
-          {event.source === "local" ? "Open source" : "Open in Google Calendar"}
-        </a>
-      ) : null}
-      {event.source === "local" ? (
-        <>
-          <button type="button" onClick={() => void props.actions.onUpdateLocalEvent(event)}>
-            Edit
-          </button>
-          <button type="button" onClick={() => void props.actions.onDeleteLocalEvent(event)}>
-            Delete
-          </button>
-        </>
-      ) : (
-        <>
-          <button
-            type="button"
-            onClick={() =>
-              void props.actions.onAnnotateEvent(event, {
-                notes: event.annotation?.notes ? "" : "DentLink note",
-                pinned: !(event.annotation?.pinned ?? false)
-              })
-            }
-          >
-            Annotate
-          </button>
-          <button
-            type="button"
-            onClick={() =>
-              void props.actions.onAnnotateEvent(event, {
-                completed: !(event.annotation?.completed ?? false)
-              })
-            }
-          >
-            {event.annotation?.completed ? "Uncomplete" : "Complete"}
-          </button>
-          <button
-            type="button"
-            onClick={() => void props.actions.onAnnotateEvent(event, { hidden: true })}
-          >
-            Hide
-          </button>
-          <button type="button" onClick={() => void props.actions.onDismissEvent(event)}>
-            Dismiss
-          </button>
-        </>
-      )}
+      <IconButton
+        label={event.annotation?.pinned ? "Unpin event" : "Pin event"}
+        icon="pin"
+        pressed={event.annotation?.pinned ?? false}
+        onClick={() =>
+          void props.actions.onAnnotateEvent(event, {
+            pinned: !(event.annotation?.pinned ?? false)
+          })
+        }
+      />
+      <IconButton
+        label={event.annotation?.completed ? "Mark incomplete" : "Complete event"}
+        icon="check"
+        variant="complete"
+        onClick={() =>
+          void props.actions.onAnnotateEvent(event, {
+            completed: !(event.annotation?.completed ?? false)
+          })
+        }
+      />
+      <IconButton
+        label={event.source === "local" ? "Delete event" : "Dismiss event"}
+        icon="close"
+        variant="dismiss"
+        onClick={() =>
+          event.source === "local"
+            ? void props.actions.onDeleteLocalEvent(event)
+            : void props.actions.onDismissEvent(event)
+        }
+      />
     </div>
   );
 }
@@ -4478,6 +4653,16 @@ function formatEventTime(event: CalendarEvent): string {
     hour: "numeric",
     minute: "2-digit"
   })}-${new Date(event.endAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+}
+
+function formatEventTimelineDate(event: CalendarEvent): string {
+  const date = new Date(`${event.startDate ?? event.startAt.slice(0, 10)}T00:00:00.000Z`);
+  return date.toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC"
+  });
 }
 
 function todayKey(timeZone = detectedTimezone()): string {
@@ -4764,10 +4949,7 @@ function notificationSummary(notification: Notification): string {
 
 function notificationSender(notification: Notification): string {
   return (
-    notification.email?.senderDisplayName?.trim() ||
-    notification.email?.senderAddress?.trim() ||
-    notification.sourceLabel ||
-    "Unknown sender"
+    notification.email?.senderDisplayName?.trim() || notification.sourceLabel || "Unknown sender"
   );
 }
 
@@ -7540,10 +7722,140 @@ function storedSession(): AuthSession | null {
 
 function storeSession(session: AuthSession): void {
   window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+  postDesktopSession({ type: "dentlink.web.session.store", session });
 }
 
 function clearStoredSession(): void {
-  if (typeof window !== "undefined") window.localStorage.removeItem(SESSION_STORAGE_KEY);
+  if (typeof window !== "undefined") {
+    window.localStorage.removeItem(SESSION_STORAGE_KEY);
+    postDesktopSession({ type: "dentlink.web.session.clear" });
+  }
+}
+
+function isDesktopClient(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).get("dentlinkDesktop") === "1";
+}
+
+function postDesktopSession(message: { type: string; session?: AuthSession }): void {
+  if (!isDesktopClient() || window.parent === window) return;
+  window.parent.postMessage(message, "*");
+}
+
+function installDesktopMomentumScrolling(): () => void {
+  let suppressClickUntil = 0;
+  let active: {
+    target: HTMLElement;
+    pointerId: number;
+    lastX: number;
+    lastY: number;
+    lastTime: number;
+    velocityX: number;
+    velocityY: number;
+    dragged: boolean;
+    frame: number | null;
+  } | null = null;
+
+  function stopMomentum(): void {
+    if (active?.frame) window.cancelAnimationFrame(active.frame);
+    if (active) active.frame = null;
+  }
+
+  function onPointerDown(event: PointerEvent): void {
+    if (event.pointerType !== "touch") return;
+    const target = scrollableAncestor(event.target);
+    if (!target) return;
+    stopMomentum();
+    active = {
+      target,
+      pointerId: event.pointerId,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      lastTime: performance.now(),
+      velocityX: 0,
+      velocityY: 0,
+      dragged: false,
+      frame: null
+    };
+  }
+
+  function onPointerMove(event: PointerEvent): void {
+    if (!active || event.pointerId !== active.pointerId) return;
+    const now = performance.now();
+    const dx = event.clientX - active.lastX;
+    const dy = event.clientY - active.lastY;
+    const elapsed = Math.max(1, now - active.lastTime);
+    if (!active.dragged && Math.hypot(dx, dy) < 8) return;
+    active.dragged = true;
+    active.target.scrollLeft -= dx;
+    active.target.scrollTop -= dy;
+    active.velocityX = dx / elapsed;
+    active.velocityY = dy / elapsed;
+    active.lastX = event.clientX;
+    active.lastY = event.clientY;
+    active.lastTime = now;
+    event.preventDefault();
+  }
+
+  function onPointerUp(event: PointerEvent): void {
+    if (!active || event.pointerId !== active.pointerId) return;
+    if (!active.dragged) {
+      active = null;
+      return;
+    }
+    suppressClickUntil = performance.now() + 300;
+    const target = active.target;
+    let velocityX = active.velocityX * 7;
+    let velocityY = active.velocityY * 7;
+    const step = () => {
+      target.scrollLeft -= velocityX;
+      target.scrollTop -= velocityY;
+      velocityX *= 0.88;
+      velocityY *= 0.88;
+      if (Math.abs(velocityX) > 0.35 || Math.abs(velocityY) > 0.35) {
+        if (active) active.frame = window.requestAnimationFrame(step);
+      } else {
+        active = null;
+      }
+    };
+    active.frame = window.requestAnimationFrame(step);
+  }
+
+  function onClick(event: MouseEvent): void {
+    if (performance.now() <= suppressClickUntil) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }
+
+  document.addEventListener("pointerdown", onPointerDown);
+  document.addEventListener("pointermove", onPointerMove, { passive: false });
+  document.addEventListener("pointerup", onPointerUp);
+  document.addEventListener("pointercancel", onPointerUp);
+  document.addEventListener("click", onClick, true);
+  return () => {
+    stopMomentum();
+    document.removeEventListener("pointerdown", onPointerDown);
+    document.removeEventListener("pointermove", onPointerMove);
+    document.removeEventListener("pointerup", onPointerUp);
+    document.removeEventListener("pointercancel", onPointerUp);
+    document.removeEventListener("click", onClick, true);
+  };
+}
+
+function scrollableAncestor(target: EventTarget | null): HTMLElement | null {
+  const origin = target instanceof Element ? target : null;
+  if (!origin || origin.closest("input, textarea, select")) return null;
+  for (let element: Element | null = origin; element; element = element.parentElement) {
+    if (!(element instanceof HTMLElement)) continue;
+    const style = window.getComputedStyle(element);
+    const canScrollY =
+      /(auto|scroll)/.test(style.overflowY) && element.scrollHeight > element.clientHeight;
+    const canScrollX =
+      /(auto|scroll)/.test(style.overflowX) && element.scrollWidth > element.clientWidth;
+    if (canScrollY || canScrollX) return element;
+  }
+  return document.scrollingElement instanceof HTMLElement ? document.scrollingElement : null;
 }
 
 function messageFor(caught: unknown): string {

@@ -199,3 +199,9 @@ backend remains authoritative and unresolved conflicts remain explicit.
 Shared UI can request capabilities such as opening a source, invoking a desktop action, or launching
 a mobile intent through typed adapters. Capability implementations are platform-local and cannot be
 invoked directly by the cloud backend.
+
+The initial Tauri desktop app wraps the shared DentLink web client in a native shell with a
+permanently attached right-side macro pad. The macro pad preserves the legacy right rail behavior
+for Phone, History, Settings, Files, Terminal, contextual Mute/Unmute, and Voice FX, but those
+actions remain local desktop capabilities. The backend does not execute or authorize desktop shell
+commands, and shared UI does not import Tauri APIs directly.

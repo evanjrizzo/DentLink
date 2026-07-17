@@ -10,6 +10,9 @@ export default [
       "coverage/**",
       ".turbo/**",
       "**/.turbo/**",
+      "target/**",
+      "**/target/**",
+      "**/src-tauri/gen/**",
       "pnpm-lock.yaml"
     ]
   },

@@ -112,6 +112,12 @@ body {
   background: var(--app-bg);
 }
 
+.dentlink-desktop-client body {
+  overscroll-behavior: contain;
+  touch-action: manipulation;
+  user-select: none;
+}
+
 :root[data-theme="soft-gray"] {
   --app-bg: #eef1f4;
   --surface-bg: #ffffff;
@@ -156,6 +162,21 @@ body {
 :root[data-density="compact"] {
   --control-height: 38px;
   --font-base: 14px;
+}
+
+:root.dentlink-desktop-client {
+  --control-height: 58px;
+  --icon-button-size: 58px;
+  --icon-size: 28px;
+  --compact-action-gap: 10px;
+  --font-sm: 17px;
+  --font-base: 21px;
+  --font-control: 21px;
+  --font-card-title: 22px;
+  --font-navigation: 20px;
+  --font-lg: 30px;
+  --sticky-header-height: 72px;
+  font-size: 21px;
 }
 
 button,
@@ -348,6 +369,42 @@ textarea::placeholder {
 .page-header h1 {
   margin: 0;
   font-size: 22px;
+}
+
+.dentlink-desktop-client .app-tabs button {
+  min-width: 132px;
+}
+
+.dentlink-desktop-client .page-header h1 {
+  font-size: 30px;
+}
+
+.dentlink-desktop-client .home-section-header h2,
+.dentlink-desktop-client .assistant-header h2,
+.dentlink-desktop-client .sheet-header h2 {
+  font-size: 24px;
+}
+
+.dentlink-desktop-client .notification-card,
+.dentlink-desktop-client .home-band,
+.dentlink-desktop-client .adaptive-panel,
+.dentlink-desktop-client .assistant-panel {
+  font-size: var(--font-base);
+}
+
+.dentlink-desktop-client .notification-summary-button strong,
+.dentlink-desktop-client .home-notification-row strong,
+.dentlink-desktop-client .home-note-row strong,
+.dentlink-desktop-client .event-card strong {
+  font-size: 23px;
+}
+
+.dentlink-desktop-client .assistant-thread,
+.dentlink-desktop-client .adaptive-panel,
+.dentlink-desktop-client .email-body-preview,
+.dentlink-desktop-client .week-scroll {
+  overscroll-behavior: contain;
+  scroll-behavior: auto;
 }
 
 .app-error {
@@ -1328,7 +1385,7 @@ textarea::placeholder {
 
 .icon-button[aria-pressed="true"] {
   border-color: var(--pin-active);
-  background: color-mix(in srgb, var(--pin-active) 12%, var(--surface-bg));
+  background: transparent;
   color: var(--pin-active);
 }
 
@@ -2514,4 +2571,1252 @@ textarea {
   .action-required {
     grid-column: 2 / -1;
   }
+}
+
+.dentlink-desktop-client {
+  --app-bg: #0c0f14;
+  --surface-bg: #141b24;
+  --surface-elevated: #1b2531;
+  --text-primary: #f4f7fb;
+  --text-secondary: #d7dde6;
+  --text-muted: #aab5c2;
+  --border: rgb(255 255 255 / 14%);
+  --border-subtle: rgb(255 255 255 / 10%);
+  --accent: #7c3aed;
+  --selected-bg: #2e1065;
+  --hover-bg: #243140;
+  --header-bg: rgb(12 14 18 / 96%);
+  --card-bg: rgb(255 255 255 / 5.5%);
+  --card-border: rgb(255 255 255 / 10%);
+  --card-hover: rgb(255 255 255 / 10%);
+  --button-secondary-bg: rgb(31 40 50 / 86%);
+  --button-secondary-text: #d4dde8;
+  --button-hover-bg: rgb(43 54 66 / 94%);
+  --input-bg: #0f1720;
+  --input-text: #f4f7fb;
+  --input-border: rgb(111 128 145 / 55%);
+  --control-height: 64px;
+  --icon-button-size: 64px;
+  --icon-size: 34px;
+  --font-sm: 18px;
+  --font-base: 30px;
+  --font-control: 24px;
+  --font-card-title: 34px;
+  --font-navigation: 18px;
+  --font-lg: 38px;
+  --card-radius: 4px;
+  --radius: 4px;
+  background: var(--app-bg);
+  color: var(--text-primary);
+  font-size: var(--font-base);
+}
+
+.dentlink-desktop-client body {
+  overflow: auto;
+  background: var(--app-bg);
+}
+
+.dentlink-desktop-client .app-header {
+  position: sticky;
+  top: 0;
+  z-index: 60;
+  display: grid;
+  grid-template-columns: 184px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 88px;
+  border-bottom: 1px solid var(--border);
+  background: var(--header-bg);
+  padding: 6px 8px;
+}
+
+.dentlink-desktop-client .brand-mark {
+  width: 184px;
+  padding: 3px 6px;
+  background: transparent;
+}
+
+.dentlink-desktop-client .brand-mark img {
+  width: 172px;
+  max-height: 70px;
+  object-fit: contain;
+}
+
+.dentlink-desktop-client .app-tabs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
+  justify-content: stretch;
+  min-width: 0;
+}
+
+.dentlink-desktop-client .app-tabs button {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-width: 0;
+  min-height: 72px;
+  border-radius: 4px;
+  padding: 4px;
+  font-size: var(--font-navigation);
+  font-weight: 800;
+}
+
+.dentlink-desktop-client .app-tabs button svg {
+  width: 38px;
+  height: 38px;
+}
+
+.dentlink-desktop-client .app-tabs button span {
+  display: none;
+}
+
+.dentlink-desktop-client .app-tabs button.selected {
+  border-color: rgb(124 58 237 / 95%);
+  border-width: 3px;
+  border-bottom-width: 6px;
+  background: rgb(76 29 149 / 96%);
+  color: #f5f3ff;
+}
+
+.dentlink-desktop-client .desktop-refresh-button {
+  width: 72px;
+  min-width: 72px;
+  min-height: 72px;
+  border-width: 2px;
+}
+
+.dentlink-desktop-client .desktop-refresh-button svg {
+  width: 38px;
+  height: 38px;
+}
+
+.dentlink-desktop-client .mobile-bottom-tabs,
+.dentlink-desktop-client .page-header,
+.dentlink-desktop-client .account-email,
+.dentlink-desktop-client .logout-button {
+  display: none;
+}
+
+.dentlink-desktop-client .refresh-status {
+  margin: 8px;
+  border-radius: 4px;
+  background: #3a1d1d;
+  color: #ffded8;
+  font-size: 22px;
+}
+
+.dentlink-desktop-client .app-error {
+  margin: 8px;
+  color: #ffb4a8;
+  font-size: 22px;
+}
+
+.dentlink-desktop-client .home-shell {
+  display: block;
+  padding: 8px;
+}
+
+.dentlink-desktop-client .home-main {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(430px, 1fr));
+  gap: 8px;
+}
+
+.dentlink-desktop-client .home-band,
+.dentlink-desktop-client .notification-card {
+  gap: 8px;
+  border: 1px solid var(--card-border);
+  border-left: 5px solid var(--source-accent, var(--accent));
+  border-radius: 4px;
+  background: var(--card-bg);
+  padding: 8px;
+  box-shadow: none;
+}
+
+.dentlink-desktop-client .home-section-header h2 {
+  color: #a78bfa;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.dentlink-desktop-client .home-section-header button,
+.dentlink-desktop-client .quick-capture,
+.dentlink-desktop-client .notification-mode-tabs,
+.dentlink-desktop-client .notification-search,
+.dentlink-desktop-client .ai-settings-panel,
+.dentlink-desktop-client .note-composer {
+  display: none;
+}
+
+.dentlink-desktop-client .today-summary-grid {
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.dentlink-desktop-client .home-metric {
+  border-radius: 4px;
+  background: rgb(255 255 255 / 5%);
+  padding: 8px;
+}
+
+.dentlink-desktop-client .home-metric strong {
+  color: #ffffff;
+  font-size: 40px;
+}
+
+.dentlink-desktop-client .home-metric span,
+.dentlink-desktop-client .next-event-button span,
+.dentlink-desktop-client .home-event-row span,
+.dentlink-desktop-client .home-review-row span,
+.dentlink-desktop-client .home-notification-row > button span {
+  color: #9aa4b2;
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.dentlink-desktop-client .next-event-button,
+.dentlink-desktop-client .home-event-row,
+.dentlink-desktop-client .home-review-row,
+.dentlink-desktop-client .home-notification-row,
+.dentlink-desktop-client .home-note-row {
+  border: 1px solid var(--card-border);
+  border-left: 5px solid var(--source-accent, var(--event-accent, var(--accent)));
+  border-radius: 4px;
+  background: rgb(255 255 255 / 5.5%);
+  padding: 8px;
+}
+
+.dentlink-desktop-client .home-notification-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.dentlink-desktop-client .next-event-button strong,
+.dentlink-desktop-client .home-event-row strong,
+.dentlink-desktop-client .home-review-row strong,
+.dentlink-desktop-client .home-note-row strong,
+.dentlink-desktop-client .home-notification-row strong,
+.dentlink-desktop-client .notification-summary-button strong {
+  color: #f4f7fb;
+  font-size: 34px;
+  line-height: 1.08;
+}
+
+.dentlink-desktop-client .next-event-button small,
+.dentlink-desktop-client .home-event-row small,
+.dentlink-desktop-client .home-review-row small,
+.dentlink-desktop-client .home-note-row small,
+.dentlink-desktop-client .home-notification-row small,
+.dentlink-desktop-client .notification-card-summary,
+.dentlink-desktop-client .detail-grid,
+.dentlink-desktop-client .notification-detail-panel p {
+  color: #d7dde6;
+  font-size: 30px;
+  line-height: 1.16;
+  white-space: normal;
+}
+
+.dentlink-desktop-client .home-empty {
+  color: #bac4d0;
+  font-size: 30px;
+}
+
+.dentlink-desktop-client .notifications-shell,
+.dentlink-desktop-client .settings-shell,
+.dentlink-desktop-client .calendar-shell,
+.dentlink-desktop-client .notes-shell {
+  padding: 8px;
+}
+
+.dentlink-desktop-client .notifications-shell {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(430px, 1fr));
+  gap: 8px;
+  align-items: start;
+}
+
+.dentlink-desktop-client .notification-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.dentlink-desktop-client .notification-summary-button {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+  min-width: 0;
+}
+
+.dentlink-desktop-client .source-badge,
+.dentlink-desktop-client .notification-sender,
+.dentlink-desktop-client .importance-pill,
+.dentlink-desktop-client .action-required,
+.dentlink-desktop-client .history-state,
+.dentlink-desktop-client .notification-summary-button > span:last-child {
+  width: fit-content;
+  border-radius: 4px;
+  background: transparent;
+  color: #9aa4b2;
+  font-size: 18px;
+  font-weight: 800;
+  padding: 0;
+}
+
+.dentlink-desktop-client .action-required {
+  color: #ffcf5a;
+}
+
+.dentlink-desktop-client .notification-card-summary {
+  -webkit-line-clamp: 4;
+}
+
+.dentlink-desktop-client .notification-touch-actions {
+  display: grid;
+  gap: 6px;
+}
+
+.dentlink-desktop-client .icon-button {
+  width: 64px;
+  min-width: 64px;
+  min-height: 64px;
+  border-radius: 4px;
+}
+
+.dentlink-desktop-client .icon-button svg {
+  width: 34px;
+  height: 34px;
+}
+
+.dentlink-desktop-client .icon-button-text {
+  display: none;
+}
+
+.dentlink-desktop-client .adaptive-overlay {
+  z-index: 80;
+  align-items: stretch;
+  justify-content: stretch;
+  background: rgb(0 0 0 / 72%);
+}
+
+.dentlink-desktop-client .adaptive-panel,
+.dentlink-desktop-client .desktop-assistant-panel {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  height: 100dvh;
+  max-height: 100dvh;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: #0c0f14;
+  color: var(--text-primary);
+  padding: 10px;
+}
+
+.dentlink-desktop-client .sheet-header {
+  top: -10px;
+  margin: -10px -10px 8px;
+  min-height: 82px;
+  background: rgb(12 14 18 / 98%);
+  padding: 8px 10px;
+}
+
+.dentlink-desktop-client .sheet-header h2,
+.dentlink-desktop-client .assistant-header h2 {
+  color: #ffffff;
+  font-size: 34px;
+}
+
+.dentlink-desktop-client .notification-touch-actions.expanded {
+  display: flex;
+}
+
+.dentlink-desktop-client .assistant-bubble {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 70;
+  width: 104px;
+  height: 104px;
+  border-radius: 999px;
+  border: 3px solid rgb(124 58 237 / 85%);
+  background: #2e1065;
+  color: #f5f3ff;
+  font-size: 28px;
+  font-weight: 900;
+  box-shadow: 0 12px 30px rgb(0 0 0 / 34%);
+}
+
+.dentlink-desktop-client .desktop-assistant-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.dentlink-desktop-client .desktop-assistant-panel[hidden] {
+  display: none;
+}
+
+.dentlink-desktop-client button,
+.dentlink-desktop-client input,
+.dentlink-desktop-client select,
+.dentlink-desktop-client textarea {
+  border-color: rgb(111 128 145 / 55%);
+  background: rgb(31 40 50 / 86%);
+  color: #d4dde8;
+}
+
+.dentlink-desktop-client button:hover {
+  background: rgb(43 54 66 / 94%);
+  color: #edf3fa;
+}
+
+.dentlink-desktop-client button:disabled {
+  background: rgb(27 35 44 / 70%);
+  color: #7f8b99;
+}
+
+.dentlink-desktop-client input,
+.dentlink-desktop-client select,
+.dentlink-desktop-client textarea {
+  background: #0f1720;
+  color: #f4f7fb;
+}
+
+.dentlink-desktop-client input::placeholder,
+.dentlink-desktop-client textarea::placeholder {
+  color: #9aa4b2;
+}
+
+.dentlink-desktop-client .notification-summary-button,
+.dentlink-desktop-client .home-notification-row > button,
+.dentlink-desktop-client .next-event-button,
+.dentlink-desktop-client .home-event-row,
+.dentlink-desktop-client .home-review-row {
+  background: transparent;
+}
+
+.dentlink-desktop-client .assistant-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  border-bottom-color: var(--border);
+}
+
+.dentlink-desktop-client .assistant-close {
+  min-width: 104px;
+  min-height: 64px;
+}
+
+.dentlink-desktop-client .assistant-prompts {
+  grid-column: 1 / -1;
+}
+
+.dentlink-desktop-client .assistant-prompts button {
+  font-size: 20px;
+}
+
+.dentlink-desktop-client .assistant-message {
+  max-width: 92%;
+  font-size: 28px;
+}
+
+.dentlink-desktop-client .assistant-composer textarea {
+  min-height: 96px;
+  font-size: 26px;
+}
+
+.dentlink-desktop-client {
+  background: #0c0f14;
+}
+
+.dentlink-desktop-client body,
+.dentlink-desktop-client #root,
+.dentlink-desktop-client .home-shell {
+  background: #0c0f14;
+  color: #f4f7fb;
+}
+
+.dentlink-desktop-client .home-main {
+  grid-template-columns: 0.82fr 1.18fr;
+  align-items: start;
+}
+
+.dentlink-desktop-client .needs-review-band,
+.dentlink-desktop-client .due-notes-band {
+  display: none;
+}
+
+.dentlink-desktop-client .priority-inbox-band {
+  grid-column: 2;
+  grid-row: span 2;
+}
+
+.dentlink-desktop-client .home-band,
+.dentlink-desktop-client .home-metric,
+.dentlink-desktop-client .next-event-button,
+.dentlink-desktop-client .home-event-row,
+.dentlink-desktop-client .home-review-row,
+.dentlink-desktop-client .home-notification-row,
+.dentlink-desktop-client .home-note-row,
+.dentlink-desktop-client .notification-card,
+.dentlink-desktop-client .assistant-panel,
+.dentlink-desktop-client .assistant-message,
+.dentlink-desktop-client .assistant-source {
+  border-color: rgb(255 255 255 / 14%);
+  background: #111923;
+  color: #f4f7fb;
+}
+
+.dentlink-desktop-client .app-header,
+.dentlink-desktop-client .desktop-app-header {
+  border-color: rgb(255 255 255 / 14%);
+  background: #0c0f14;
+  color: #f4f7fb;
+}
+
+.dentlink-desktop-client .home-notification-row > button,
+.dentlink-desktop-client .notification-summary-button {
+  background: #111923;
+  color: #f4f7fb;
+}
+
+.dentlink-desktop-client .next-event-button:hover,
+.dentlink-desktop-client .home-event-row:hover,
+.dentlink-desktop-client .home-review-row:hover,
+.dentlink-desktop-client .home-notification-row > button:hover,
+.dentlink-desktop-client .notification-summary-button:hover {
+  background: #172231;
+  color: #ffffff;
+}
+
+.dentlink-desktop-client .home-band *,
+.dentlink-desktop-client .notification-card *,
+.dentlink-desktop-client .assistant-panel * {
+  color: inherit;
+}
+
+.dentlink-desktop-client .notification-card {
+  grid-template-rows: minmax(0, 1fr) 72px;
+  grid-template-columns: 1fr;
+  width: 100%;
+  min-height: 340px;
+  height: 340px;
+  overflow: hidden;
+}
+
+.dentlink-desktop-client .home-notification-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: minmax(0, 1fr) 72px;
+  min-height: 340px;
+  height: 340px;
+  overflow: hidden;
+}
+
+.dentlink-desktop-client .home-notification-row,
+.dentlink-desktop-client .home-event-row,
+.dentlink-desktop-client .next-event-button {
+  overflow: hidden;
+}
+
+.dentlink-desktop-client .home-event-row,
+.dentlink-desktop-client .next-event-button {
+  min-height: 188px;
+  height: 188px;
+}
+
+.dentlink-desktop-client .notification-meta-actions {
+  display: flex;
+  grid-row: 2;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  min-height: 72px;
+  border-top: 1px solid rgb(255 255 255 / 10%);
+  padding-top: 8px;
+}
+
+.dentlink-desktop-client .notification-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.dentlink-desktop-client .notification-meta-actions .notification-touch-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.dentlink-desktop-client .home-metric span,
+.dentlink-desktop-client .next-event-button span,
+.dentlink-desktop-client .home-event-row span,
+.dentlink-desktop-client .home-review-row span,
+.dentlink-desktop-client .home-notification-row > button span,
+.dentlink-desktop-client .source-badge,
+.dentlink-desktop-client .notification-sender,
+.dentlink-desktop-client .importance-pill,
+.dentlink-desktop-client .history-state,
+.dentlink-desktop-client .notification-card-time,
+.dentlink-desktop-client .assistant-source span,
+.dentlink-desktop-client .assistant-source small {
+  color: #bac4d0;
+}
+
+.dentlink-desktop-client .importance-pill {
+  border-radius: 999px;
+  background: #eef2ff;
+  color: var(--source-gmail);
+  font-size: 18px;
+  font-weight: 800;
+  padding: 5px 10px;
+}
+
+.dentlink-desktop-client .action-required {
+  border-radius: 999px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 18px;
+  font-weight: 800;
+  padding: 5px 10px;
+}
+
+.dentlink-desktop-client .history-state.completed {
+  border-radius: 999px;
+  background: #ecfdf3;
+  color: #027a48;
+  font-size: 18px;
+  font-weight: 800;
+  padding: 5px 10px;
+}
+
+.dentlink-desktop-client .history-state.dismissed,
+.dentlink-desktop-client .history-state.suppressed {
+  border-radius: 999px;
+  background: #f2f4f7;
+  color: #344054;
+  font-size: 18px;
+  font-weight: 800;
+  padding: 5px 10px;
+}
+
+.dentlink-desktop-client .next-event-button strong,
+.dentlink-desktop-client .home-event-row strong,
+.dentlink-desktop-client .home-review-row strong,
+.dentlink-desktop-client .home-note-row strong,
+.dentlink-desktop-client .home-notification-row strong,
+.dentlink-desktop-client .notification-summary-button strong,
+.dentlink-desktop-client .assistant-message p,
+.dentlink-desktop-client .assistant-source strong {
+  color: #f4f7fb;
+}
+
+.dentlink-desktop-client .next-event-button small,
+.dentlink-desktop-client .home-event-row small,
+.dentlink-desktop-client .home-review-row small,
+.dentlink-desktop-client .home-note-row small,
+.dentlink-desktop-client .home-notification-row small,
+.dentlink-desktop-client .notification-card-summary {
+  color: #d7dde6;
+}
+
+.dentlink-desktop-client .notification-card-summary,
+.dentlink-desktop-client .home-notification-row small,
+.dentlink-desktop-client .home-event-row small,
+.dentlink-desktop-client .next-event-button small {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+}
+
+.dentlink-desktop-client .notification-card-summary {
+  -webkit-line-clamp: 4;
+}
+
+.dentlink-desktop-client .home-notification-row small,
+.dentlink-desktop-client .home-event-row small,
+.dentlink-desktop-client .next-event-button small {
+  -webkit-line-clamp: 2;
+}
+
+.dentlink-desktop-client .notification-summary-button strong,
+.dentlink-desktop-client .home-notification-row strong,
+.dentlink-desktop-client .home-event-row strong,
+.dentlink-desktop-client .next-event-button strong {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.dentlink-desktop-client .assistant-message.user {
+  border-color: rgb(124 58 237 / 48%);
+  background: #2e1065;
+  color: #f5f3ff;
+}
+
+.dentlink-desktop-client .assistant-message.assistant,
+.dentlink-desktop-client .assistant-example .assistant-message {
+  background: #141b24;
+  color: #f4f7fb;
+}
+
+.dentlink-desktop-client .assistant-message.error {
+  border-color: #ffb4a8;
+  background: #3a1d1d;
+  color: #ffded8;
+}
+
+.dentlink-desktop-client .assistant-example {
+  opacity: 1;
+}
+
+.dentlink-desktop-client input,
+.dentlink-desktop-client select,
+.dentlink-desktop-client textarea,
+.dentlink-desktop-client .assistant-composer textarea {
+  border-color: rgb(111 128 145 / 55%);
+  background: #0f1720;
+  color: #f4f7fb;
+}
+
+.dentlink-desktop-client button,
+.dentlink-desktop-client .assistant-composer button,
+.dentlink-desktop-client .assistant-close {
+  border-color: rgb(111 128 145 / 55%);
+  background: rgb(31 40 50 / 86%);
+  color: #d4dde8;
+}
+
+.dentlink-desktop-client button:hover,
+.dentlink-desktop-client .assistant-composer button:hover,
+.dentlink-desktop-client .assistant-close:hover {
+  background: rgb(43 54 66 / 94%);
+  color: #edf3fa;
+}
+
+.dentlink-desktop-client .home-note-row input[type="checkbox"] {
+  accent-color: #7c3aed;
+}
+
+.dentlink-desktop-client .notifications-shell .notification-card-summary,
+.dentlink-desktop-client .priority-inbox-band .home-notification-row small {
+  color: #d7dde6;
+  font-size: 25px;
+  line-height: 1.1;
+  margin-top: 6px;
+  -webkit-line-clamp: 5;
+}
+
+.dentlink-desktop-client .event-details.adaptive-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: auto;
+}
+
+.dentlink-desktop-client .event-details > .calendar-card-header {
+  position: sticky;
+  top: -10px;
+  z-index: 3;
+  margin: -10px -10px 8px;
+  min-height: 82px;
+  border-bottom: 1px solid rgb(255 255 255 / 14%);
+  background: rgb(12 14 18 / 98%);
+  padding: 8px 10px;
+}
+
+.dentlink-desktop-client .event-details > .calendar-card-header h2 {
+  margin: 0;
+  color: #f4f7fb;
+  font-size: 34px;
+}
+
+.dentlink-desktop-client .notification-card {
+  grid-template-rows: minmax(0, 1fr) 72px;
+  min-height: 340px;
+  height: 340px;
+  padding-top: 12px;
+}
+
+.dentlink-desktop-client .notification-summary-button {
+  grid-template-columns: 1fr;
+  gap: 0;
+  align-content: start;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dentlink-desktop-client .notification-summary-button .source-badge {
+  margin-bottom: 6px;
+}
+
+.dentlink-desktop-client .notification-summary-button .notification-sender {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #bac4d0;
+  font-size: 18px;
+  line-height: 1.08;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+
+.dentlink-desktop-client .notification-summary-button strong {
+  color: #f4f7fb;
+  font-size: 28px;
+  line-height: 1.08;
+}
+
+.dentlink-desktop-client .notification-card-summary {
+  margin-top: 6px;
+  color: #d7dde6;
+  font-size: 25px;
+  line-height: 1.1;
+  -webkit-line-clamp: 5;
+}
+
+.dentlink-desktop-client .notifications-shell .notification-card-summary,
+.dentlink-desktop-client .priority-inbox-band .home-notification-row small {
+  font-size: 25px;
+  line-height: 1.1;
+  margin-top: 6px;
+  -webkit-line-clamp: 5;
+}
+
+.dentlink-desktop-client .event-actions {
+  justify-content: flex-end;
+  margin-top: auto;
+  border-top: 1px solid rgb(255 255 255 / 10%);
+  padding-top: 8px;
+}
+
+.dentlink-desktop-client .calendar-card .icon-button {
+  width: 64px;
+  min-width: 64px;
+  min-height: 64px;
+}
+
+.dentlink-desktop-client .calendar-card .icon-button svg {
+  width: 34px;
+  height: 34px;
+}
+
+.dentlink-desktop-client .calendar-grid-panel,
+.dentlink-desktop-client .month-view {
+  border-color: rgb(255 255 255 / 14%);
+  background: #111923;
+}
+
+.dentlink-desktop-client .day-time-grid {
+  grid-template-columns: 72px minmax(0, 1fr);
+  min-width: 0;
+  min-height: calc(18 * 64px);
+}
+
+.dentlink-desktop-client .week-grid {
+  grid-template-columns: 72px repeat(7, minmax(0, 1fr));
+  min-width: 0;
+}
+
+.dentlink-desktop-client .time-labels {
+  grid-template-rows: repeat(18, 64px);
+}
+
+.dentlink-desktop-client .time-grid-column {
+  min-height: calc(18 * 64px);
+}
+
+.dentlink-desktop-client .time-grid-line {
+  height: 64px;
+}
+
+.dentlink-desktop-client .time-labels,
+.dentlink-desktop-client .week-corner,
+.dentlink-desktop-client .week-all-day-label {
+  border-color: rgb(255 255 255 / 12%);
+  background: #141b24;
+  color: #bac4d0;
+}
+
+.dentlink-desktop-client .time-grid-column {
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 63px,
+      rgb(255 255 255 / 10%) 63px,
+      rgb(255 255 255 / 10%) 64px
+    ),
+    #111923;
+}
+
+.dentlink-desktop-client .time-grid-line {
+  background: transparent;
+}
+
+.dentlink-desktop-client .timed-event {
+  min-height: 28px;
+  padding: 3px 6px;
+}
+
+.dentlink-desktop-client .timed-event strong {
+  color: #f4f7fb;
+  font-size: 18px;
+  line-height: 1.05;
+  -webkit-line-clamp: 2;
+}
+
+.dentlink-desktop-client .timed-event span {
+  display: none;
+}
+
+.dentlink-desktop-client .week-day-header.today,
+.dentlink-desktop-client .month-cell.today,
+.dentlink-desktop-client .month-cell.selected {
+  border-color: rgb(124 58 237 / 85%);
+  background: #2e1065;
+}
+
+.dentlink-desktop-client .adaptive-panel input,
+.dentlink-desktop-client .adaptive-panel select,
+.dentlink-desktop-client .adaptive-panel textarea,
+.dentlink-desktop-client .tag-dropdown-menu,
+.dentlink-desktop-client .folder-menu-panel,
+.dentlink-desktop-client .management-menu,
+.dentlink-desktop-client .notes-filter-menu {
+  border-color: rgb(111 128 145 / 55%);
+  background: #0f1720;
+  color: #f4f7fb;
+}
+
+.dentlink-desktop-client option {
+  background: #0f1720;
+  color: #f4f7fb;
+}
+
+.dentlink-desktop-client .sheet-action-list button,
+.dentlink-desktop-client .adaptive-panel button,
+.dentlink-desktop-client .folder-menu-panel button,
+.dentlink-desktop-client .tag-dropdown-menu button,
+.dentlink-desktop-client .management-menu button {
+  border-color: rgb(111 128 145 / 55%);
+  background: rgb(31 40 50 / 86%);
+  color: #d4dde8;
+}
+
+.dentlink-desktop-client .calendar-shell,
+.dentlink-desktop-client .notes-shell,
+.dentlink-desktop-client .settings-shell {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  background: #0c0f14;
+  color: #f4f7fb;
+}
+
+.dentlink-desktop-client .calendar-shell,
+.dentlink-desktop-client .notes-shell {
+  min-height: calc(100dvh - 88px);
+}
+
+.dentlink-desktop-client .calendar-toolbar,
+.dentlink-desktop-client .calendar-panel,
+.dentlink-desktop-client .calendar-card,
+.dentlink-desktop-client .event-details,
+.dentlink-desktop-client .calendar-grid-panel,
+.dentlink-desktop-client .month-cell,
+.dentlink-desktop-client .event-chip,
+.dentlink-desktop-client .timed-event,
+.dentlink-desktop-client .notes-sidebar section,
+.dentlink-desktop-client .notes-main,
+.dentlink-desktop-client .note-composer,
+.dentlink-desktop-client .note-card,
+.dentlink-desktop-client .settings-panel,
+.dentlink-desktop-client .subsettings-panel,
+.dentlink-desktop-client .connections-settings,
+.dentlink-desktop-client .ai-settings-panel {
+  border-color: rgb(255 255 255 / 14%);
+  background: #111923;
+  color: #f4f7fb;
+  box-shadow: none;
+}
+
+.dentlink-desktop-client .calendar-card,
+.dentlink-desktop-client .event-chip,
+.dentlink-desktop-client .timed-event,
+.dentlink-desktop-client .note-card {
+  border-left: 5px solid var(--source-accent, var(--event-accent, var(--accent)));
+}
+
+.dentlink-desktop-client .calendar-toolbar *,
+.dentlink-desktop-client .calendar-panel *,
+.dentlink-desktop-client .calendar-card *,
+.dentlink-desktop-client .calendar-grid-panel *,
+.dentlink-desktop-client .month-cell *,
+.dentlink-desktop-client .event-chip *,
+.dentlink-desktop-client .timed-event *,
+.dentlink-desktop-client .event-details *,
+.dentlink-desktop-client .notes-sidebar *,
+.dentlink-desktop-client .notes-main *,
+.dentlink-desktop-client .settings-shell * {
+  color: inherit;
+}
+
+.dentlink-desktop-client .detail-grid span,
+.dentlink-desktop-client .settings-grid span,
+.dentlink-desktop-client .diagnostics-table th,
+.dentlink-desktop-client .diagnostics-table td,
+.dentlink-desktop-client .email-body-preview,
+.dentlink-desktop-client .calendar-day,
+.dentlink-desktop-client .calendar-hour,
+.dentlink-desktop-client .calendar-source-card,
+.dentlink-desktop-client .week-day-header,
+.dentlink-desktop-client .week-all-day-cell,
+.dentlink-desktop-client .time-grid-column,
+.dentlink-desktop-client .time-grid-line,
+.dentlink-desktop-client .month-weekday,
+.dentlink-desktop-client .note-meta,
+.dentlink-desktop-client .note-card-top {
+  border-color: rgb(255 255 255 / 12%);
+  background: #141b24;
+  color: #d7dde6;
+}
+
+.dentlink-desktop-client .settings-tabs button,
+.dentlink-desktop-client .calendar-toolbar button,
+.dentlink-desktop-client .calendar-toolbar select,
+.dentlink-desktop-client .notes-shell button,
+.dentlink-desktop-client .settings-shell button {
+  border-color: rgb(111 128 145 / 55%);
+  background: rgb(31 40 50 / 86%);
+  color: #d4dde8;
+}
+
+.dentlink-desktop-client .settings-tabs button[aria-current="page"],
+.dentlink-desktop-client .settings-tabs button.selected,
+.dentlink-desktop-client .calendar-toolbar button[aria-pressed="true"],
+.dentlink-desktop-client .calendar-toolbar button.selected {
+  border-color: rgb(124 58 237 / 80%);
+  background: #2e1065;
+  color: #f5f3ff;
+}
+
+.dentlink-desktop-client .settings-shell input,
+.dentlink-desktop-client .settings-shell select,
+.dentlink-desktop-client .settings-shell textarea,
+.dentlink-desktop-client .notes-shell input,
+.dentlink-desktop-client .notes-shell select,
+.dentlink-desktop-client .notes-shell textarea,
+.dentlink-desktop-client .calendar-shell input,
+.dentlink-desktop-client .calendar-shell select,
+.dentlink-desktop-client .calendar-shell textarea {
+  border-color: rgb(111 128 145 / 55%);
+  background: #0f1720;
+  color: #f4f7fb;
+}
+
+.dentlink-desktop-client .calendar-shell h2,
+.dentlink-desktop-client .notes-shell h2,
+.dentlink-desktop-client .settings-shell h2,
+.dentlink-desktop-client .settings-shell h3 {
+  color: #a78bfa;
+}
+
+.dentlink-desktop-client .calendar-card strong,
+.dentlink-desktop-client .event-chip strong,
+.dentlink-desktop-client .timed-event strong,
+.dentlink-desktop-client .note-title-button strong {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #f4f7fb;
+  font-size: 28px;
+  line-height: 1.08;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.dentlink-desktop-client .calendar-card p,
+.dentlink-desktop-client .calendar-card span,
+.dentlink-desktop-client .calendar-time,
+.dentlink-desktop-client .event-chip span,
+.dentlink-desktop-client .timed-event span,
+.dentlink-desktop-client .note-title-button span,
+.dentlink-desktop-client .note-meta {
+  color: #d7dde6;
+  font-size: 24px;
+  line-height: 1.1;
+}
+
+.dentlink-desktop-client .note-list,
+.dentlink-desktop-client .agenda-view {
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 8px;
+}
+
+.dentlink-desktop-client .note-card,
+.dentlink-desktop-client .calendar-card {
+  min-height: 260px;
+  overflow: hidden;
+}
+
+@media (max-width: 1500px) {
+  .dentlink-desktop-client .home-main {
+    grid-template-columns: 0.86fr 1.14fr;
+  }
+}
+
+@media (max-width: 980px) {
+  .dentlink-desktop-client .home-main {
+    grid-template-columns: 1fr;
+  }
+}
+
+.dentlink-desktop-client .notification-card,
+.dentlink-desktop-client .home-notification-row {
+  grid-template-columns: 1fr;
+}
+
+.dentlink-desktop-client .notification-card > .notification-summary-button,
+.dentlink-desktop-client .home-notification-row > button {
+  grid-row: 1;
+  align-content: start;
+  gap: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dentlink-desktop-client .notification-card > .notification-meta-actions,
+.dentlink-desktop-client .home-notification-row > .notification-meta-actions {
+  grid-row: 2;
+}
+
+.dentlink-desktop-client .home-main {
+  grid-template-columns: 0.68fr 1.32fr;
+}
+
+.dentlink-desktop-client .today-band {
+  grid-column: 1;
+  max-height: calc(100dvh - 104px);
+  overflow: hidden;
+}
+
+.dentlink-desktop-client .priority-inbox-band {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  max-height: calc(100dvh - 104px);
+  overflow: hidden;
+}
+
+.dentlink-desktop-client .today-summary-grid {
+  display: none;
+}
+
+.dentlink-desktop-client .priority-inbox-band .home-row-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  max-height: calc(100dvh - 166px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
+
+.dentlink-desktop-client .priority-inbox-band .home-notification-row {
+  min-height: 340px;
+  height: 340px;
+}
+
+.dentlink-desktop-client .today-band .home-row-list {
+  gap: 8px;
+  max-height: calc(100dvh - 166px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
+
+.dentlink-desktop-client .today-band .home-event-row {
+  min-height: 104px;
+  height: 104px;
+  padding: 8px;
+}
+
+.dentlink-desktop-client .today-band .home-event-row span,
+.dentlink-desktop-client .today-band .home-event-row small {
+  font-size: 18px;
+  line-height: 1.08;
+}
+
+.dentlink-desktop-client .today-band .home-event-row strong {
+  font-size: 24px;
+  line-height: 1.08;
+}
+
+.dentlink-desktop-client .home-notification-row strong {
+  font-size: 28px;
+  line-height: 1.08;
+}
+
+.dentlink-desktop-client .priority-inbox-band .home-notification-row small {
+  font-size: 25px;
+  line-height: 1.1;
+  margin-top: 6px;
+  -webkit-line-clamp: 5;
+}
+
+.dentlink-desktop-client .home-notification-row > button span {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+
+.dentlink-desktop-client .today-band .home-event-row small,
+.dentlink-desktop-client .today-band .home-event-row span,
+.dentlink-desktop-client .today-band .home-event-row strong {
+  -webkit-line-clamp: 1;
+}
+
+@media (max-width: 1500px) {
+  .dentlink-desktop-client .home-main {
+    grid-template-columns: 0.74fr 1.26fr;
+  }
+}
+
+.dentlink-desktop-client {
+  --accent: #7c3aed;
+  --selected-bg: #2e1065;
+}
+
+.dentlink-desktop-client .app-tabs button.selected {
+  border-color: rgb(124 58 237 / 95%);
+  background: rgb(76 29 149 / 96%);
+  color: #f5f3ff;
+}
+
+.dentlink-desktop-client .home-section-header h2 {
+  color: #a78bfa;
+}
+
+.dentlink-desktop-client .assistant-bubble {
+  border-color: rgb(124 58 237 / 85%);
+  background: #2e1065;
+  color: #f5f3ff;
+}
+
+.dentlink-desktop-client .assistant-message.user {
+  border-color: rgb(124 58 237 / 48%);
+  background: #2e1065;
+  color: #f5f3ff;
+}
+
+.dentlink-desktop-client .home-note-row input[type="checkbox"] {
+  accent-color: #7c3aed;
 }

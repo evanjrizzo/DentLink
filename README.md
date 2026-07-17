@@ -55,6 +55,7 @@ Web, desktop, Android app, and Android homescreen widget.
 ```text
 apps/
   api/                 Worker-style auth, Notes, Notifications, and webhook API boundary
+  desktop/             Tauri desktop shell with attached macro pad capability layer
   web/                 Browser Notes, Notifications, and webhook management client shell
 packages/
   ai/                  Optional provider-neutral AI boundary

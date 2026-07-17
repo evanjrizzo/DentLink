@@ -3,4 +3,7 @@ dist
 **/dist
 coverage
 .turbo
+target
+**/target
+**/src-tauri/gen
 pnpm-lock.yaml

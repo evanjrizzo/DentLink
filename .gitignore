@@ -9,6 +9,9 @@ playwright-report/
 test-results/
 .turbo/
 **/.turbo/
+target/
+**/target/
+**/src-tauri/gen/
 .wrangler/
 
 # Environment files
