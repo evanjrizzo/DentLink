@@ -65,6 +65,12 @@ type GmailEngineSaveState = {
   error: string | null;
 };
 
+type ConnectorReconnectWarning = {
+  accountId: EntityId;
+  title: string;
+  message: string;
+};
+
 type RefreshState = {
   running: boolean;
   message: string | null;
@@ -313,6 +319,10 @@ export function DentLinkNotesApp(): ReactElement {
       ...dueNoteCalendarEvents(notesList.notes, effectiveTimezone, calendarMode)
     ],
     [calendarEvents, notesList.notes, effectiveTimezone, calendarMode, calendarDate]
+  );
+  const reconnectWarnings = useMemo(
+    () => connectorReconnectWarnings(connectorAccounts, gmailEngineSaveStates),
+    [connectorAccounts, gmailEngineSaveStates]
   );
 
   useEffect(() => {
@@ -1594,6 +1604,11 @@ export function DentLinkNotesApp(): ReactElement {
           title={pageTitle(view, settingsTab)}
           refreshRunning={refreshState.running}
           refreshState={refreshState}
+          reconnectWarnings={reconnectWarnings}
+          onOpenConnections={() => {
+            setSettingsTab("connections");
+            setView("settings");
+          }}
           onRefreshAll={refreshAll}
         />
       )}
@@ -2243,17 +2258,37 @@ function PageHeader(props: {
   title: string;
   refreshRunning: boolean;
   refreshState: RefreshState;
+  reconnectWarnings: ConnectorReconnectWarning[];
+  onOpenConnections: () => void;
   onRefreshAll: () => Promise<void>;
 }): ReactElement {
+  const reconnectWarning = props.reconnectWarnings[0];
+  const extraReconnectCount = Math.max(0, props.reconnectWarnings.length - 1);
   return (
     <section className="page-header" aria-label={`${props.title} page controls`}>
       <h1>{props.title}</h1>
-      <span className={`refresh-indicator ${props.refreshState.live}`}>
-        Auto sync: {props.refreshState.live}
-        {props.refreshState.nextPollAt
-          ? ` · next ${new Date(props.refreshState.nextPollAt).toLocaleTimeString()}`
-          : ""}
-      </span>
+      <div className="page-header-status">
+        <span className={`refresh-indicator ${props.refreshState.live}`}>
+          Auto sync: {props.refreshState.live}
+          {props.refreshState.nextPollAt
+            ? ` · next ${new Date(props.refreshState.nextPollAt).toLocaleTimeString()}`
+            : ""}
+        </span>
+        {reconnectWarning ? (
+          <div className="reconnect-alert" role="status" aria-live="polite">
+            <strong>{reconnectWarning.title}</strong>
+            <span>
+              {reconnectWarning.message}
+              {extraReconnectCount > 0
+                ? ` ${extraReconnectCount} more source(s) need attention.`
+                : ""}
+            </span>
+            <button type="button" onClick={props.onOpenConnections}>
+              Reconnect
+            </button>
+          </div>
+        ) : null}
+      </div>
       <button
         type="button"
         className="icon-refresh-button"
@@ -6592,33 +6627,45 @@ function ConnectorsView(props: {
         <summary>Google Calendar Connections</summary>
         {calendarAccounts.length === 0 ? <p>No Google Calendar accounts connected.</p> : null}
         <div className="note-list">
-          {calendarAccounts.map((account) => (
-            <article key={account.id} className="notification-card">
-              <strong>{account.displayName}</strong>
-              <span>Status: {account.status}</span>
-              {props.debugMode ? <span>Health: {account.healthStatus}</span> : null}
-              {props.debugMode ? <span>Sync: {account.syncStatus}</span> : null}
-              <span>
-                Last sync:{" "}
-                {account.lastSyncAt ? new Date(account.lastSyncAt).toLocaleString() : "Never"}
-              </span>
-              {account.errorMessage ? <p>{account.errorMessage}</p> : null}
-              <div className="note-order">
-                <button type="button" onClick={() => void props.onSyncGoogleCalendar(account)}>
-                  Sync Now
-                </button>
-                <button type="button" onClick={() => void props.onReconnectGoogleCalendar(account)}>
-                  Reconnect
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void props.onDisconnectGoogleCalendar(account)}
-                >
-                  Disconnect
-                </button>
-              </div>
-            </article>
-          ))}
+          {calendarAccounts.map((account) => {
+            const reconnectWarning = connectorReconnectWarning(account, undefined);
+            return (
+              <article key={account.id} className="notification-card">
+                <strong>{account.displayName}</strong>
+                <span>Status: {account.status}</span>
+                {props.debugMode ? <span>Health: {account.healthStatus}</span> : null}
+                {props.debugMode ? <span>Sync: {account.syncStatus}</span> : null}
+                <span>
+                  Last sync:{" "}
+                  {account.lastSyncAt ? new Date(account.lastSyncAt).toLocaleString() : "Never"}
+                </span>
+                {reconnectWarning ? (
+                  <p className="connector-warning">
+                    <strong>{reconnectWarning.title}.</strong> {reconnectWarning.message}
+                  </p>
+                ) : account.errorMessage ? (
+                  <p>{account.errorMessage}</p>
+                ) : null}
+                <div className="note-order">
+                  <button type="button" onClick={() => void props.onSyncGoogleCalendar(account)}>
+                    Sync Now
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void props.onReconnectGoogleCalendar(account)}
+                  >
+                    Reconnect
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void props.onDisconnectGoogleCalendar(account)}
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              </article>
+            );
+          })}
         </div>
       </details>
       <details className="connection-section">
@@ -7338,6 +7385,71 @@ type GmailEngineAccount = ConnectorAccount & {
 
 export function gmailSelectedEngineForTest(account: GmailEngineAccount): GmailEngine {
   return gmailSelectedEngine(account);
+}
+
+export function connectorReconnectWarningsForTest(
+  accounts: ConnectorAccount[],
+  gmailEngineSaveStates: Record<EntityId, GmailEngineSaveState> = {}
+): ConnectorReconnectWarning[] {
+  return connectorReconnectWarnings(accounts, gmailEngineSaveStates);
+}
+
+function connectorReconnectWarnings(
+  accounts: ConnectorAccount[],
+  gmailEngineSaveStates: Record<EntityId, GmailEngineSaveState>
+): ConnectorReconnectWarning[] {
+  return accounts.flatMap((account) => {
+    const warning = connectorReconnectWarning(account, gmailEngineSaveStates[account.id]);
+    return warning ? [warning] : [];
+  });
+}
+
+function connectorReconnectWarning(
+  account: ConnectorAccount,
+  gmailEngineSaveState: GmailEngineSaveState | undefined
+): ConnectorReconnectWarning | null {
+  if (account.status === "deleted") return null;
+  if (account.connectorKey === "gmail") return gmailReconnectWarning(account, gmailEngineSaveState);
+  if (account.credentialStatus === "not_configured" || account.status === "error") {
+    return {
+      accountId: account.id,
+      title: `${connectorAccountLabel(account)} needs to be reconnected`,
+      message:
+        account.errorMessage ??
+        `${connectorAccountLabel(account)} cannot sync until you reconnect this source.`
+    };
+  }
+  return null;
+}
+
+function gmailReconnectWarning(
+  account: ConnectorAccount,
+  engineSaveState: GmailEngineSaveState | undefined
+): ConnectorReconnectWarning | null {
+  const selectedEngine = engineSaveState?.engine ?? gmailSelectedEngine(account);
+  const activeEngine = gmailActiveEngine(account);
+  const reconnectRequired =
+    account.settings.gmailReconnectRequired === true || selectedEngine !== activeEngine;
+  if (!reconnectRequired) return null;
+  const engine = selectedEngine === "gmail_imap" ? "Gmail IMAP" : "Gmail API";
+  return {
+    accountId: account.id,
+    title: `${connectorAccountLabel(account)} needs to be reconnected`,
+    message:
+      account.errorMessage ??
+      `${engine} access needs to be reauthorized before this account can sync. Existing DentLink data will be preserved.`
+  };
+}
+
+function connectorAccountLabel(account: ConnectorAccount): string {
+  const accountEmail =
+    stringSetting(account.settings.googleEmail) ??
+    stringSetting(account.settings.email) ??
+    stringSetting(account.settings.accountEmail);
+  if (accountEmail && !account.displayName.toLowerCase().includes(accountEmail.toLowerCase())) {
+    return `${account.displayName} (${accountEmail})`;
+  }
+  return account.displayName;
 }
 
 function gmailSelectedEngine(account: GmailEngineAccount): GmailEngine {

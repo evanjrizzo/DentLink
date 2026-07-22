@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { DentLinkNotesApp, gmailSelectedEngineForTest, nextScheduledSyncLabel } from "./notes-app";
+import {
+  connectorReconnectWarningsForTest,
+  DentLinkNotesApp,
+  gmailSelectedEngineForTest,
+  nextScheduledSyncLabel
+} from "./notes-app";
 
 describe("@dentlink/web", () => {
   it("exports the notes app shell", () => {
@@ -24,5 +29,51 @@ describe("@dentlink/web", () => {
         settings: { gmailIngestionEngine: "gmail_api" }
       } as never)
     ).toBe("gmail_imap");
+  });
+
+  it("describes Gmail accounts that require reconnect", () => {
+    const warnings = connectorReconnectWarningsForTest([
+      {
+        id: "account_1",
+        connectorKey: "gmail",
+        displayName: "Gmail",
+        status: "connected",
+        settings: {
+          googleEmail: "office@example.com",
+          gmailReconnectRequired: true,
+          gmailIngestionEngine: "gmail_api"
+        },
+        errorMessage: "Reconnect Gmail to grant mail access."
+      } as never
+    ]);
+
+    expect(warnings).toEqual([
+      {
+        accountId: "account_1",
+        title: "Gmail (office@example.com) needs to be reconnected",
+        message: "Reconnect Gmail to grant mail access."
+      }
+    ]);
+  });
+
+  it("describes non-Gmail connector errors that require reconnect", () => {
+    const warnings = connectorReconnectWarningsForTest([
+      {
+        id: "calendar_1",
+        connectorKey: "google-calendar",
+        displayName: "Google Calendar",
+        status: "error",
+        credentialStatus: "configured",
+        settings: { googleEmail: "frontdesk@example.com" },
+        errorMessage: null
+      } as never
+    ]);
+
+    expect(warnings[0]).toMatchObject({
+      accountId: "calendar_1",
+      title: "Google Calendar (frontdesk@example.com) needs to be reconnected",
+      message:
+        "Google Calendar (frontdesk@example.com) cannot sync until you reconnect this source."
+    });
   });
 });
