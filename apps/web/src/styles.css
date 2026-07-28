@@ -529,32 +529,6 @@ textarea::placeholder {
   text-align: left;
 }
 
-.today-summary-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.home-metric {
-  display: grid;
-  gap: 2px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface-elevated);
-  padding: 10px;
-}
-
-.home-metric strong {
-  color: var(--heading-text);
-  font-size: 22px;
-  line-height: 1;
-}
-
-.home-metric span {
-  color: var(--text-muted);
-  font-size: var(--font-sm);
-}
-
 .next-event-button,
 .home-event-row,
 .home-review-row {
@@ -562,6 +536,47 @@ textarea::placeholder {
   gap: 3px;
   width: 100%;
   border-left: 5px solid var(--event-accent, var(--accent));
+}
+
+.home-event-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-left: 5px solid var(--event-accent, var(--accent));
+  border-radius: 8px;
+  background: var(--surface-elevated);
+  padding: 10px;
+}
+
+.home-event-row > button {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  padding: 0;
+  text-align: left;
+}
+
+.home-event-row > button:hover,
+.home-event-row > button:focus-visible {
+  background: transparent;
+}
+
+.home-event-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: end;
+}
+
+.home-event-dismiss input[type="checkbox"] {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  margin: 0;
 }
 
 .next-event-button span,
@@ -618,6 +633,29 @@ textarea::placeholder {
   font-weight: 700;
 }
 
+.home-notification-sender-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+.home-notification-sender-line > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home-notification-inline-meta {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  align-items: center;
+  margin-left: auto;
+}
+
 .home-note-row label {
   display: flex;
   align-items: center;
@@ -648,6 +686,43 @@ textarea::placeholder {
 .home-note-row.priority-low,
 .home-note-row.priority-none {
   border-left-color: var(--accent);
+}
+
+.compact-importance-pill,
+.compact-action-required {
+  justify-content: center;
+  min-width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  padding: 0 8px;
+  line-height: 1;
+}
+
+.compact-importance-pill {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.compact-action-required {
+  width: 30px;
+  min-width: 30px;
+  background: #fee2e2;
+  color: #b42318;
+  font-size: 18px;
+}
+
+.home-priority-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: end;
+}
+
+.home-priority-dismiss input[type="checkbox"] {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  margin: 0;
 }
 
 .quick-capture {
@@ -1377,6 +1452,26 @@ textarea::placeholder {
   white-space: nowrap;
 }
 
+.notification-sender-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+.notification-sender-line > .notification-sender {
+  min-width: 0;
+}
+
+.notification-inline-meta {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  align-items: center;
+  margin-left: auto;
+}
+
 .importance-pill,
 .action-required {
   display: inline-flex;
@@ -1617,10 +1712,26 @@ textarea::placeholder {
 }
 
 .account-ai-overrides,
+.ai-prompt-section,
 .account-ai-card,
 .ai-reprocess-result {
   display: grid;
   gap: 10px;
+}
+
+.ai-prompt-section {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.ai-prompt-section h4 {
+  margin: 0;
+}
+
+.ai-prompt-section p {
+  margin: 0;
+  color: var(--muted-text);
 }
 
 .account-ai-card,
@@ -2409,7 +2520,6 @@ textarea {
     grid-template-columns: 1fr;
   }
 
-  .today-summary-grid,
   .home-notification-row,
   .home-note-row {
     grid-template-columns: 1fr;
@@ -2815,23 +2925,6 @@ textarea {
   display: none;
 }
 
-.dentlink-desktop-client .today-summary-grid {
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
-}
-
-.dentlink-desktop-client .home-metric {
-  border-radius: 4px;
-  background: rgb(255 255 255 / 5%);
-  padding: 8px;
-}
-
-.dentlink-desktop-client .home-metric strong {
-  color: #ffffff;
-  font-size: 40px;
-}
-
-.dentlink-desktop-client .home-metric span,
 .dentlink-desktop-client .next-event-button span,
 .dentlink-desktop-client .home-event-row span,
 .dentlink-desktop-client .home-review-row span,
@@ -3110,7 +3203,6 @@ textarea {
   align-items: start;
 }
 
-.dentlink-desktop-client .needs-review-band,
 .dentlink-desktop-client .due-notes-band {
   display: none;
 }
@@ -3121,7 +3213,6 @@ textarea {
 }
 
 .dentlink-desktop-client .home-band,
-.dentlink-desktop-client .home-metric,
 .dentlink-desktop-client .next-event-button,
 .dentlink-desktop-client .home-event-row,
 .dentlink-desktop-client .home-review-row,
@@ -3222,7 +3313,6 @@ textarea {
   align-items: center;
 }
 
-.dentlink-desktop-client .home-metric span,
 .dentlink-desktop-client .next-event-button span,
 .dentlink-desktop-client .home-event-row span,
 .dentlink-desktop-client .home-review-row span,
@@ -3780,10 +3870,6 @@ textarea {
   overflow: hidden;
 }
 
-.dentlink-desktop-client .today-summary-grid {
-  display: none;
-}
-
 .dentlink-desktop-client .priority-inbox-band .home-row-list {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
@@ -3794,8 +3880,122 @@ textarea {
 }
 
 .dentlink-desktop-client .priority-inbox-band .home-notification-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
+  align-content: start;
   min-height: 340px;
   height: 340px;
+}
+
+.dentlink-desktop-client .priority-inbox-band .home-notification-row > button {
+  grid-row: 1;
+  grid-column: 1;
+  align-self: start;
+  min-height: 0;
+}
+
+.dentlink-desktop-client
+  .priority-inbox-band
+  .home-notification-row
+  > .home-notification-meta-actions {
+  grid-row: 1;
+  grid-column: 2;
+  align-self: start;
+  justify-self: end;
+  min-height: 0;
+  margin-left: 8px;
+  border-top: 0;
+  padding-top: 0;
+}
+
+.dentlink-desktop-client .priority-inbox-band .home-notification-inline-meta {
+  margin-left: auto;
+}
+
+.dentlink-desktop-client .priority-inbox-band .home-notification-row .notification-card-meta {
+  gap: 6px;
+}
+
+.dentlink-desktop-client .priority-inbox-band .home-priority-dismiss input[type="checkbox"] {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+}
+
+.dentlink-desktop-client .priority-inbox-band .compact-importance-pill,
+.dentlink-desktop-client .priority-inbox-band .compact-action-required {
+  min-width: 34px;
+  height: 34px;
+  padding: 0 9px;
+  font-size: 18px;
+}
+
+.dentlink-desktop-client .priority-inbox-band .compact-action-required {
+  width: 34px;
+  min-width: 34px;
+  font-size: 21px;
+}
+
+.dentlink-desktop-client .priority-inbox-band .notification-card-time {
+  order: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.dentlink-desktop-client .notifications-shell .notification-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.dentlink-desktop-client .notifications-shell .notification-card > .notification-summary-button {
+  grid-row: 1;
+  grid-column: 1;
+  min-width: 0;
+  padding-right: 8px;
+}
+
+.dentlink-desktop-client .notifications-shell .notification-card > .notification-meta-actions {
+  grid-row: 1;
+  grid-column: 2;
+  align-self: start;
+  min-height: 0;
+  border-top: 0;
+  padding-top: 0;
+}
+
+.dentlink-desktop-client .notifications-shell .notification-meta-actions > .notification-card-meta {
+  display: none;
+}
+
+.dentlink-desktop-client .notifications-shell .notification-sender-line {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.dentlink-desktop-client .notifications-shell .notification-inline-meta {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  align-items: center;
+  margin-left: auto;
+}
+
+.dentlink-desktop-client .notifications-shell .notification-list-actions {
+  display: flex;
+}
+
+.dentlink-desktop-client .notifications-shell .notification-list-actions .icon-button {
+  width: 44px;
+  min-height: 44px;
+  height: 44px;
+  padding: 0;
+}
+
+.dentlink-desktop-client .notifications-shell .notification-card-summary {
+  -webkit-line-clamp: 7;
 }
 
 .dentlink-desktop-client .today-band .home-row-list {

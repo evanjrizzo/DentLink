@@ -90,6 +90,14 @@ const connectorSyncAttemptsSchemaPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../migrations/0012_connector_sync_attempts.sql"
 );
+const d1StorageRetentionSchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0013_d1_storage_retention.sql"
+);
+const syncChangesTailRetentionSchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0014_sync_changes_tail_retention.sql"
+);
 
 type StoreFixture = {
   name: string;
@@ -124,7 +132,9 @@ const fixtures: StoreFixture[] = [
         milestone7AiSchemaPath,
         aiPreferencesSchemaPath,
         notificationSuppressedSchemaPath,
-        connectorSyncAttemptsSchemaPath
+        connectorSyncAttemptsSchemaPath,
+        d1StorageRetentionSchemaPath,
+        syncChangesTailRetentionSchemaPath
       ]);
       return {
         store: new D1DentLinkStore(db),
@@ -645,7 +655,14 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       auth.session.token
     );
 
-    const prefs = await requestJson<{ timezone: { selected: string }; ai: { threshold: number } }>(
+    const prefs = await requestJson<{
+      timezone: { selected: string };
+      ai: {
+        threshold: number;
+        summaryPrompt: string;
+        textReplacements: Array<{ find: string; replace: string }>;
+      };
+    }>(
       store,
       "PATCH",
       "/v1/preferences",
@@ -656,13 +673,22 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
             detected: "America/New_York",
             selected: "America/Los_Angeles"
           },
-          ai: { threshold: 67, globalPrompt: "  Prioritize bills and scheduling.  " }
+          ai: {
+            threshold: 67,
+            globalPrompt: "  Prioritize bills and scheduling.  ",
+            summaryPrompt: "Replace blocked words with neutral wording.",
+            textReplacements: [{ find: "blocked clinic", replace: "clinic" }]
+          }
         }
       },
       auth.session.token
     );
     expect(prefs.timezone.selected).toBe("America/Los_Angeles");
     expect(prefs.ai.threshold).toBe(67);
+    expect(prefs.ai.summaryPrompt).toBe("Replace blocked words with neutral wording.");
+    expect(prefs.ai.textReplacements).toEqual([
+      expect.objectContaining({ find: "blocked clinic", replace: "clinic" })
+    ]);
     expect(JSON.stringify(prefs)).not.toMatch(/system prompt|threshold.*AI/i);
   });
 
@@ -1663,8 +1689,9 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       owner.session.token
     );
     expect(records.records[0]?.normalizedPayload).toMatchObject({
-      normalized_body: "Please review the written body from Gmail API."
+      snippet: "Please review the written body from Gmail API."
     });
+    expect(records.records[0]?.normalizedPayload).not.toHaveProperty("normalized_body");
     const notifications = await requestJson<{ notifications: Notification[] }>(
       store,
       "GET",
@@ -1812,6 +1839,11 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
         patch: {
           ai: {
             globalPrompt: "Global billing guidance",
+            summaryPrompt: "Replace blocked clinic nicknames with neutral wording.",
+            textReplacements: [
+              { find: "Insurance", replace: "Benefits" },
+              { find: "insurance", replace: "benefits" }
+            ],
             threshold: 80,
             accountOverrides: [
               {
@@ -1867,6 +1899,9 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     expect(reprocessed).toMatchObject({ status: "success", updated: 1, suppressed: 1, failed: 0 });
     expect(aiInputs).toHaveLength(1);
     expect(JSON.stringify(aiInputs[0])).toContain("Account-specific insurance guidance");
+    expect(JSON.stringify(aiInputs[0])).toContain(
+      "Replace blocked clinic nicknames with neutral wording."
+    );
     expect(JSON.stringify(aiInputs[0])).not.toMatch(/threshold|60|80/i);
 
     const normalInbox = await requestJson<{ notifications: Notification[] }>(
@@ -1880,15 +1915,17 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     const searchable = await requestJson<{ notifications: Notification[] }>(
       store,
       "GET",
-      "/v1/notifications?includeSuppressed=true&search=insurance",
+      "/v1/notifications?includeSuppressed=true&search=benefits",
       undefined,
       owner.session.token
     );
     expect(searchable.notifications[0]).toMatchObject({
       id: notification.id,
       status: "suppressed",
-      summary: "AI reprocessed insurance update.",
-      ai: { importance: 50 }
+      title: "Benefits update",
+      email: expect.objectContaining({ subject: "Benefits update" }),
+      summary: "AI reprocessed benefits update.",
+      ai: { summary: "AI reprocessed benefits update.", importance: 50 }
     });
 
     await requestJson(

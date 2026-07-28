@@ -1,0 +1,56 @@
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_note_item"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:minHeight="@dimen/widget_row_min_height"
+    android:background="@drawable/widget_row_background"
+    android:paddingStart="8dp"
+    android:paddingTop="4dp"
+    android:paddingEnd="4dp"
+    android:paddingBottom="8dp">
+
+    <TextView
+        android:id="@+id/widget_note_accent"
+        style="@style/WidgetAccent"
+        android:layout_gravity="start|fill_vertical" />
+
+    <FrameLayout
+        android:id="@+id/widget_note_checkbox_zone"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:layout_gravity="top|end">
+
+        <TextView
+            android:id="@+id/widget_note_checkbox"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:layout_gravity="top|end"
+            android:gravity="center"
+            android:text="@string/widget_checkbox_empty"
+            android:textColor="@color/dentlink_text_primary"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+    </FrameLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/widget_note_title"
+            style="@style/WidgetTitle"
+            android:paddingEnd="48dp" />
+
+        <TextView
+            android:id="@+id/widget_note_subtitle"
+            style="@style/WidgetSubtitle" />
+
+        <TextView
+            android:id="@+id/widget_note_meta"
+            style="@style/WidgetMeta"
+            android:singleLine="false"
+            android:maxLines="3" />
+    </LinearLayout>
+</FrameLayout>

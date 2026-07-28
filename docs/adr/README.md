@@ -18,3 +18,4 @@ Do not rewrite accepted history. If a decision changes, create a new ADR and mar
 - `0008-contextual-actions-adaptive-surfaces.md`: Contextual notification actions and adaptive surfaces
 - `0009-queued-optimistic-mutations.md`: Queued optimistic mutations
 - `0010-timezone-appearance-ai-preferences.md`: Timezone, appearance, and AI preference ownership
+- `0011-android-mobile-widget-tabs.md`: Android mobile app and tabbed widget

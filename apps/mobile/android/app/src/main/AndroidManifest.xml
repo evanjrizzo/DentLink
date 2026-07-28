@@ -1,0 +1,48 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@drawable/dentlink_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/DentLinkTheme">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".CreateNoteActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:theme="@style/DentLinkDialogTheme" />
+
+        <receiver
+            android:name=".DentLinkWidgetProvider"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.dentlink.mobile.widget.SWITCH_TAB" />
+                <action android:name="com.dentlink.mobile.widget.REFRESH" />
+                <action android:name="com.dentlink.mobile.widget.COMPLETE_NOTE" />
+                <action android:name="com.dentlink.mobile.widget.DISMISS_EMAIL" />
+                <action android:name="com.dentlink.mobile.widget.NOOP" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/dentlink_widget_info" />
+        </receiver>
+
+        <service
+            android:name=".DentLinkWidgetRemoteViewsService"
+            android:exported="true"
+            android:permission="android.permission.BIND_REMOTEVIEWS">
+            <intent-filter>
+                <action android:name="android.widget.RemoteViewsService" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>

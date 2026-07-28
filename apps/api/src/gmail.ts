@@ -71,9 +71,12 @@ const EMAIL_AI_ENABLED_PREFERENCE_KEY = "email_ai_enabled";
 const EMAIL_AI_PREFERENCES_KEY = "email_ai_preferences_v1";
 const DEFAULT_IMPORTANCE_PROMPT =
   "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.";
+const DEFAULT_SUMMARY_PROMPT = "";
 
 type EmailAiUserConfig = ReturnType<typeof emailAiConfig> & {
   importanceInstruction: string;
+  summaryInstruction: string;
+  textReplacements: NonNullable<EmailAiSettings["preferences"]>["textReplacements"];
   threshold: number;
 };
 
@@ -1543,7 +1546,7 @@ async function ingestNormalizedGmailEmail(
     automated_sender: email.automatedSender,
     mailing_list: email.mailingList,
     html_present: email.htmlPresent,
-    normalized_body: email.normalizedBody,
+    snippet: email.normalizedBody.slice(0, 500),
     normalized_body_hash: bodyHash,
     matched_rule_id: ruleDecision.rule?.id ?? null,
     matched_rule_name: ruleDecision.rule?.name ?? null,
@@ -1953,7 +1956,7 @@ async function reprocessNotificationAi(
     subject: email.subject,
     body: inputBody,
     sender: email.senderAddress,
-    promptVersion: `${EMAIL_AI_PROMPT_VERSION}:${config.importanceInstruction}`,
+    promptVersion: emailAiPromptFingerprint(config),
     model: config.model
   });
   if (
@@ -1977,8 +1980,11 @@ async function reprocessNotificationAi(
     body: inputBody,
     receivedAt: email.receivedAt,
     labels: email.labels,
-    importanceInstruction: config.importanceInstruction
+    importanceInstruction: config.importanceInstruction,
+    summaryInstruction: config.summaryInstruction
   });
+  const title = applyEmailAiTextReplacements(email.subject, config.textReplacements);
+  const summary = applyEmailAiTextReplacements(ai.summary, config.textReplacements);
   await store.recordAiUsage(
     userId,
     {
@@ -1995,7 +2001,9 @@ async function reprocessNotificationAi(
     notification.id,
     notification.version,
     {
-      summary: ai.summary,
+      title,
+      email: notification.email ? { ...notification.email, subject: title } : notification.email,
+      summary,
       severity: ai.requiresAction || ai.importance >= 75 ? "high" : notification.severity,
       rank: notification.rank + Math.round(ai.importance / 2),
       status: thresholdStatus(notification.status, ai.importance, config.threshold),
@@ -2007,7 +2015,7 @@ async function reprocessNotificationAi(
         inputChars: inputBody.length,
         outputTokens: ai.outputTokens,
         contentHash,
-        summary: ai.summary,
+        summary,
         category: ai.category,
         importance: ai.importance,
         requiresAction: ai.requiresAction,
@@ -2057,7 +2065,8 @@ function normalizedGmailEmailFromSourceRecord(
     automatedSender: payload.automated_sender === true,
     mailingList: payload.mailing_list === true,
     permalink: stringPayload(payload.permalink, "") || null,
-    normalizedBody: stringPayload(payload.normalized_body, ""),
+    normalizedBody:
+      stringPayload(payload.normalized_body, "") || stringPayload(payload.snippet, ""),
     normalizedBodyHash: stringPayload(payload.normalized_body_hash, "") || null,
     htmlPresent: payload.html_present === true,
     imapUid: stringPayload(payload.imap_uid, "") || null,
@@ -2345,7 +2354,7 @@ async function maybeProcessEmailAi(
     subject: email.subject,
     body: inputBody,
     sender: email.senderAddress,
-    promptVersion: `${EMAIL_AI_PROMPT_VERSION}:${config.importanceInstruction}`,
+    promptVersion: emailAiPromptFingerprint(config),
     model: config.model
   });
   try {
@@ -2358,8 +2367,11 @@ async function maybeProcessEmailAi(
       body: inputBody,
       receivedAt: email.receivedAt,
       labels: email.labels,
-      importanceInstruction: config.importanceInstruction
+      importanceInstruction: config.importanceInstruction,
+      summaryInstruction: config.summaryInstruction
     });
+    const title = applyEmailAiTextReplacements(email.subject, config.textReplacements);
+    const summary = applyEmailAiTextReplacements(result.summary, config.textReplacements);
     await store.recordAiUsage(
       userId,
       {
@@ -2376,7 +2388,9 @@ async function maybeProcessEmailAi(
       notification.id,
       notification.version,
       {
-        summary: result.summary,
+        title,
+        email: notification.email ? { ...notification.email, subject: title } : notification.email,
+        summary,
         severity: result.requiresAction || result.importance >= 75 ? "high" : notification.severity,
         rank: notification.rank + Math.round(result.importance / 2),
         status: thresholdStatus(notification.status, result.importance, config.threshold),
@@ -2388,7 +2402,7 @@ async function maybeProcessEmailAi(
           inputChars: inputBody.length,
           outputTokens: result.outputTokens,
           contentHash,
-          summary: result.summary,
+          summary,
           category: result.category,
           importance: result.importance,
           requiresAction: result.requiresAction,
@@ -2513,6 +2527,8 @@ async function emailAiUserConfig(
     ...config,
     enabled: config.available && preference !== "false",
     importanceInstruction: override?.prompt?.trim() || preferences.globalPrompt,
+    summaryInstruction: preferences.summaryPrompt,
+    textReplacements: preferences.textReplacements,
     threshold:
       typeof override?.threshold === "number" && Number.isFinite(override.threshold)
         ? Math.max(0, Math.min(100, Math.round(override.threshold)))
@@ -2525,6 +2541,8 @@ function emailAiPreferencesFromStoredJson(
 ): NonNullable<EmailAiSettings["preferences"]> {
   const fallback: NonNullable<EmailAiSettings["preferences"]> = {
     globalPrompt: DEFAULT_IMPORTANCE_PROMPT,
+    summaryPrompt: DEFAULT_SUMMARY_PROMPT,
+    textReplacements: [],
     threshold: 0,
     presets: [],
     accountOverrides: []
@@ -2537,6 +2555,22 @@ function emailAiPreferencesFromStoredJson(
         typeof parsed.globalPrompt === "string" && parsed.globalPrompt.trim()
           ? Array.from(parsed.globalPrompt.trim()).slice(0, 2000).join("")
           : fallback.globalPrompt,
+      summaryPrompt:
+        typeof parsed.summaryPrompt === "string" && parsed.summaryPrompt.trim()
+          ? Array.from(parsed.summaryPrompt.trim()).slice(0, 2000).join("")
+          : fallback.summaryPrompt,
+      textReplacements: Array.isArray(parsed.textReplacements)
+        ? parsed.textReplacements
+            .map((replacement) => normalizeStoredTextReplacement(replacement))
+            .filter(
+              (
+                replacement
+              ): replacement is NonNullable<
+                EmailAiSettings["preferences"]
+              >["textReplacements"][number] => Boolean(replacement)
+            )
+            .slice(0, 50)
+        : fallback.textReplacements,
       threshold:
         typeof parsed.threshold === "number" && Number.isFinite(parsed.threshold)
           ? Math.max(0, Math.min(100, Math.round(parsed.threshold)))
@@ -2547,6 +2581,36 @@ function emailAiPreferencesFromStoredJson(
   } catch {
     return fallback;
   }
+}
+
+function emailAiPromptFingerprint(config: EmailAiUserConfig): string {
+  return `${EMAIL_AI_PROMPT_VERSION}:${config.importanceInstruction}:${config.summaryInstruction}:${JSON.stringify(config.textReplacements)}`;
+}
+
+function applyEmailAiTextReplacements(
+  value: string,
+  replacements: NonNullable<EmailAiSettings["preferences"]>["textReplacements"]
+): string {
+  return replacements.reduce((current, replacement) => {
+    if (!replacement.find) return current;
+    return current.split(replacement.find).join(replacement.replace);
+  }, value);
+}
+
+function normalizeStoredTextReplacement(
+  value: unknown
+): NonNullable<EmailAiSettings["preferences"]>["textReplacements"][number] | null {
+  if (typeof value !== "object" || value === null) return null;
+  const object = value as Record<string, unknown>;
+  const find =
+    typeof object.find === "string" ? Array.from(object.find).slice(0, 200).join("").trim() : "";
+  if (!find) return null;
+  return {
+    id: typeof object.id === "string" && object.id.trim() ? object.id : crypto.randomUUID(),
+    find,
+    replace:
+      typeof object.replace === "string" ? Array.from(object.replace).slice(0, 200).join("") : ""
+  };
 }
 
 function thresholdStatus(

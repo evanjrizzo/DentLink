@@ -1,0 +1,14 @@
+<resources>
+    <color name="dentlink_app_bg">#0c0f14</color>
+    <color name="dentlink_surface_bg">#141b24</color>
+    <color name="dentlink_surface_elevated">#1b2531</color>
+    <color name="dentlink_text_primary">#f4f7fb</color>
+    <color name="dentlink_text_secondary">#d7dde6</color>
+    <color name="dentlink_text_muted">#aab5c2</color>
+    <color name="dentlink_border">#24ffffff</color>
+    <color name="dentlink_accent">#7c3aed</color>
+    <color name="dentlink_accent_contrast">#ffffff</color>
+    <color name="dentlink_source_gmail">#1d4ed8</color>
+    <color name="dentlink_source_local">#137a3a</color>
+    <color name="dentlink_selected_bg">#2e1065</color>
+</resources>

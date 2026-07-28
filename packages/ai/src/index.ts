@@ -17,6 +17,7 @@ export type EmailAiInput = {
   receivedAt: string;
   labels: string[];
   importanceInstruction?: string;
+  summaryInstruction?: string;
 };
 
 export type EmailAiResult = {
@@ -202,6 +203,10 @@ export function createOpenAIEmailAiClient(input: {
             {
               role: "system",
               content: `User importance guidance: ${email.importanceInstruction?.trim() || "Use DentLink's default importance guidance."}`
+            },
+            {
+              role: "system",
+              content: `User summary wording guidance: ${email.summaryInstruction?.trim() || "No custom wording guidance."}`
             },
             {
               role: "user",

@@ -94,7 +94,8 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   credential or enabling the IMAP engine. Google Cloud OAuth consent configuration must include the
   scopes used by the selected engine, and DentLink must explicitly request them during Gmail OAuth.
   Gmail-created notifications use sender, subject, unread state, received metadata, connector
-  reference, and a Gmail deep link.
+  reference, a short snippet, a body hash, and a Gmail deep link. Gmail source records do not retain
+  full normalized email bodies.
 - Milestone 7 Phase 1 records safe per-message Gmail ingestion outcomes and reasons in source
   records. It does not store raw message bodies, attachments, OAuth tokens, or provider credentials
   in diagnostics. Partial message failures are surfaced through degraded connector health instead of

@@ -1,6 +1,9 @@
 node_modules
 dist
 **/dist
+**/build
+.gradle
+**/.gradle
 coverage
 .turbo
 target

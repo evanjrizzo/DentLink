@@ -231,6 +231,7 @@ const API_BASE_URL = import.meta.env.VITE_DENTLINK_API_BASE_URL ?? "";
 const UI_REFRESH_INTERVAL_MS = 60_000;
 const DEFAULT_IMPORTANCE_INSTRUCTION =
   "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.";
+const DEFAULT_SUMMARY_INSTRUCTION = "";
 const MAX_PROMPT_CHARS = 2000;
 
 export function DentLinkNotesApp(): ReactElement {
@@ -1646,6 +1647,7 @@ export function DentLinkNotesApp(): ReactElement {
           onDraftChange={setAssistantDraft}
           onSubmit={askAssistant}
           onUpdateNotification={updateNotification}
+          onDismissEvent={dismissCalendarEvent}
           onCreateNote={createNote}
           onUpdateNote={updateNote}
           onOpenNotifications={() => setView("notifications")}
@@ -1818,6 +1820,7 @@ function HomeView(props: {
     notification: Notification,
     patch: Partial<Pick<Notification, "pinned" | "status">>
   ) => Promise<void>;
+  onDismissEvent: (event: CalendarEvent) => Promise<void>;
   onCreateNote: (input: NoteInput) => Promise<void>;
   onUpdateNote: (note: Note, patch: NotePatch) => Promise<void>;
   onOpenNotifications: () => void;
@@ -1845,12 +1848,10 @@ function HomeView(props: {
       .filter((event) => event.status === "active" && event.startAt >= new Date().toISOString())
       .sort(compareEventsByStart)[0] ?? null;
   const dueNotes = dueHomeNotes(props.notes, today).slice(0, 5);
-  const reviewItems = homeReviewItems(props.notifications).slice(0, 5);
   const promptSuggestions = homePromptSuggestions({
     activeNotifications: activeNotifications.length,
     dueNotes: dueNotes.length,
-    todayEvents: todayEvents.length,
-    reviewItems: reviewItems.length
+    todayEvents: todayEvents.length
   });
 
   useEffect(() => {
@@ -1881,11 +1882,6 @@ function HomeView(props: {
               Open Agenda
             </button>
           </div>
-          <div className="today-summary-grid">
-            <HomeMetric label="Events" value={todayEvents.length} />
-            <HomeMetric label="Inbox" value={activeNotifications.length} />
-            <HomeMetric label="Next" value={nextEvent ? 1 : 0} />
-          </div>
           {!desktopClient && nextEvent ? (
             <button type="button" className="next-event-button" onClick={props.onOpenCalendar}>
               <span>Next</span>
@@ -1897,20 +1893,28 @@ function HomeView(props: {
           ) : null}
           <div className="home-row-list">
             {timelineEvents.map((event) => (
-              <button
-                type="button"
+              <article
                 key={event.id}
                 className="home-event-row"
                 style={eventAccentStyle(event, props.sourceColors)}
-                onClick={props.onOpenCalendar}
               >
-                <span>
-                  {formatEventTimelineDate(event)} ·{" "}
-                  {event.allDay ? "All day" : formatEventTime(event)}
-                </span>
-                <strong>{event.title}</strong>
-                <small>{sourceLabel(event)}</small>
-              </button>
+                <button type="button" onClick={props.onOpenCalendar}>
+                  <span>
+                    {formatEventTimelineDate(event)} ·{" "}
+                    {event.allDay ? "All day" : formatEventTime(event)}
+                  </span>
+                  <strong>{event.title}</strong>
+                  <small>{sourceLabel(event)}</small>
+                </button>
+                <label className="home-event-dismiss">
+                  <input
+                    type="checkbox"
+                    aria-label={`Dismiss ${event.title}`}
+                    checked={event.status === "dismissed"}
+                    onChange={() => void props.onDismissEvent(event)}
+                  />
+                </label>
+              </article>
             ))}
           </div>
           {desktopClient && timelineEvents.length === 0 ? (
@@ -1936,23 +1940,33 @@ function HomeView(props: {
                 style={notificationAccentStyle(notification, props.sourceColors, props.webhooks)}
               >
                 <button type="button" onClick={props.onOpenNotifications}>
-                  <span>{notificationSender(notification)}</span>
+                  <span className="home-notification-sender-line">
+                    <span>{notificationSender(notification)}</span>
+                    <span className="notification-card-meta home-notification-inline-meta">
+                      <span className="notification-card-time">
+                        {notificationReceivedTime(notification)}
+                      </span>
+                      <span
+                        className="importance-pill compact-importance-pill"
+                        aria-label={`Importance ${importanceScore(notification)}`}
+                      >
+                        {importanceScore(notification)}
+                      </span>
+                      {notification.ai?.requiresAction ? (
+                        <span
+                          className="action-required compact-action-required"
+                          aria-label="Action required"
+                        >
+                          !
+                        </span>
+                      ) : null}
+                    </span>
+                  </span>
                   <strong>{notification.email?.subject || notification.title}</strong>
                   <small>{notificationSummary(notification)}</small>
                 </button>
                 <div className="notification-meta-actions home-notification-meta-actions">
-                  <div className="notification-card-meta">
-                    <span className="importance-pill">
-                      Importance: {importanceScore(notification)}
-                    </span>
-                    <span className="notification-card-time">
-                      {relativeTime(notification.email?.receivedAt ?? notification.createdAt)}
-                    </span>
-                    {notification.ai?.requiresAction ? (
-                      <span className="action-required">Action required</span>
-                    ) : null}
-                  </div>
-                  <NotificationQuickActions
+                  <HomePriorityDismissCheckbox
                     notification={notification}
                     onUpdateNotification={props.onUpdateNotification}
                   />
@@ -2020,32 +2034,6 @@ function HomeView(props: {
                   Open
                 </button>
               </article>
-            ))}
-          </div>
-        </section>
-
-        <section className="home-band needs-review-band" aria-label="Needs review">
-          <div className="home-section-header">
-            <h2>Needs Review</h2>
-            <button type="button" onClick={props.onOpenNotifications}>
-              Review
-            </button>
-          </div>
-          {reviewItems.length === 0 ? (
-            <p className="home-empty">Nothing waiting for review.</p>
-          ) : null}
-          <div className="home-row-list">
-            {reviewItems.map((item) => (
-              <button
-                type="button"
-                key={item.id}
-                className="home-review-row"
-                onClick={props.onOpenNotifications}
-              >
-                <span>{item.reason}</span>
-                <strong>{item.title}</strong>
-                <small>{item.detail}</small>
-              </button>
             ))}
           </div>
         </section>
@@ -2170,15 +2158,6 @@ function HomeView(props: {
   );
 }
 
-function HomeMetric(props: { label: string; value: number }): ReactElement {
-  return (
-    <div className="home-metric">
-      <strong>{props.value}</strong>
-      <span>{props.label}</span>
-    </div>
-  );
-}
-
 function dueHomeNotes(notes: Note[], today: string): Note[] {
   return notes
     .filter((note) => note.status === "active" && note.dueAt && note.dueAt.slice(0, 10) <= today)
@@ -2243,13 +2222,11 @@ function homePromptSuggestions(counts: {
   activeNotifications: number;
   dueNotes: number;
   todayEvents: number;
-  reviewItems: number;
 }): string[] {
   const prompts = ["What needs my attention today?"];
   if (counts.activeNotifications > 0) prompts.push("Summarize my newest notifications");
   if (counts.dueNotes > 0) prompts.push("What notes are overdue?");
   if (counts.todayEvents > 0) prompts.push("What do I have going on today?");
-  if (counts.reviewItems > 0) prompts.push("What should I review?");
   prompts.push("What changed since the last sync?");
   return prompts.slice(0, 4);
 }
@@ -2909,7 +2886,10 @@ function NotificationsView(props: {
       return props.debugMode || Boolean(notificationSearch.trim());
     return notification.status === "active";
   });
-  const sorted = sortNotifications(visibleNotifications, sortMode);
+  const sorted =
+    listMode === "history"
+      ? sortNotificationHistory(visibleNotifications)
+      : sortNotifications(visibleNotifications, sortMode);
   const selectedNotification = sorted.find((item) => item.id === expandedId) ?? null;
   const selectedIndex = selectedNotification ? sorted.indexOf(selectedNotification) : -1;
   return (
@@ -3041,7 +3021,28 @@ function NotificationsView(props: {
             }
           >
             <span className="source-badge">{notification.sourceLabel}</span>
-            <span className="notification-sender">{notificationSender(notification)}</span>
+            <span className="notification-sender-line">
+              <span className="notification-sender">{notificationSender(notification)}</span>
+              <span className="notification-card-meta notification-inline-meta">
+                <span className="notification-card-time">
+                  {notificationReceivedTime(notification)}
+                </span>
+                <span
+                  className="importance-pill compact-importance-pill"
+                  aria-label={`Importance ${importanceScore(notification)}`}
+                >
+                  {importanceScore(notification)}
+                </span>
+                {notification.ai?.requiresAction ? (
+                  <span
+                    className="action-required compact-action-required"
+                    aria-label="Action required"
+                  >
+                    !
+                  </span>
+                ) : null}
+              </span>
+            </span>
             <strong>
               {notification.email?.subject || notification.title || "Email notification"}
             </strong>
@@ -3049,19 +3050,15 @@ function NotificationsView(props: {
           </button>
           <div className="notification-meta-actions">
             <div className="notification-card-meta">
-              <span className="importance-pill">Importance: {importanceScore(notification)}</span>
-              <span className="notification-card-time">
-                {relativeTime(notification.email?.receivedAt ?? notification.createdAt)}
-              </span>
               {notification.ai?.requiresAction ? (
-                <span className="action-required">Action required</span>
+                <span className="action-required full-action-required">Action required</span>
               ) : null}
               {listMode === "history" ? <HistoryStateBadge notification={notification} /> : null}
               {notification.status === "suppressed" ? (
                 <span className="history-state suppressed">Below threshold</span>
               ) : null}
             </div>
-            <NotificationQuickActions
+            <NotificationListActions
               notification={notification}
               onUpdateNotification={props.onUpdateNotification}
             />
@@ -3266,6 +3263,60 @@ function NotificationQuickActions(props: {
           label={sourceOpenLabel(notification)}
           icon="external"
           href={notification.sourceUrl}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function HomePriorityDismissCheckbox(props: {
+  notification: Notification;
+  onUpdateNotification: (
+    notification: Notification,
+    patch: Partial<Pick<Notification, "pinned" | "status">>
+  ) => Promise<void>;
+}): ReactElement {
+  return (
+    <label className="home-priority-dismiss">
+      <input
+        type="checkbox"
+        aria-label={`Dismiss ${props.notification.email?.subject || props.notification.title}`}
+        checked={false}
+        onChange={() =>
+          void props.onUpdateNotification(props.notification, { status: "dismissed" })
+        }
+      />
+    </label>
+  );
+}
+
+function NotificationListActions(props: {
+  notification: Notification;
+  onUpdateNotification: (
+    notification: Notification,
+    patch: Partial<Pick<Notification, "pinned" | "status">>
+  ) => Promise<void>;
+}): ReactElement {
+  const notification = props.notification;
+  const isHistory =
+    notification.status === "dismissed" ||
+    notification.status === "done" ||
+    notification.status === "suppressed";
+  return (
+    <div className="notification-touch-actions notification-list-actions">
+      <IconButton
+        label={notification.pinned ? "Unpin" : "Pin"}
+        icon="pin"
+        pressed={notification.pinned}
+        onClick={() =>
+          void props.onUpdateNotification(notification, { pinned: !notification.pinned })
+        }
+      />
+      {isHistory ? (
+        <IconButton
+          label="Restore"
+          icon="restore"
+          onClick={() => void props.onUpdateNotification(notification, { status: "active" })}
         />
       ) : null}
     </div>
@@ -4921,6 +4972,24 @@ function sortNotifications(
   });
 }
 
+function sortNotificationHistory(notifications: Notification[]): Notification[] {
+  return [...notifications].sort((left, right) => {
+    const rightTime = notificationHistoryTimestamp(right);
+    const leftTime = notificationHistoryTimestamp(left);
+    return rightTime.localeCompare(leftTime) || right.createdAt.localeCompare(left.createdAt);
+  });
+}
+
+function notificationHistoryTimestamp(notification: Notification): string {
+  return (
+    notification.dismissedAt ??
+    notification.completedAt ??
+    notification.updatedAt ??
+    notification.email?.receivedAt ??
+    notification.createdAt
+  );
+}
+
 function recommendedScore(notification: Notification): number {
   let score = importanceScore(notification) * 10 + notification.rank;
   if (notification.pinned) score += 1000;
@@ -5018,6 +5087,12 @@ function relativeTime(value: string): string {
   const days = Math.round(hours / 24);
   if (days < 7) return `${days} day${days === 1 ? "" : "s"} ago`;
   return new Date(timestamp).toLocaleDateString();
+}
+
+function notificationReceivedTime(notification: Notification): string {
+  const timestamp = Date.parse(notification.email?.receivedAt ?? notification.createdAt);
+  if (!Number.isFinite(timestamp)) return "";
+  return new Date(timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
 function severityScore(severity: NotificationSeverity): number {
@@ -6202,6 +6277,8 @@ function AiImportanceControls(props: {
 }): ReactElement {
   const ai = props.preferences?.ai ?? {
     globalPrompt: "",
+    summaryPrompt: "",
+    textReplacements: [],
     threshold: 0,
     presets: [],
     accountOverrides: []
@@ -6227,21 +6304,42 @@ function AiImportanceControls(props: {
     }
   }
   return (
-    <section className="subsettings-panel" aria-label="AI importance settings">
-      <h3>Importance Scoring</h3>
+    <section className="subsettings-panel" aria-label="AI prompt settings">
+      <h3>AI Prompting</h3>
       <p>
-        Prompt and threshold changes affect future scoring. Reprocess today to apply them to stored
-        same-day Gmail items without refetching Gmail.
+        Prompt and threshold changes affect future summaries and scoring. Reprocess today to apply
+        them to stored same-day Gmail items without refetching Gmail.
       </p>
       {promptError ? <p role="alert">{promptError}</p> : null}
-      <PromptDraftEditor
-        label="Global importance instruction"
-        ariaLabel="Global importance instruction"
-        value={ai.globalPrompt}
-        defaultValue={DEFAULT_IMPORTANCE_INSTRUCTION}
-        saving={savingPromptKey === "global"}
-        onSave={(prompt) => savePrompt("global", { ...ai, globalPrompt: prompt })}
-      />
+      <section className="ai-prompt-section" aria-label="Importance scoring prompt">
+        <h4>Importance Scoring</h4>
+        <PromptDraftEditor
+          label="Global importance instruction"
+          ariaLabel="Global importance instruction"
+          value={ai.globalPrompt}
+          defaultValue={DEFAULT_IMPORTANCE_INSTRUCTION}
+          saving={savingPromptKey === "global"}
+          onSave={(prompt) => savePrompt("global", { ...ai, globalPrompt: prompt })}
+        />
+      </section>
+      <section className="ai-prompt-section" aria-label="Summary wording prompt">
+        <h4>Summary Wording</h4>
+        <p>Tell AI which words to avoid and what wording to use in summaries instead.</p>
+        <PromptDraftEditor
+          label="Global summary wording instruction"
+          ariaLabel="Global summary wording instruction"
+          value={ai.summaryPrompt}
+          defaultValue={DEFAULT_SUMMARY_INSTRUCTION}
+          saving={savingPromptKey === "summary"}
+          allowEmpty
+          onSave={(prompt) => savePrompt("summary", { ...ai, summaryPrompt: prompt })}
+        />
+        <TextReplacementEditor
+          replacements={ai.textReplacements}
+          saving={savingPromptKey === "replacements"}
+          onSave={(textReplacements) => savePrompt("replacements", { ...ai, textReplacements })}
+        />
+      </section>
       <label className="field">
         <span>Notification threshold: {ai.threshold}</span>
         <input
@@ -6448,6 +6546,8 @@ function AiImportanceControls(props: {
           void saveAi({
             ...ai,
             globalPrompt: DEFAULT_IMPORTANCE_INSTRUCTION,
+            summaryPrompt: DEFAULT_SUMMARY_INSTRUCTION,
+            textReplacements: [],
             threshold: 0,
             accountOverrides: []
           })
@@ -6459,12 +6559,81 @@ function AiImportanceControls(props: {
   );
 }
 
+function TextReplacementEditor(props: {
+  replacements: UserPreferences["ai"]["textReplacements"];
+  saving: boolean;
+  onSave: (replacements: UserPreferences["ai"]["textReplacements"]) => Promise<void>;
+}): ReactElement {
+  const value = textReplacementsToDraft(props.replacements);
+  const [draft, setDraft] = useState(value);
+  const [dirty, setDirty] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!dirty) setDraft(value);
+  }, [value, dirty]);
+  const parsed = textReplacementsFromDraft(draft);
+  const normalizedDraft = textReplacementsToDraft(parsed);
+  const changed = normalizedDraft !== value;
+  const valid = Array.from(draft).length <= MAX_PROMPT_CHARS;
+  return (
+    <div className="prompt-draft-editor">
+      <label className="field">
+        <span>Hard-coded subject and summary replacements</span>
+        <textarea
+          aria-label="Hard-coded subject and summary replacements"
+          maxLength={MAX_PROMPT_CHARS}
+          placeholder="old text => new text"
+          value={draft}
+          onChange={(event) => {
+            setDraft(event.currentTarget.value);
+            setDirty(true);
+            setError(null);
+          }}
+        />
+        <span className="character-count">
+          One replacement per line. Use <code>old text =&gt; new text</code>.
+          {changed ? " · Unsaved changes" : ""}
+        </span>
+      </label>
+      {error ? <p role="alert">{error}</p> : null}
+      <div className="inline-form">
+        <button
+          type="button"
+          disabled={!changed || !valid || props.saving}
+          onClick={() =>
+            void props
+              .onSave(parsed)
+              .then(() => setDirty(false))
+              .catch((caught) =>
+                setError(caught instanceof Error ? caught.message : "Replacement save failed.")
+              )
+          }
+        >
+          {props.saving ? "Saving..." : "Save"}
+        </button>
+        <button
+          type="button"
+          disabled={!changed || props.saving}
+          onClick={() => {
+            setDraft(value);
+            setDirty(false);
+            setError(null);
+          }}
+        >
+          Reset draft
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PromptDraftEditor(props: {
   label: string;
   ariaLabel: string;
   value: string;
   defaultValue: string;
   saving: boolean;
+  allowEmpty?: boolean;
   onSave: (value: string) => Promise<void>;
 }): ReactElement {
   const [draft, setDraft] = useState(props.value);
@@ -6475,7 +6644,8 @@ function PromptDraftEditor(props: {
   }, [props.value, dirty]);
   const normalized = safePromptDraft(draft);
   const changed = normalized !== props.value;
-  const valid = normalized.trim().length > 0 && normalized.length <= MAX_PROMPT_CHARS;
+  const valid =
+    (props.allowEmpty || normalized.trim().length > 0) && normalized.length <= MAX_PROMPT_CHARS;
   return (
     <div className="prompt-draft-editor">
       <label className="field">
@@ -6539,6 +6709,30 @@ function PromptDraftEditor(props: {
 
 function safePromptDraft(value: string): string {
   return Array.from(value).slice(0, MAX_PROMPT_CHARS).join("");
+}
+
+function textReplacementsToDraft(replacements: UserPreferences["ai"]["textReplacements"]): string {
+  return replacements
+    .map((replacement) => `${replacement.find} => ${replacement.replace}`)
+    .join("\n");
+}
+
+function textReplacementsFromDraft(value: string): UserPreferences["ai"]["textReplacements"] {
+  const replacements: UserPreferences["ai"]["textReplacements"] = [];
+  for (const line of safePromptDraft(value).split("\n")) {
+    const separator = line.indexOf("=>");
+    if (separator < 0) continue;
+    const find = line.slice(0, separator).trim();
+    if (!find) continue;
+    replacements.push({
+      id: crypto.randomUUID(),
+      find: Array.from(find).slice(0, 200).join(""),
+      replace: Array.from(line.slice(separator + 2).trim())
+        .slice(0, 200)
+        .join("")
+    });
+  }
+  return replacements;
 }
 
 function aiUnavailableLabel(reason: string | null | undefined): string {

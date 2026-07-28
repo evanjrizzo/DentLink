@@ -81,6 +81,15 @@ importers:
         specifier: ^5.4.11
         version: 5.4.21(@types/node@22.20.1)
 
+  apps/mobile:
+    dependencies:
+      '@dentlink/design-tokens':
+        specifier: workspace:*
+        version: link:../../packages/design-tokens
+      '@dentlink/item-model':
+        specifier: workspace:*
+        version: link:../../packages/item-model
+
   apps/web:
     dependencies:
       '@dentlink/api-client':

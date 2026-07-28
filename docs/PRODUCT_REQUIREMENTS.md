@@ -72,8 +72,11 @@ approval.
 The system must record provider, model, prompt or rule version, timestamp, confidence where
 available, source item, and usage metadata for AI outputs.
 
-Custom AI importance instructions supplement DentLink's fixed scoring instructions. Notification
-thresholds are applied after scoring and are not sent to the AI provider.
+Custom AI importance instructions supplement DentLink's fixed scoring instructions. Per-user global
+summary wording instructions guide how generated notification summaries should phrase, filter, or
+replace user-specified language. Per-user global hard-coded text replacements run after AI
+processing against notification subjects and summaries. Notification thresholds are applied after
+scoring and are not sent to the AI provider.
 
 The Home assistant is a read-only question-answering surface. It may answer from bounded,
 authenticated DentLink context such as normalized Gmail source records and calendar events, and it
@@ -93,9 +96,21 @@ merge, or keep both.
 Touchscreen layout, fullscreen placement, configurable macro pad, files, terminal, mute, Voice FX,
 chimes, badges, and health monitoring.
 
-## Android widget
+## Android mobile and widget
 
-Compact Notifications/Notes view, quick note, done, refresh, and source/app opening where possible.
+Android is a client of the DentLink backend and shared contracts. It supports a compact native
+widget backed by authenticated DentLink state, not direct provider polling.
+
+The initial widget uses a multiple-tab design:
+
+- `Calendar`: shows calendar events only.
+- `Notes`: shows notes only.
+- `Emails`: shows email notifications only.
+
+The widget must use the same DentLink color scheme, font stack, logo assets, source accent behavior,
+compact card treatment, and desktop navigation icon shapes as the web/desktop client. Widget actions
+include refresh, quick note, and note done. Tapping the widget surface or list content does not open
+the app. The widget refreshes authenticated DentLink content every five minutes.
 
 ## Non-goals
 

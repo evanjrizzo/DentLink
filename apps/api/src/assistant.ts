@@ -315,7 +315,10 @@ async function collectEmailContext(
       subject,
       receivedAt: timestampForEmail(record) || null,
       snippet: stringField(payload, "snippet").slice(0, 500),
-      body: stringField(payload, "normalized_body").slice(0, 2500),
+      body: (stringField(payload, "normalized_body") || stringField(payload, "snippet")).slice(
+        0,
+        2500
+      ),
       sourceUrl: stringField(payload, "permalink") || stringField(payload, "source_url")
     };
   });

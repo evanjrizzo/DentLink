@@ -240,6 +240,29 @@ Recurring events
 Add Microsoft 365 Mail, Microsoft 365 Calendar, and IMAP connectors with provider-specific
 capability handling behind the connector abstraction.
 
+## Milestone 6.5: Android mobile app and tabbed widget
+
+Status: planned.
+
+Scope:
+
+- Add the Android-first mobile app boundary.
+- Reuse shared item models, API contracts, sync behavior, and DentLink design tokens.
+- Store mobile sessions in Android secure storage and keep a local authenticated cache.
+- Queue versioned optimistic mutations while offline and reconcile through backend sync.
+- Build a native Android multiple-tab widget with `Calendar`, `Notes`, and `Emails` tabs.
+- Match the PC/web DentLink color scheme, font stack, logo assets, source accents, and compact card
+  treatment.
+- Support widget refresh, app/source opening where possible, quick note, note done, and contextual
+  notification Complete/Dismiss actions through DentLink APIs.
+
+Out of scope:
+
+- Direct Gmail, Google Calendar, or provider polling from Android.
+- Android-authoritative ranking or ordering.
+- Push notifications, provider writeback, voice capture, Pebble capture, and arbitrary desktop/local
+  actions.
+
 ## Milestone 7: Unified Dashboard, Ranking, and AI Assistance
 
 Status: in progress after Milestone 6 is deferred. Slices through 4.3 are implemented on the

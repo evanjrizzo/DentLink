@@ -1,0 +1,13 @@
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/app_name"
+    android:initialLayout="@layout/dentlink_widget"
+    android:minWidth="250dp"
+    android:minHeight="160dp"
+    android:minResizeWidth="@dimen/widget_min_resize_width"
+    android:minResizeHeight="@dimen/widget_min_resize_height"
+    android:previewImage="@drawable/dentlink_launcher"
+    android:resizeMode="horizontal|vertical"
+    android:targetCellWidth="4"
+    android:targetCellHeight="2"
+    android:updatePeriodMillis="300000"
+    android:widgetCategory="home_screen" />

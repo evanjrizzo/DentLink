@@ -91,6 +91,10 @@ export type ApiEnv = GmailRuntimeEnv &
   };
 
 const defaultStore = new MemoryDentLinkStore();
+const SYNC_CHANGES_RETENTION_ROWS = 10000;
+const WEBHOOK_DELIVERY_RETENTION_DAYS = 7;
+const SYNC_ATTEMPT_RETENTION_DAYS = 30;
+const SYNC_ATTEMPT_ACCOUNT_TAIL_ROWS = 200;
 
 const connectorCatalog: ConnectorDefinition[] = [
   gmailConnectorDefinition(),
@@ -820,9 +824,58 @@ export default {
     ctx: { waitUntil(promise: Promise<unknown>): void }
   ): void {
     const store = env.store ?? (env.DB ? new D1DentLinkStore(env.DB) : defaultStore);
-    ctx.waitUntil(syncConnectedGmailAccounts(store, env, new Date().toISOString()));
+    ctx.waitUntil(
+      Promise.all([
+        syncConnectedGmailAccounts(store, env, new Date().toISOString()),
+        runD1StorageMaintenance(env)
+      ])
+    );
   }
 };
+
+async function runD1StorageMaintenance(env: ApiEnv): Promise<void> {
+  if (!env.DB) return;
+  await env.DB.prepare(
+    `DELETE FROM connector_oauth_states
+       WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+  ).run();
+  await env.DB.prepare(
+    `DELETE FROM webhook_deliveries
+       WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)`
+  )
+    .bind(`-${WEBHOOK_DELIVERY_RETENTION_DAYS} days`)
+    .run();
+  await env.DB.prepare(
+    `DELETE FROM connector_sync_attempts
+       WHERE started_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
+         AND id NOT IN (
+           SELECT id
+           FROM (
+             SELECT
+               id,
+               ROW_NUMBER() OVER (
+                 PARTITION BY user_id, account_id
+                 ORDER BY started_at DESC, id DESC
+               ) AS row_number
+             FROM connector_sync_attempts
+           )
+           WHERE row_number <= ?
+         )`
+  )
+    .bind(`-${SYNC_ATTEMPT_RETENTION_DAYS} days`, SYNC_ATTEMPT_ACCOUNT_TAIL_ROWS)
+    .run();
+  await env.DB.prepare(
+    `DELETE FROM sync_changes
+       WHERE cursor NOT IN (
+         SELECT cursor
+         FROM sync_changes
+         ORDER BY cursor DESC
+         LIMIT ?
+       )`
+  )
+    .bind(SYNC_CHANGES_RETENTION_ROWS)
+    .run();
+}
 
 async function syncAllConnectors(
   store: DentLinkStore,
@@ -1166,6 +1219,7 @@ const APPEARANCE_PREFERENCE_KEY = "appearance_profile_v1";
 const DEFAULT_TIMEZONE = "UTC";
 const DEFAULT_IMPORTANCE_PROMPT =
   "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.";
+const DEFAULT_SUMMARY_PROMPT = "";
 const DEFAULT_IMPORTANCE_THRESHOLD = 0;
 const MAX_AI_PROMPT_CHARS = 2000;
 
@@ -1307,6 +1361,8 @@ function aiPreferencesFromJson(value: string | null, now: string): UserPreferenc
 function defaultAiPreferences(): UserPreferences["ai"] {
   return {
     globalPrompt: DEFAULT_IMPORTANCE_PROMPT,
+    summaryPrompt: DEFAULT_SUMMARY_PROMPT,
+    textReplacements: [],
     threshold: DEFAULT_IMPORTANCE_THRESHOLD,
     presets: [],
     accountOverrides: []
@@ -1322,6 +1378,18 @@ function normalizeAiPreferencePatch(
     typeof patch.globalPrompt === "string"
       ? boundedPrompt(patch.globalPrompt) || DEFAULT_IMPORTANCE_PROMPT
       : current.globalPrompt;
+  const summaryPrompt =
+    typeof patch.summaryPrompt === "string"
+      ? boundedPrompt(patch.summaryPrompt)
+      : current.summaryPrompt;
+  const textReplacements = Array.isArray(patch.textReplacements)
+    ? patch.textReplacements
+        .map((replacement) => normalizeTextReplacement(replacement))
+        .filter((replacement): replacement is UserPreferences["ai"]["textReplacements"][number] =>
+          Boolean(replacement)
+        )
+        .slice(0, 50)
+    : current.textReplacements;
   const threshold =
     typeof patch.threshold === "number" && Number.isFinite(patch.threshold)
       ? Math.max(0, Math.min(100, Math.round(patch.threshold)))
@@ -1338,7 +1406,25 @@ function normalizeAiPreferencePatch(
           Boolean(override)
         )
     : current.accountOverrides;
-  return { globalPrompt, threshold, presets, accountOverrides };
+  return { globalPrompt, summaryPrompt, textReplacements, threshold, presets, accountOverrides };
+}
+
+function normalizeTextReplacement(
+  value: unknown
+): UserPreferences["ai"]["textReplacements"][number] | null {
+  if (typeof value !== "object" || value === null) return null;
+  const object = value as Record<string, unknown>;
+  const find = typeof object.find === "string" ? boundedReplacementText(object.find).trim() : "";
+  if (!find) return null;
+  return {
+    id: typeof object.id === "string" && object.id.trim() ? object.id : crypto.randomUUID(),
+    find,
+    replace: typeof object.replace === "string" ? boundedReplacementText(object.replace) : ""
+  };
+}
+
+function boundedReplacementText(value: string): string {
+  return Array.from(value).slice(0, 200).join("");
 }
 
 function normalizePreset(

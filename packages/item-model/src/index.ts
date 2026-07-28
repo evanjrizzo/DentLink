@@ -119,9 +119,17 @@ export type EmailAiAccountOverride = {
 
 export type EmailAiPreferenceSettings = {
   globalPrompt: string;
+  summaryPrompt: string;
+  textReplacements: EmailAiTextReplacement[];
   threshold: number;
   presets: EmailAiPromptPreset[];
   accountOverrides: EmailAiAccountOverride[];
+};
+
+export type EmailAiTextReplacement = {
+  id: EntityId;
+  find: string;
+  replace: string;
 };
 
 export type UserPreferencesPatch = {

@@ -1,0 +1,20 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_item"
+    style="@style/WidgetRow">
+
+    <TextView
+        android:id="@+id/widget_item_accent"
+        style="@style/WidgetAccent" />
+
+    <LinearLayout style="@style/WidgetTextStack">
+        <TextView
+            android:id="@+id/widget_item_title"
+            style="@style/WidgetTitle" />
+        <TextView
+            android:id="@+id/widget_item_subtitle"
+            style="@style/WidgetSubtitle" />
+        <TextView
+            android:id="@+id/widget_item_meta"
+            style="@style/WidgetMeta" />
+    </LinearLayout>
+</LinearLayout>

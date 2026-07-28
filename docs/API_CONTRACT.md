@@ -267,11 +267,12 @@ linked through OAuth.
 
 Gmail sync stores normalized source records with provider metadata, including `provider`,
 `provider_item_id`, `history_id`, `thread_id`, `message_id`, `internal_date`, `labels`, `permalink`,
-and `connector_account`. Gmail-created notifications use source `connector`, source label `Gmail`,
-the sender and subject, unread state in summary text, received timestamp metadata in the source
-record, and a Gmail deep link. The Gmail API engine does not download message bodies or attachments.
-The IMAP engine may fetch bounded MIME content for parsing, but diagnostics and Notifications still
-store only normalized metadata and attachment metadata.
+`snippet`, `normalized_body_hash`, and `connector_account`. Gmail-created notifications use source
+`connector`, source label `Gmail`, the sender and subject, unread state in summary text, received
+timestamp metadata in the source record, and a Gmail deep link. The Gmail API engine does not
+download attachments. The IMAP engine may fetch bounded MIME content for parsing, but diagnostics,
+source records, and Notifications store only normalized metadata, a short snippet, body hash, and
+attachment metadata, not full email bodies.
 
 The Gmail connector explicitly requests the read-only Gmail scope:
 
@@ -326,16 +327,21 @@ notification metadata.
 Optional email AI processing runs when `OPENAI_API_KEY` is configured and the user has not disabled
 AI in Settings -> AI. `DENTLINK_AI_ENABLED=false` disables AI globally; otherwise users default to
 enabled. It uses `DENTLINK_AI_MODEL` and `DENTLINK_AI_MAX_INPUT_CHARS` when set. AI receives bounded
-normalized subject, sender, labels, timestamp, body text, and the effective global or per-account
-importance instruction only after deterministic rules have allowed notification creation. The
-notification threshold is never sent to the AI provider; it is applied after independent scoring.
-Invalid, timed-out, or rate-limited AI output records `ai.status = failed` and preserves the
-notification and Gmail connector health.
+normalized subject, sender, labels, timestamp, body text, the effective global or per-account
+importance instruction, and the user's global summary wording instruction only after deterministic
+rules have allowed notification creation. The notification threshold is never sent to the AI
+provider; it is applied after independent scoring. Invalid, timed-out, or rate-limited AI output
+records `ai.status = failed` and preserves the notification and Gmail connector health.
 
-AI importance preferences live in `/v1/preferences`. `ai.globalPrompt` and `ai.threshold` are the
-default for all Gmail accounts. `ai.accountOverrides[]` may enable an account-specific prompt and
+AI preferences live in `/v1/preferences`. `ai.globalPrompt` and `ai.threshold` are the default
+importance scoring settings for all Gmail accounts. `ai.summaryPrompt` is a per-user global
+instruction for summary wording, including user-requested filtering or replacement language.
+`ai.textReplacements[]` stores per-user global exact replacement rules with `find` and `replace`
+strings; these run after AI processing against both the stored notification subject/title and
+summary fields. `ai.accountOverrides[]` may enable an account-specific importance prompt and
 threshold for a Gmail connector account; disabled or absent overrides inherit the global values.
-Prompt fields are limited to 2,000 characters and the API normalizes thresholds to `0..100`.
+Prompt fields are limited to 2,000 characters, replacement fields are bounded, and the API
+normalizes thresholds to `0..100`.
 
 The Worker also runs scheduled Gmail synchronization every five minutes for connected, idle Gmail
 accounts. Scheduled sync uses the account's selected ingestion engine. `gmail_api` accounts use the

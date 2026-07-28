@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::{path::Path, process::Command};
 
 use gdk::prelude::MonitorExt;
 use gtk::glib::{timeout_add_seconds_local, ControlFlow, Propagation};
@@ -40,7 +40,7 @@ fn run_macro(action: String) -> MacroResult {
         "voice_fx_toggle" => toggle_voice_fx(),
         "open_files" => run_status(
             Command::new("sh")
-                .args(["-lc", "cosmic-files ~ || xdg-open ~"])
+                .args(["-lc", "nautilus --new-window \"$HOME\""])
                 .status(),
             "Files opened",
             "Could not open Files",
@@ -64,12 +64,21 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![macro_context, run_macro])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
+                set_dentlink_window_icon(&window);
                 lock_window_to_touchscreen(&window);
             }
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running DentLink desktop");
+}
+
+fn set_dentlink_window_icon(window: &tauri::WebviewWindow) {
+    let Ok(gtk_window) = window.gtk_window() else {
+        return;
+    };
+    let icon_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../icons/DL.png");
+    let _ = gtk_window.set_icon_from_file(icon_path);
 }
 
 fn lock_window_to_touchscreen(window: &tauri::WebviewWindow) {

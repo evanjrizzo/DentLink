@@ -281,8 +281,9 @@ notification ownership model:
 - `ai_usage_daily`: user-scoped daily aggregate counts for AI requests, input characters, output
   tokens, failed requests, model, provider, and optional estimated cost.
 
-Normalized email body text is retained in Gmail source-record normalized metadata only as bounded
-text for notification fallback and optional summarization. Attachment binary content is not stored.
+Normalized email body text is used only during the active ingestion request for deterministic rules,
+notification fallback, and optional summarization. Gmail source records persist the normalized body
+hash and a short snippet, not the full normalized body. Attachment binary content is not stored.
 Older notifications without these metadata columns are surfaced with `ai.status = disabled` and
 empty email/rule metadata.
 
@@ -296,11 +297,14 @@ status check accepts `suppressed` while preserving existing rows, AI/email/rule 
 versions, and indexes. Suppressed notifications remain user-scoped records; normal listings hide
 them unless the client explicitly includes suppressed results, and search can still return them.
 
-The `email_ai_preferences_v1` user preference stores bounded AI importance customization:
-`globalPrompt`, global `threshold`, saved prompt `presets`, and optional `accountOverrides`.
-Per-account overrides are keyed by Gmail connector account ID. Disabled or missing overrides inherit
-the global prompt and threshold. Same-day reprocessing reads normalized Gmail source records and
-updates existing notifications in place, preserving user action state and duplicate identity.
+The `email_ai_preferences_v1` user preference stores bounded AI customization: `globalPrompt`,
+global `summaryPrompt`, global `textReplacements`, global `threshold`, saved prompt `presets`, and
+optional `accountOverrides`. `summaryPrompt` is per-user global wording guidance for generated
+summaries. `textReplacements` is a bounded per-user list of exact `find`/`replace` rules applied
+after AI processing to notification subject/title and summary text. Per-account overrides are keyed
+by Gmail connector account ID and affect importance prompt/threshold. Disabled or missing overrides
+inherit the global prompt and threshold. Same-day reprocessing reads normalized Gmail source records
+and updates existing notifications in place, preserving user action state and duplicate identity.
 
 Milestone 7 Slice 4.3 adds no schema migration. Contextual actionability is derived from existing
 notification metadata: AI `requiresAction`, non-ignore suggested actions, action-oriented
@@ -317,3 +321,13 @@ may include safe message IDs, outcome reasons, cursor-presence booleans, active/
 credential status, reconnect-required state, fresh-lock reference time, age, stale-lock threshold,
 IMAP UID cursor details, comparison metrics, and failure names. It must not store OAuth tokens,
 refresh tokens, provider credentials, raw MIME, email bodies, or attachment binaries.
+
+`migrations/0013_d1_storage_retention.sql` enforces the D1 storage-retention boundary for preview
+and production databases. It removes historically stored Gmail `normalized_body` fields from source
+records while preserving snippets and body hashes, deletes expired OAuth state, trims old webhook
+delivery rows, caps old sync-attempt diagnostics, and trims stale cursor-log rows while preserving a
+large recent tail. `migrations/0014_sync_changes_tail_retention.sql` additionally caps the
+rebuildable `sync_changes` cursor log to 10,000 recent rows and installs a trigger to maintain that
+tail as calendar/account churn creates new rows. The scheduled Worker cron also runs the same D1
+maintenance thresholds, so cleanup continues even when churn comes from routes that do not hit the
+insert trigger frequently.
