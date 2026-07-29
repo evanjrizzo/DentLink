@@ -4890,8 +4890,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       {
         DB: fixture.db,
         DENTLINK_ENV: "test",
-        DENTLINK_CONTENT_ENCRYPTION_KEY:
-          "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        DENTLINK_CONTENT_ENCRYPTION_KEY: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
         DENTLINK_CONTENT_ENCRYPTION_BACKFILL_ENABLED: "true",
         DENTLINK_MAINTENANCE_TOKEN: "test-maintenance-token"
       }
@@ -4902,12 +4901,10 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     const store = new D1DentLinkStore(fixture.db, {
       contentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
     });
-    const auth = await requestJson<AuthSession>(
-      store,
-      "POST",
-      "/v1/auth/login",
-      { email: "legacy-content@example.com", password: "correct horse" }
-    );
+    const auth = await requestJson<AuthSession>(store, "POST", "/v1/auth/login", {
+      email: "legacy-content@example.com",
+      password: "correct horse"
+    });
     const notes = await requestJson<NotesList>(
       store,
       "GET",

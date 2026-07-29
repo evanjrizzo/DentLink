@@ -62,7 +62,9 @@ export class ContentEncryption {
   async decryptJson<T>(value: string | null): Promise<T | null> {
     if (!value) return null;
     const encrypted = encryptedJsonCiphertext(value);
-    const plaintext = encrypted ? await this.decryptString(encrypted) : await this.decryptString(value);
+    const plaintext = encrypted
+      ? await this.decryptString(encrypted)
+      : await this.decryptString(value);
     if (!plaintext) return null;
     try {
       return JSON.parse(plaintext) as T;

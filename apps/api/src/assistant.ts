@@ -154,7 +154,9 @@ function parseArchivedNotificationContext(value: unknown): AssistantArchivedNoti
     .filter((item): item is AssistantArchivedNotificationContext => Boolean(item));
 }
 
-function parseArchivedNotificationItem(value: unknown): AssistantArchivedNotificationContext | null {
+function parseArchivedNotificationItem(
+  value: unknown
+): AssistantArchivedNotificationContext | null {
   if (!value || typeof value !== "object") return null;
   const object = value as Record<string, unknown>;
   const id = boundedString(object.id, 160);

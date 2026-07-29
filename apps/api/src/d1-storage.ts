@@ -426,12 +426,17 @@ export class D1DentLinkStore implements DentLinkStore {
            AND s.revoked_at IS NULL`
       )
       .bind(tokenHash, now)
-      .first<SessionRow & { email: string; encrypted_email: string | null; user_created_at: string }>();
+      .first<
+        SessionRow & { email: string; encrypted_email: string | null; user_created_at: string }
+      >();
     if (!row) return null;
     return {
       user: {
         id: row.user_id,
-        email: await this.userEmailFromRow({ email: row.email, encrypted_email: row.encrypted_email }),
+        email: await this.userEmailFromRow({
+          email: row.email,
+          encrypted_email: row.encrypted_email
+        }),
         createdAt: row.user_created_at
       },
       session: { expiresAt: row.expires_at }
@@ -774,7 +779,7 @@ export class D1DentLinkStore implements DentLinkStore {
     await this.batch([
       this.db
         .prepare(`UPDATE folders SET name = ?, updated_at = ? WHERE id = ? AND user_id = ?`)
-          .bind(await this.encryptText(folder.name), folder.updatedAt, folder.id, userId),
+        .bind(await this.encryptText(folder.name), folder.updatedAt, folder.id, userId),
       this.changeStatement(userId, "folder", folder.id, "upsert", {
         type: "folder",
         op: "upsert",
@@ -828,13 +833,7 @@ export class D1DentLinkStore implements DentLinkStore {
         .prepare(
           `INSERT INTO tags (id, user_id, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`
         )
-        .bind(
-          tag.id,
-          tag.userId,
-          await this.encryptText(tag.name),
-          tag.createdAt,
-          tag.updatedAt
-        ),
+        .bind(tag.id, tag.userId, await this.encryptText(tag.name), tag.createdAt, tag.updatedAt),
       this.changeStatement(userId, "tag", tag.id, "upsert", { type: "tag", op: "upsert", tag })
     ]);
     return tag;
@@ -1448,7 +1447,9 @@ export class D1DentLinkStore implements DentLinkStore {
        ORDER BY e.start_at ASC, e.title ASC`,
       values
     );
-    const events = await Promise.all(rows.map((row) => this.calendarEventWithAnnotationFromRow(row)));
+    const events = await Promise.all(
+      rows.map((row) => this.calendarEventWithAnnotationFromRow(row))
+    );
     return { events: events.sort(compareCalendarEvents) };
   }
 
@@ -2436,7 +2437,10 @@ export class D1DentLinkStore implements DentLinkStore {
       .bind(userId, eventId)
       .first<CalendarAnnotationRow>();
     return row
-      ? this.calendarAnnotationFromRow(row, await this.tagsForIds(userId, parseTagIds(row.tag_ids_json)))
+      ? this.calendarAnnotationFromRow(
+          row,
+          await this.tagsForIds(userId, parseTagIds(row.tag_ids_json))
+        )
       : null;
   }
 
@@ -2669,9 +2673,7 @@ export class D1DentLinkStore implements DentLinkStore {
       errorCode: row.error_code,
       errorMessage: await this.decryptNullableText(row.error_message),
       summary: await this.decryptJsonOrNull<ConnectorSyncAttempt["summary"]>(row.summary_json),
-      details:
-        (await this.decryptJsonOrNull<Record<string, unknown>>(row.details_json)) ??
-        {}
+      details: (await this.decryptJsonOrNull<Record<string, unknown>>(row.details_json)) ?? {}
     };
   }
 
@@ -2915,7 +2917,15 @@ export class D1DentLinkStore implements DentLinkStore {
          (id, user_id, note_id, action, version, snapshot_json, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`
       )
-      .bind(nextId("history"), userId, note.id, action, note.version, await this.encryptJson(note), now);
+      .bind(
+        nextId("history"),
+        userId,
+        note.id,
+        action,
+        note.version,
+        await this.encryptJson(note),
+        now
+      );
   }
 
   private changeStatement(

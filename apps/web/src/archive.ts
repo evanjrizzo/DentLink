@@ -109,7 +109,9 @@ export function selectAssistantArchiveNotifications(
     .filter((entry) => terms.length === 0 || entry.score > 0)
     .sort((left, right) => {
       if (right.score !== left.score) return right.score - left.score;
-      return archiveTimestamp(right.notification).localeCompare(archiveTimestamp(left.notification));
+      return archiveTimestamp(right.notification).localeCompare(
+        archiveTimestamp(left.notification)
+      );
     })
     .slice(0, Math.max(0, maxItems));
 

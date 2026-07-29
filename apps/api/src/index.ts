@@ -184,10 +184,7 @@ const connectorCatalog: ConnectorDefinition[] = [
 ];
 
 function contentEncryptionOptions(env: ApiEnv): { contentEncryptionKey?: string | null } {
-  if (
-    env.DENTLINK_REQUIRE_CONTENT_ENCRYPTION === "true" &&
-    !contentEncryptionKey(env)?.trim()
-  ) {
+  if (env.DENTLINK_REQUIRE_CONTENT_ENCRYPTION === "true" && !contentEncryptionKey(env)?.trim()) {
     throw new StoreError("missing_content_encryption_key", "Content encryption key is required");
   }
   return { contentEncryptionKey: contentEncryptionKey(env) };
@@ -240,9 +237,7 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
 
     const store =
       env.store ??
-      (env.DB
-        ? new D1DentLinkStore(env.DB, contentEncryptionOptions(env))
-        : defaultStore);
+      (env.DB ? new D1DentLinkStore(env.DB, contentEncryptionOptions(env)) : defaultStore);
 
     if (method === "POST" && path === "/v1/auth/register") {
       const credentials = parseCredentials(await readJson(request));
@@ -888,30 +883,30 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
           ? 404
           : caught.code === "unauthorized"
             ? 401
-          : caught.code === "invalid_cursor"
-            ? 400
-            : caught.code === "rate_limited"
-              ? 429
-              : caught.code === "gmail_auth_failed"
-                ? 401
-                : caught.code === "gmail_permission_denied"
-                  ? 403
-                  : caught.code === "gmail_rate_limited"
-                    ? 429
-                    : caught.code === "gmail_query_invalid" ||
-                        caught.code === "gmail_response_invalid"
-                      ? 502
-                      : caught.code === "gmail_upstream_failed"
+            : caught.code === "invalid_cursor"
+              ? 400
+              : caught.code === "rate_limited"
+                ? 429
+                : caught.code === "gmail_auth_failed"
+                  ? 401
+                  : caught.code === "gmail_permission_denied"
+                    ? 403
+                    : caught.code === "gmail_rate_limited"
+                      ? 429
+                      : caught.code === "gmail_query_invalid" ||
+                          caught.code === "gmail_response_invalid"
                         ? 502
-                        : caught.code === "archive_unavailable"
-                          ? 503
-                          : caught.code === "archive_quota_exceeded"
-                            ? 413
-                            : caught.code === "invalid_oauth_state" ||
-                                caught.code === "invalid_oauth_callback" ||
-                                caught.code === "oauth_denied"
-                              ? 400
-                              : 409;
+                        : caught.code === "gmail_upstream_failed"
+                          ? 502
+                          : caught.code === "archive_unavailable"
+                            ? 503
+                            : caught.code === "archive_quota_exceeded"
+                              ? 413
+                              : caught.code === "invalid_oauth_state" ||
+                                  caught.code === "invalid_oauth_callback" ||
+                                  caught.code === "oauth_denied"
+                                ? 400
+                                : 409;
       return error(caught.code, caught.message, status);
     }
     const requestId = crypto.randomUUID();
@@ -936,9 +931,7 @@ export default {
   ): void {
     const store =
       env.store ??
-      (env.DB
-        ? new D1DentLinkStore(env.DB, contentEncryptionOptions(env))
-        : defaultStore);
+      (env.DB ? new D1DentLinkStore(env.DB, contentEncryptionOptions(env)) : defaultStore);
     ctx.waitUntil(
       Promise.all([
         syncConnectedGmailAccounts(store, env, new Date().toISOString()).catch(async (caught) => {
@@ -1656,7 +1649,12 @@ async function backfillUsersContentEncryption(
         LIMIT ?`
     )
     .bind(batchSize)
-    .all<{ id: string; email: string | null; email_hash: string | null; encrypted_email: string | null }>();
+    .all<{
+      id: string;
+      email: string | null;
+      email_hash: string | null;
+      encrypted_email: string | null;
+    }>();
   let updated = 0;
   for (const row of rows.results ?? []) {
     const encryptedEmail = row.encrypted_email;
