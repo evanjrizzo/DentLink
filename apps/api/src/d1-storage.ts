@@ -4,6 +4,7 @@ import {
   type DentLinkStore,
   type PasswordRecord
 } from "./storage";
+import { ContentEncryption } from "./content-encryption";
 
 import type {
   ConflictResolution,
@@ -50,6 +51,12 @@ import type {
 type Primitive = string | number | null;
 type WithoutCursor<T> = T extends unknown ? Omit<T, "cursor"> : never;
 type SyncPayload = WithoutCursor<SyncChange>;
+type CompactSyncPayload = {
+  type: SyncPayload["type"];
+  op: SyncPayload["op"];
+  id: EntityId;
+  userId: EntityId;
+};
 
 export type D1Result<T = unknown> = {
   results?: T[];
@@ -72,6 +79,8 @@ export type D1DatabaseLike = {
 type UserRow = {
   id: string;
   email: string;
+  email_hash?: string | null;
+  encrypted_email?: string | null;
   password_hash: string;
   password_salt: string;
   password_iterations: number;
@@ -141,6 +150,10 @@ type HistoryRow = {
 
 type SyncRow = {
   cursor: number;
+  user_id: string;
+  entity_type: CompactSyncPayload["type"];
+  entity_id: string;
+  operation: CompactSyncPayload["op"];
   payload_json: string;
 };
 
@@ -317,23 +330,36 @@ type CalendarAnnotationRow = {
 };
 
 export class D1DentLinkStore implements DentLinkStore {
-  constructor(private readonly db: D1DatabaseLike) {}
+  private readonly contentEncryption: ContentEncryption;
+
+  constructor(
+    private readonly db: D1DatabaseLike,
+    options: { contentEncryptionKey?: string | null } = {}
+  ) {
+    this.contentEncryption = new ContentEncryption({ keyB64: options.contentEncryptionKey });
+  }
 
   async createUser(input: CreateUserRecord): Promise<User> {
+    const email = normalizeEmail(input.email);
+    const emailHash = await hashStoredEmail(email);
     const user = {
       id: nextId("user"),
-      email: normalizeEmail(input.email),
+      email,
       createdAt: new Date().toISOString()
     };
     try {
       await this.db
         .prepare(
-          `INSERT INTO users (id, email, password_hash, password_salt, password_iterations, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`
+          `INSERT INTO users
+           (id, email, email_hash, encrypted_email, password_hash, password_salt,
+            password_iterations, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .bind(
           user.id,
-          user.email,
+          emailHash,
+          emailHash,
+          await this.encryptText(email),
           input.password.hash,
           input.password.salt,
           input.password.iterations,
@@ -347,18 +373,21 @@ export class D1DentLinkStore implements DentLinkStore {
   }
 
   async findUserByEmail(email: string): Promise<(User & { password: PasswordRecord }) | null> {
+    const normalized = normalizeEmail(email);
+    const emailHash = await hashStoredEmail(normalized);
     const row = await this.db
       .prepare(
-        `SELECT id, email, password_hash, password_salt, password_iterations, created_at
+        `SELECT id, email, email_hash, encrypted_email, password_hash, password_salt,
+                password_iterations, created_at
          FROM users
-         WHERE email = ?`
+         WHERE email = ? OR email_hash = ?`
       )
-      .bind(normalizeEmail(email))
+      .bind(normalized, emailHash)
       .first<UserRow>();
     if (!row) return null;
     return {
       id: row.id,
-      email: row.email,
+      email: await this.userEmailFromRow(row),
       createdAt: row.created_at,
       password: {
         hash: row.password_hash,
@@ -389,7 +418,7 @@ export class D1DentLinkStore implements DentLinkStore {
     const row = await this.db
       .prepare(
         `SELECT s.id, s.user_id, s.expires_at, s.created_at,
-                u.email, u.created_at AS user_created_at
+                u.email, u.encrypted_email, u.created_at AS user_created_at
          FROM sessions s
          JOIN users u ON u.id = s.user_id
          WHERE s.token_hash = ?
@@ -397,12 +426,23 @@ export class D1DentLinkStore implements DentLinkStore {
            AND s.revoked_at IS NULL`
       )
       .bind(tokenHash, now)
-      .first<SessionRow & { email: string; user_created_at: string }>();
+      .first<SessionRow & { email: string; encrypted_email: string | null; user_created_at: string }>();
     if (!row) return null;
     return {
-      user: { id: row.user_id, email: row.email, createdAt: row.user_created_at },
+      user: {
+        id: row.user_id,
+        email: await this.userEmailFromRow({ email: row.email, encrypted_email: row.encrypted_email }),
+        createdAt: row.user_created_at
+      },
       session: { expiresAt: row.expires_at }
     };
+  }
+
+  async extendSession(tokenHash: string, expiresAt: string): Promise<void> {
+    await this.db
+      .prepare(`UPDATE sessions SET expires_at = ? WHERE token_hash = ?`)
+      .bind(expiresAt, tokenHash)
+      .run();
   }
 
   async deleteSessionByTokenHash(tokenHash: string): Promise<void> {
@@ -419,7 +459,8 @@ export class D1DentLinkStore implements DentLinkStore {
       where.push("folder_id = ?");
       values.push(query.folderId);
     }
-    if (query.search) {
+    const encryptedSearch = this.contentEncryption.enabled && Boolean(query.search);
+    if (query.search && !encryptedSearch) {
       where.push("(lower(title) LIKE ? OR lower(body) LIKE ?)");
       const search = `%${query.search.toLowerCase()}%`;
       values.push(search, search);
@@ -435,11 +476,15 @@ export class D1DentLinkStore implements DentLinkStore {
       );
       values.push(tagId);
     }
-    const notes = await this.noteRows(
+    const listedNotes = await this.noteRows(
       `SELECT * FROM notes WHERE ${where.join(" AND ")}
        ORDER BY pinned DESC, global_order ASC, updated_at ASC`,
       values
     );
+    const notes =
+      encryptedSearch && query.search
+        ? listedNotes.filter((note) => decryptedNoteMatchesSearch(note, query.search ?? ""))
+        : listedNotes;
     const folders = await this.all<FolderRow>(
       `SELECT * FROM folders WHERE user_id = ? ORDER BY name ASC`,
       [userId]
@@ -449,8 +494,10 @@ export class D1DentLinkStore implements DentLinkStore {
     ]);
     return {
       notes,
-      folders: folders.map(folderFromRow),
-      tags: tags.map(tagFromRow)
+      folders: (await Promise.all(folders.map((row) => this.folderFromRow(row)))).sort(
+        compareNames
+      ),
+      tags: (await Promise.all(tags.map((row) => this.tagFromRow(row)))).sort(compareNames)
     };
   }
 
@@ -492,15 +539,15 @@ export class D1DentLinkStore implements DentLinkStore {
           note.id,
           note.userId,
           note.kind,
-          note.title,
-          note.body,
+          await this.encryptText(note.title),
+          await this.encryptText(note.body),
           note.folderId,
           note.dueAt,
           note.priority,
           bool(note.pinned),
           note.status,
           note.globalOrder,
-          note.sourceUrl,
+          await this.encryptNullableText(note.sourceUrl),
           note.version,
           note.createdAt,
           note.updatedAt,
@@ -511,7 +558,7 @@ export class D1DentLinkStore implements DentLinkStore {
           .prepare(`INSERT INTO note_tags (note_id, tag_id, user_id) VALUES (?, ?, ?)`)
           .bind(note.id, tagId, userId)
       ),
-      this.historyStatement(userId, note, "created", now),
+      await this.historyStatement(userId, note, "created", now),
       this.changeStatement(userId, "note", note.id, "upsert", { type: "note", op: "upsert", note })
     ];
     await this.batch(statements);
@@ -563,15 +610,15 @@ export class D1DentLinkStore implements DentLinkStore {
       )
       .bind(
         next.kind,
-        next.title,
-        next.body,
+        await this.encryptText(next.title),
+        await this.encryptText(next.body),
         next.folderId,
         next.dueAt,
         next.priority,
         bool(next.pinned),
         next.status,
         next.globalOrder,
-        next.sourceUrl,
+        await this.encryptNullableText(next.sourceUrl),
         next.version,
         next.updatedAt,
         next.completedAt,
@@ -599,7 +646,7 @@ export class D1DentLinkStore implements DentLinkStore {
           ];
     await this.batch([
       ...tagStatements,
-      this.historyStatement(userId, next, actionForPatch(patch), now),
+      await this.historyStatement(userId, next, actionForPatch(patch), now),
       this.changeStatement(
         userId,
         "note",
@@ -674,7 +721,7 @@ export class D1DentLinkStore implements DentLinkStore {
     for (const order of noteOrders) {
       const note = await this.requireNote(userId, order.id);
       await this.batch([
-        this.historyStatement(userId, note, "reordered", now),
+        await this.historyStatement(userId, note, "reordered", now),
         this.changeStatement(userId, "note", note.id, "upsert", {
           type: "note",
           op: "upsert",
@@ -699,7 +746,13 @@ export class D1DentLinkStore implements DentLinkStore {
         .prepare(
           `INSERT INTO folders (id, user_id, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`
         )
-        .bind(folder.id, folder.userId, folder.name, folder.createdAt, folder.updatedAt),
+        .bind(
+          folder.id,
+          folder.userId,
+          await this.encryptText(folder.name),
+          folder.createdAt,
+          folder.updatedAt
+        ),
       this.changeStatement(userId, "folder", folder.id, "upsert", {
         type: "folder",
         op: "upsert",
@@ -721,7 +774,7 @@ export class D1DentLinkStore implements DentLinkStore {
     await this.batch([
       this.db
         .prepare(`UPDATE folders SET name = ?, updated_at = ? WHERE id = ? AND user_id = ?`)
-        .bind(folder.name, folder.updatedAt, folder.id, userId),
+          .bind(await this.encryptText(folder.name), folder.updatedAt, folder.id, userId),
       this.changeStatement(userId, "folder", folder.id, "upsert", {
         type: "folder",
         op: "upsert",
@@ -757,7 +810,7 @@ export class D1DentLinkStore implements DentLinkStore {
              WHERE id = ? AND user_id = ?`
           )
           .bind(now, note.id, userId),
-        this.historyStatement(userId, next, "updated", now),
+        await this.historyStatement(userId, next, "updated", now),
         this.changeStatement(userId, "note", next.id, "upsert", {
           type: "note",
           op: "upsert",
@@ -775,7 +828,13 @@ export class D1DentLinkStore implements DentLinkStore {
         .prepare(
           `INSERT INTO tags (id, user_id, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`
         )
-        .bind(tag.id, tag.userId, tag.name, tag.createdAt, tag.updatedAt),
+        .bind(
+          tag.id,
+          tag.userId,
+          await this.encryptText(tag.name),
+          tag.createdAt,
+          tag.updatedAt
+        ),
       this.changeStatement(userId, "tag", tag.id, "upsert", { type: "tag", op: "upsert", tag })
     ]);
     return tag;
@@ -788,7 +847,7 @@ export class D1DentLinkStore implements DentLinkStore {
     await this.batch([
       this.db
         .prepare(`UPDATE tags SET name = ?, updated_at = ? WHERE id = ? AND user_id = ?`)
-        .bind(tag.name, tag.updatedAt, tag.id, userId),
+        .bind(await this.encryptText(tag.name), tag.updatedAt, tag.id, userId),
       this.changeStatement(userId, "tag", tag.id, "upsert", { type: "tag", op: "upsert", tag })
     ]);
     return tag;
@@ -816,7 +875,8 @@ export class D1DentLinkStore implements DentLinkStore {
        ORDER BY display_name ASC`,
       [userId]
     );
-    return { accounts: rows.map(connectorAccountFromRow) };
+    const accounts = await Promise.all(rows.map((row) => this.connectorAccountFromRow(row)));
+    return { accounts: accounts.sort(compareConnectorAccounts) };
   }
 
   async listConnectorAccountsByKey(connectorKey: string): Promise<ConnectorAccount[]> {
@@ -826,7 +886,9 @@ export class D1DentLinkStore implements DentLinkStore {
        ORDER BY display_name ASC`,
       [connectorKey]
     );
-    return rows.map(connectorAccountFromRow);
+    return (await Promise.all(rows.map((row) => this.connectorAccountFromRow(row)))).sort(
+      compareConnectorAccounts
+    );
   }
 
   async createConnectorAccount(
@@ -870,11 +932,11 @@ export class D1DentLinkStore implements DentLinkStore {
             account.id,
             userId,
             account.connectorKey,
-            account.displayName,
+            await this.encryptText(account.displayName),
             account.status,
             account.healthStatus,
             account.syncStatus,
-            JSON.stringify(account.settings),
+            await this.encryptJson(account.settings),
             account.credentialRef,
             account.credentialStatus,
             account.syncCursor,
@@ -882,7 +944,7 @@ export class D1DentLinkStore implements DentLinkStore {
             account.nextSyncAt,
             account.lastHealthAt,
             account.errorCode,
-            account.errorMessage,
+            await this.encryptNullableText(account.errorMessage),
             account.createdAt,
             account.updatedAt,
             account.version
@@ -911,7 +973,7 @@ export class D1DentLinkStore implements DentLinkStore {
       .prepare(`SELECT * FROM connector_accounts WHERE id = ? AND user_id = ?`)
       .bind(accountId, userId)
       .first<ConnectorAccountRow>();
-    return row ? connectorAccountFromRow(row) : null;
+    return row ? this.connectorAccountFromRow(row) : null;
   }
 
   async updateConnectorAccount(
@@ -953,11 +1015,11 @@ export class D1DentLinkStore implements DentLinkStore {
          WHERE id = ? AND user_id = ? AND version = ? AND status != 'deleted'`
       )
       .bind(
-        next.displayName,
+        await this.encryptText(next.displayName),
         next.status,
         next.healthStatus,
         next.syncStatus,
-        JSON.stringify(next.settings),
+        await this.encryptJson(next.settings),
         next.credentialRef,
         next.credentialStatus,
         next.syncCursor,
@@ -965,7 +1027,7 @@ export class D1DentLinkStore implements DentLinkStore {
         next.nextSyncAt,
         next.lastHealthAt,
         next.errorCode,
-        next.errorMessage,
+        await this.encryptNullableText(next.errorMessage),
         next.updatedAt,
         next.version,
         accountId,
@@ -1047,12 +1109,12 @@ export class D1DentLinkStore implements DentLinkStore {
           record.sourceExternalId,
           record.sourceType,
           record.payloadHash,
-          JSON.stringify(record.normalizedPayload),
+          await this.encryptJson(record.normalizedPayload),
           record.status,
           record.receivedAt,
           record.processedAt,
           record.processingReason,
-          record.errorMessage,
+          await this.encryptNullableText(record.errorMessage),
           record.version
         )
         .run();
@@ -1078,7 +1140,7 @@ export class D1DentLinkStore implements DentLinkStore {
       )
       .bind(userId, accountId, sourceExternalId)
       .first<ConnectorSourceRecordRow>();
-    return row ? connectorSourceRecordFromRow(row) : null;
+    return row ? this.connectorSourceRecordFromRow(row) : null;
   }
 
   async createConnectorSourceRecordIfAbsent(
@@ -1141,11 +1203,11 @@ export class D1DentLinkStore implements DentLinkStore {
       )
       .bind(
         next.payloadHash,
-        JSON.stringify(next.normalizedPayload),
+        await this.encryptJson(next.normalizedPayload),
         next.status,
         next.processedAt,
         next.processingReason,
-        next.errorMessage,
+        await this.encryptNullableText(next.errorMessage),
         next.version,
         userId,
         accountId,
@@ -1167,7 +1229,7 @@ export class D1DentLinkStore implements DentLinkStore {
        ORDER BY received_at ASC, id ASC`,
       [userId, accountId]
     );
-    return rows.map(connectorSourceRecordFromRow);
+    return Promise.all(rows.map((row) => this.connectorSourceRecordFromRow(row)));
   }
 
   async createConnectorSyncAttempt(
@@ -1200,9 +1262,9 @@ export class D1DentLinkStore implements DentLinkStore {
         attempt.completedAt,
         attempt.durationMs,
         attempt.errorCode,
-        attempt.errorMessage,
-        attempt.summary ? JSON.stringify(attempt.summary) : null,
-        JSON.stringify(attempt.details)
+        await this.encryptNullableText(attempt.errorMessage),
+        await this.encryptJson(attempt.summary),
+        await this.encryptJson(attempt.details)
       )
       .run();
     return attempt;
@@ -1221,7 +1283,7 @@ export class D1DentLinkStore implements DentLinkStore {
        LIMIT ?`,
       [userId, accountId, boundedLimit]
     );
-    return rows.map(connectorSyncAttemptFromRow);
+    return Promise.all(rows.map((row) => this.connectorSyncAttemptFromRow(row)));
   }
 
   async createConnectorOAuthState(
@@ -1386,7 +1448,8 @@ export class D1DentLinkStore implements DentLinkStore {
        ORDER BY e.start_at ASC, e.title ASC`,
       values
     );
-    return { events: rows.map(calendarEventWithAnnotationFromRow) };
+    const events = await Promise.all(rows.map((row) => this.calendarEventWithAnnotationFromRow(row)));
+    return { events: events.sort(compareCalendarEvents) };
   }
 
   async createLocalCalendarEvent(
@@ -1397,7 +1460,7 @@ export class D1DentLinkStore implements DentLinkStore {
     const event = localCalendarEventFromInput(userId, input, now);
     try {
       await this.batch([
-        this.insertCalendarEventStatement(event),
+        await this.insertCalendarEventStatement(event),
         this.changeStatement(userId, "calendar_event", event.id, "upsert", {
           type: "calendar_event",
           op: "upsert",
@@ -1420,7 +1483,7 @@ export class D1DentLinkStore implements DentLinkStore {
       )
       .bind(eventId, userId)
       .first<CalendarEventRow & CalendarAnnotationSelectRow>();
-    return row ? calendarEventWithAnnotationFromRow(row) : null;
+    return row ? this.calendarEventWithAnnotationFromRow(row) : null;
   }
 
   async updateLocalCalendarEvent(
@@ -1446,11 +1509,11 @@ export class D1DentLinkStore implements DentLinkStore {
          WHERE id = ? AND user_id = ? AND source = 'local' AND version = ? AND status != 'deleted'`
       )
       .bind(
-        next.calendarSummary,
-        next.title,
-        next.description,
-        next.location,
-        next.sourceUrl,
+        await this.encryptNullableText(next.calendarSummary),
+        await this.encryptText(next.title),
+        await this.encryptText(next.description),
+        await this.encryptNullableText(next.location),
+        await this.encryptNullableText(next.sourceUrl),
         next.startAt,
         next.endAt,
         next.startDate,
@@ -1554,7 +1617,7 @@ export class D1DentLinkStore implements DentLinkStore {
           annotation.id,
           userId,
           eventId,
-          annotation.notes,
+          await this.encryptText(annotation.notes),
           bool(annotation.pinned),
           bool(annotation.completed),
           bool(annotation.hidden),
@@ -1592,7 +1655,7 @@ export class D1DentLinkStore implements DentLinkStore {
       .first<CalendarEventRow>();
     const event: CalendarEvent = {
       ...(existing
-        ? calendarEventFromRow(existing)
+        ? await this.calendarEventFromRow(existing)
         : {
             id: nextId("calendar"),
             userId,
@@ -1608,7 +1671,7 @@ export class D1DentLinkStore implements DentLinkStore {
       color: input.color ?? null,
       reminderMinutes: input.reminderMinutes ?? null,
       importedUid: input.importedUid ?? null,
-      annotation: existing ? calendarEventFromRow(existing).annotation : null,
+      annotation: existing ? (await this.calendarEventFromRow(existing)).annotation : null,
       status:
         input.status === "cancelled" || !existing || existing.status !== "dismissed"
           ? input.status
@@ -1656,11 +1719,11 @@ export class D1DentLinkStore implements DentLinkStore {
           event.provider,
           event.providerEventId,
           event.calendarId,
-          event.calendarSummary,
-          event.title,
-          event.description,
-          event.location,
-          event.sourceUrl,
+          await this.encryptNullableText(event.calendarSummary),
+          await this.encryptText(event.title),
+          await this.encryptText(event.description),
+          await this.encryptNullableText(event.location),
+          await this.encryptNullableText(event.sourceUrl),
           event.startAt,
           event.endAt,
           event.startDate,
@@ -1703,7 +1766,7 @@ export class D1DentLinkStore implements DentLinkStore {
       .bind(eventId, userId)
       .first<CalendarEventRow>();
     if (!row) throw new StoreError("not_found", "Calendar event not found");
-    const existing = calendarEventFromRow(row);
+    const existing = await this.calendarEventFromRow(row);
     const next: CalendarEvent = {
       ...existing,
       status: patch.status ?? existing.status,
@@ -1752,7 +1815,7 @@ export class D1DentLinkStore implements DentLinkStore {
        ORDER BY pinned DESC, rank DESC, global_order ASC, updated_at ASC`,
       [userId]
     );
-    return { notifications: rows.map(notificationFromRow) };
+    return { notifications: await Promise.all(rows.map((row) => this.notificationFromRow(row))) };
   }
 
   async createNotification(
@@ -1795,12 +1858,12 @@ export class D1DentLinkStore implements DentLinkStore {
         .bind(
           notification.id,
           notification.userId,
-          notification.title,
-          notification.summary,
-          notification.body,
+          await this.encryptText(notification.title),
+          await this.encryptText(notification.summary),
+          await this.encryptText(notification.body),
           notification.source,
-          notification.sourceLabel,
-          notification.sourceUrl,
+          await this.encryptText(notification.sourceLabel),
+          await this.encryptNullableText(notification.sourceUrl),
           notification.severity,
           notification.status,
           bool(notification.pinned),
@@ -1811,9 +1874,9 @@ export class D1DentLinkStore implements DentLinkStore {
           notification.updatedAt,
           notification.completedAt,
           notification.dismissedAt,
-          jsonOrNull(notification.email),
-          jsonOrNull(notification.rule),
-          JSON.stringify(notification.ai)
+          await this.encryptJson(notification.email),
+          await this.encryptJson(notification.rule),
+          await this.encryptJson(notification.ai)
         ),
       this.changeStatement(userId, "notification", notification.id, "upsert", {
         type: "notification",
@@ -1867,10 +1930,10 @@ export class D1DentLinkStore implements DentLinkStore {
          WHERE id = ? AND user_id = ? AND status != 'deleted' AND version = ?`
       )
       .bind(
-        next.title,
-        next.summary,
-        next.body,
-        next.sourceUrl,
+        await this.encryptText(next.title),
+        await this.encryptText(next.summary),
+        await this.encryptText(next.body),
+        await this.encryptNullableText(next.sourceUrl),
         next.severity,
         next.status,
         bool(next.pinned),
@@ -1880,9 +1943,9 @@ export class D1DentLinkStore implements DentLinkStore {
         next.updatedAt,
         next.completedAt,
         next.dismissedAt,
-        jsonOrNull(next.email),
-        jsonOrNull(next.rule),
-        JSON.stringify(next.ai),
+        await this.encryptJson(next.email),
+        await this.encryptJson(next.rule),
+        await this.encryptJson(next.ai),
         notificationId,
         userId,
         expectedVersion
@@ -2034,7 +2097,7 @@ export class D1DentLinkStore implements DentLinkStore {
       .prepare("SELECT value FROM user_preferences WHERE user_id = ? AND key = ?")
       .bind(userId, key)
       .first<{ value: string }>();
-    return row?.value ?? null;
+    return row ? this.decryptText(row.value) : null;
   }
 
   async setUserPreference(
@@ -2051,7 +2114,7 @@ export class D1DentLinkStore implements DentLinkStore {
            value = excluded.value,
            updated_at = excluded.updated_at`
       )
-      .bind(userId, key, value, now, now)
+      .bind(userId, key, await this.encryptText(value), now, now)
       .run();
   }
 
@@ -2087,7 +2150,7 @@ export class D1DentLinkStore implements DentLinkStore {
           .bind(
             webhook.id,
             userId,
-            webhook.name,
+            await this.encryptText(webhook.name),
             webhook.slug,
             secretHash,
             webhook.destination,
@@ -2116,7 +2179,7 @@ export class D1DentLinkStore implements DentLinkStore {
       `SELECT * FROM webhook_endpoints WHERE user_id = ? ORDER BY name ASC`,
       [userId]
     );
-    return rows.map(webhookFromRow);
+    return (await Promise.all(rows.map((row) => this.webhookFromRow(row)))).sort(compareNames);
   }
 
   async updateWebhookEndpoint(
@@ -2146,7 +2209,7 @@ export class D1DentLinkStore implements DentLinkStore {
          WHERE id = ? AND user_id = ? AND version = ?`
       )
       .bind(
-        next.name,
+        await this.encryptText(next.name),
         next.destination,
         bool(next.enabled),
         next.defaultSeverity,
@@ -2213,7 +2276,7 @@ export class D1DentLinkStore implements DentLinkStore {
       .bind(slug, secretHash)
       .first<WebhookRow>();
     if (!row) return null;
-    const endpoint = webhookFromRow(row);
+    const endpoint = await this.webhookFromRow(row);
     await this.assertWebhookRateLimit(endpoint.id, now);
     await this.db
       .prepare(`UPDATE webhook_endpoints SET last_triggered_at = ?, updated_at = ? WHERE id = ?`)
@@ -2254,7 +2317,7 @@ export class D1DentLinkStore implements DentLinkStore {
       `SELECT * FROM note_conflicts WHERE user_id = ? AND status = 'open' ORDER BY created_at ASC`,
       [userId]
     );
-    return rows.map(conflictFromRow);
+    return Promise.all(rows.map((row) => this.conflictFromRow(row)));
   }
 
   async resolveConflict(
@@ -2282,7 +2345,7 @@ export class D1DentLinkStore implements DentLinkStore {
     const resolved = await this.getConflict(userId, conflictId);
     if (!resolved) return null;
     await this.batch([
-      this.historyStatement(userId, resolved.serverNote, "conflict_resolved", now),
+      await this.historyStatement(userId, resolved.serverNote, "conflict_resolved", now),
       this.changeStatement(userId, "conflict", resolved.id, "upsert", {
         type: "conflict",
         op: "upsert",
@@ -2298,7 +2361,7 @@ export class D1DentLinkStore implements DentLinkStore {
       throw new StoreError("invalid_cursor", "Sync cursor is invalid");
     }
     const rows = await this.all<SyncRow>(
-      `SELECT cursor, payload_json
+      `SELECT cursor, user_id, entity_type, entity_id, operation, payload_json
        FROM sync_changes
        WHERE user_id = ? AND cursor > ?
        ORDER BY cursor ASC`,
@@ -2310,9 +2373,7 @@ export class D1DentLinkStore implements DentLinkStore {
       .first<{ cursor: number }>();
     return {
       cursor: String(latest?.cursor ?? 0),
-      changes: rows.map(
-        (row) => ({ ...JSON.parse(row.payload_json), cursor: String(row.cursor) }) as SyncChange
-      )
+      changes: await this.syncChangesFromRows(userId, rows)
     };
   }
 
@@ -2321,10 +2382,10 @@ export class D1DentLinkStore implements DentLinkStore {
       `SELECT * FROM note_history WHERE user_id = ? AND note_id = ? ORDER BY created_at ASC, id ASC`,
       [userId, noteId]
     );
-    return rows.map(historyFromRow);
+    return Promise.all(rows.map((row) => this.historyFromRow(row)));
   }
 
-  private insertCalendarEventStatement(event: CalendarEvent): D1PreparedStatement {
+  private async insertCalendarEventStatement(event: CalendarEvent): Promise<D1PreparedStatement> {
     return this.db
       .prepare(
         `INSERT INTO calendar_events
@@ -2342,11 +2403,11 @@ export class D1DentLinkStore implements DentLinkStore {
         event.provider,
         event.providerEventId,
         event.calendarId,
-        event.calendarSummary,
-        event.title,
-        event.description,
-        event.location,
-        event.sourceUrl,
+        await this.encryptNullableText(event.calendarSummary),
+        await this.encryptText(event.title),
+        await this.encryptText(event.description),
+        await this.encryptNullableText(event.location),
+        await this.encryptNullableText(event.sourceUrl),
         event.startAt,
         event.endAt,
         event.startDate,
@@ -2375,7 +2436,7 @@ export class D1DentLinkStore implements DentLinkStore {
       .bind(userId, eventId)
       .first<CalendarAnnotationRow>();
     return row
-      ? calendarAnnotationFromRow(row, await this.tagsForIds(userId, parseTagIds(row.tag_ids_json)))
+      ? this.calendarAnnotationFromRow(row, await this.tagsForIds(userId, parseTagIds(row.tag_ids_json)))
       : null;
   }
 
@@ -2386,7 +2447,7 @@ export class D1DentLinkStore implements DentLinkStore {
         .prepare(`SELECT * FROM tags WHERE id = ? AND user_id = ?`)
         .bind(tagId, userId)
         .first<TagRow>();
-      if (row) tags.push(tagFromRow(row));
+      if (row) tags.push(await this.tagFromRow(row));
     }
     return tags;
   }
@@ -2401,6 +2462,14 @@ export class D1DentLinkStore implements DentLinkStore {
     return note;
   }
 
+  private async getNoteForSync(userId: EntityId, noteId: EntityId): Promise<Note | null> {
+    const notes = await this.noteRows(
+      `SELECT * FROM notes WHERE id = ? AND user_id = ? AND status != 'deleted'`,
+      [noteId, userId]
+    );
+    return notes[0] ?? null;
+  }
+
   private async requireNotification(
     userId: EntityId,
     notificationId: EntityId
@@ -2410,7 +2479,18 @@ export class D1DentLinkStore implements DentLinkStore {
       .bind(notificationId, userId)
       .first<NotificationRow>();
     if (!row) throw new StoreError("not_found", "Notification not found");
-    return notificationFromRow(row);
+    return this.notificationFromRow(row);
+  }
+
+  private async getNotificationForSync(
+    userId: EntityId,
+    notificationId: EntityId
+  ): Promise<Notification | null> {
+    const row = await this.db
+      .prepare(`SELECT * FROM notifications WHERE id = ? AND user_id = ? AND status != 'deleted'`)
+      .bind(notificationId, userId)
+      .first<NotificationRow>();
+    return row ? this.notificationFromRow(row) : null;
   }
 
   private async getWebhook(
@@ -2421,7 +2501,7 @@ export class D1DentLinkStore implements DentLinkStore {
       .prepare(`SELECT * FROM webhook_endpoints WHERE id = ? AND user_id = ?`)
       .bind(endpointId, userId)
       .first<WebhookRow>();
-    return row ? webhookFromRow(row) : null;
+    return row ? this.webhookFromRow(row) : null;
   }
 
   private async assertWebhookRateLimit(endpointId: EntityId, now: string): Promise<void> {
@@ -2461,7 +2541,19 @@ export class D1DentLinkStore implements DentLinkStore {
   }
 
   private async noteFromRow(row: NoteRow): Promise<Note> {
-    return this.toStoredNote(noteFromRow(row), await this.tagIdsForNote(row.user_id, row.id));
+    return this.toStoredNote(
+      await this.noteFromRowBase(row),
+      await this.tagIdsForNote(row.user_id, row.id)
+    );
+  }
+
+  private async noteFromRowBase(row: NoteRow): Promise<Note> {
+    return {
+      ...noteFromRow(row),
+      title: await this.decryptText(row.title),
+      body: await this.decryptText(row.body),
+      sourceUrl: await this.decryptNullableText(row.source_url)
+    };
   }
 
   private async toStoredNote(note: Note, tagIds: string[]): Promise<Note> {
@@ -2484,9 +2576,214 @@ export class D1DentLinkStore implements DentLinkStore {
         .prepare(`SELECT * FROM tags WHERE user_id = ? AND id = ?`)
         .bind(userId, tagId)
         .first<TagRow>();
-      if (row) tags.push(tagFromRow(row));
+      if (row) tags.push(await this.tagFromRow(row));
     }
     return tags;
+  }
+
+  private async folderFromRow(row: FolderRow): Promise<Folder> {
+    return { ...folderFromRow(row), name: await this.decryptText(row.name) };
+  }
+
+  private async tagFromRow(row: TagRow): Promise<Tag> {
+    return this.folderFromRow(row);
+  }
+
+  private async notificationFromRow(row: NotificationRow): Promise<Notification> {
+    return {
+      ...notificationFromRow(row),
+      title: await this.decryptText(row.title),
+      summary: await this.decryptText(row.summary),
+      body: await this.decryptText(row.body),
+      sourceLabel: await this.decryptText(row.source_label),
+      sourceUrl: await this.decryptNullableText(row.source_url),
+      email: await this.decryptJsonOrNull<Notification["email"]>(row.email_metadata_json ?? null),
+      rule: await this.decryptJsonOrNull<Notification["rule"]>(row.rule_metadata_json ?? null),
+      ai:
+        (await this.decryptJsonOrNull<Notification["ai"]>(row.ai_metadata_json ?? null)) ??
+        defaultNotificationAi()
+    };
+  }
+
+  private async connectorSourceRecordFromRow(
+    row: ConnectorSourceRecordRow
+  ): Promise<ConnectorSourceRecord> {
+    return {
+      id: row.id,
+      userId: row.user_id,
+      accountId: row.account_id,
+      connectorKey: row.connector_key,
+      sourceExternalId: row.source_external_id,
+      sourceType: row.source_type,
+      payloadHash: row.payload_hash,
+      normalizedPayload:
+        (await this.decryptJsonOrNull<Record<string, unknown>>(row.normalized_payload_json)) ?? {},
+      status: row.status,
+      receivedAt: row.received_at,
+      processedAt: row.processed_at,
+      processingReason: row.processing_reason,
+      errorMessage: await this.decryptNullableText(row.error_message),
+      version: row.version
+    };
+  }
+
+  private async connectorAccountFromRow(row: ConnectorAccountRow): Promise<ConnectorAccount> {
+    return {
+      id: row.id,
+      userId: row.user_id,
+      connectorKey: row.connector_key,
+      displayName: await this.decryptText(row.display_name),
+      status: row.status,
+      healthStatus: row.health_status,
+      syncStatus: row.sync_status,
+      settings:
+        (await this.decryptJsonOrNull<ConnectorAccount["settings"]>(row.settings_json)) ?? {},
+      credentialRef: row.credential_ref,
+      credentialStatus: row.credential_status,
+      syncCursor: row.sync_cursor,
+      lastSyncAt: row.last_sync_at,
+      nextSyncAt: row.next_sync_at,
+      lastHealthAt: row.last_health_at,
+      errorCode: row.error_code,
+      errorMessage: await this.decryptNullableText(row.error_message),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      version: row.version
+    };
+  }
+
+  private async connectorSyncAttemptFromRow(
+    row: ConnectorSyncAttemptRow
+  ): Promise<ConnectorSyncAttempt> {
+    return {
+      id: row.id,
+      userId: row.user_id,
+      accountId: row.account_id,
+      connectorKey: row.connector_key,
+      trigger: row.trigger,
+      engine: row.engine,
+      status: row.status,
+      startedAt: row.started_at,
+      completedAt: row.completed_at,
+      durationMs: row.duration_ms,
+      errorCode: row.error_code,
+      errorMessage: await this.decryptNullableText(row.error_message),
+      summary: await this.decryptJsonOrNull<ConnectorSyncAttempt["summary"]>(row.summary_json),
+      details:
+        (await this.decryptJsonOrNull<Record<string, unknown>>(row.details_json)) ??
+        {}
+    };
+  }
+
+  private async calendarEventFromRow(row: CalendarEventRow): Promise<CalendarEvent> {
+    return {
+      ...calendarEventFromRow(row),
+      calendarSummary: (await this.decryptNullableText(row.calendar_summary)) ?? "Calendar",
+      title: await this.decryptText(row.title),
+      description: await this.decryptText(row.description),
+      location: await this.decryptNullableText(row.location),
+      sourceUrl: await this.decryptNullableText(row.source_url)
+    };
+  }
+
+  private async calendarEventWithAnnotationFromRow(
+    row: CalendarEventRow & CalendarAnnotationSelectRow
+  ): Promise<CalendarEvent> {
+    const event = await this.calendarEventFromRow(row);
+    event.annotation = row.annotation_id
+      ? {
+          id: row.annotation_id,
+          userId: row.user_id,
+          eventId: row.id,
+          notes: await this.decryptText(row.annotation_notes ?? ""),
+          pinned: Boolean(row.annotation_pinned),
+          completed: Boolean(row.annotation_completed),
+          hidden: Boolean(row.annotation_hidden),
+          tagIds: parseTagIds(row.annotation_tag_ids_json),
+          tags: [],
+          version: row.annotation_version ?? 1,
+          createdAt: row.annotation_created_at ?? row.created_at,
+          updatedAt: row.annotation_updated_at ?? row.updated_at
+        }
+      : null;
+    return event;
+  }
+
+  private async calendarAnnotationFromRow(
+    row: CalendarAnnotationRow,
+    tags: Tag[]
+  ): Promise<CalendarEventAnnotation> {
+    return {
+      ...calendarAnnotationFromRow(row, tags),
+      notes: await this.decryptText(row.notes)
+    };
+  }
+
+  private async webhookFromRow(row: WebhookRow): Promise<WebhookEndpoint> {
+    return { ...webhookFromRow(row), name: await this.decryptText(row.name) };
+  }
+
+  private async historyFromRow(row: HistoryRow): Promise<NoteHistoryEvent> {
+    return {
+      id: row.id,
+      userId: row.user_id,
+      noteId: row.note_id,
+      action: row.action,
+      version: row.version,
+      snapshot:
+        (await this.decryptJsonOrNull<Note>(row.snapshot_json)) ??
+        (JSON.parse(row.snapshot_json) as Note),
+      createdAt: row.created_at
+    };
+  }
+
+  private async conflictFromRow(row: ConflictRow): Promise<NoteConflict> {
+    return {
+      id: row.id,
+      userId: row.user_id,
+      noteId: row.note_id,
+      expectedVersion: row.expected_version,
+      actualVersion: row.actual_version,
+      attemptedPatch:
+        (await this.decryptJsonOrNull<NotePatch>(row.attempted_patch_json)) ??
+        (JSON.parse(row.attempted_patch_json) as NotePatch),
+      serverNote:
+        (await this.decryptJsonOrNull<Note>(row.server_note_json)) ??
+        (JSON.parse(row.server_note_json) as Note),
+      status: row.status,
+      version: row.version,
+      createdAt: row.created_at,
+      resolvedAt: row.resolved_at,
+      resolution: row.resolution
+    };
+  }
+
+  private async encryptText(value: string): Promise<string> {
+    return (await this.contentEncryption.encryptString(value)) ?? "";
+  }
+
+  private async encryptNullableText(value: string | null): Promise<string | null> {
+    return this.contentEncryption.encryptString(value);
+  }
+
+  private async decryptText(value: string): Promise<string> {
+    return (await this.contentEncryption.decryptString(value)) ?? "";
+  }
+
+  private async decryptNullableText(value: string | null): Promise<string | null> {
+    return this.contentEncryption.decryptString(value);
+  }
+
+  private async encryptJson(value: unknown): Promise<string | null> {
+    return this.contentEncryption.encryptJson(value);
+  }
+
+  private async decryptJsonOrNull<T>(value: string | null): Promise<T | null> {
+    return this.contentEncryption.decryptJson<T>(value);
+  }
+
+  private async userEmailFromRow(row: Pick<UserRow, "email" | "encrypted_email">): Promise<string> {
+    return row.encrypted_email ? await this.decryptText(row.encrypted_email) : row.email;
   }
 
   private async getFolder(userId: EntityId, folderId: EntityId): Promise<Folder | null> {
@@ -2494,7 +2791,7 @@ export class D1DentLinkStore implements DentLinkStore {
       .prepare(`SELECT * FROM folders WHERE user_id = ? AND id = ?`)
       .bind(userId, folderId)
       .first<FolderRow>();
-    return row ? folderFromRow(row) : null;
+    return row ? this.folderFromRow(row) : null;
   }
 
   private async getTag(userId: EntityId, tagId: EntityId): Promise<Tag | null> {
@@ -2502,7 +2799,7 @@ export class D1DentLinkStore implements DentLinkStore {
       .prepare(`SELECT * FROM tags WHERE user_id = ? AND id = ?`)
       .bind(userId, tagId)
       .first<TagRow>();
-    return row ? tagFromRow(row) : null;
+    return row ? this.tagFromRow(row) : null;
   }
 
   private async assertFolder(
@@ -2580,15 +2877,15 @@ export class D1DentLinkStore implements DentLinkStore {
           serverNote.id,
           expectedVersion,
           serverNote.version,
-          JSON.stringify(attemptedPatch),
-          JSON.stringify(serverNote),
+          await this.encryptJson(attemptedPatch),
+          await this.encryptJson(serverNote),
           conflict.status,
           conflict.version,
           conflict.resolution,
           conflict.createdAt,
           conflict.resolvedAt
         ),
-      this.historyStatement(userId, serverNote, "conflict_created", now),
+      await this.historyStatement(userId, serverNote, "conflict_created", now),
       this.changeStatement(userId, "conflict", conflict.id, "upsert", {
         type: "conflict",
         op: "upsert",
@@ -2603,22 +2900,22 @@ export class D1DentLinkStore implements DentLinkStore {
       .prepare(`SELECT * FROM note_conflicts WHERE id = ? AND user_id = ?`)
       .bind(conflictId, userId)
       .first<ConflictRow>();
-    return row ? conflictFromRow(row) : null;
+    return row ? this.conflictFromRow(row) : null;
   }
 
-  private historyStatement(
+  private async historyStatement(
     userId: EntityId,
     note: Note,
     action: NoteHistoryEvent["action"],
     now: string
-  ): D1PreparedStatement {
+  ): Promise<D1PreparedStatement> {
     return this.db
       .prepare(
         `INSERT INTO note_history
          (id, user_id, note_id, action, version, snapshot_json, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`
       )
-      .bind(nextId("history"), userId, note.id, action, note.version, JSON.stringify(note), now);
+      .bind(nextId("history"), userId, note.id, action, note.version, await this.encryptJson(note), now);
   }
 
   private changeStatement(
@@ -2634,8 +2931,14 @@ export class D1DentLinkStore implements DentLinkStore {
       | "conflict",
     entityId: string,
     operation: "upsert" | "delete",
-    payload: SyncPayload
+    _payload: SyncPayload
   ): D1PreparedStatement {
+    const payload: CompactSyncPayload = {
+      type: entityType,
+      op: operation,
+      id: entityId,
+      userId
+    };
     return this.db
       .prepare(
         `INSERT INTO sync_changes (user_id, entity_type, entity_id, operation, payload_json, created_at)
@@ -2649,6 +2952,73 @@ export class D1DentLinkStore implements DentLinkStore {
         JSON.stringify(payload),
         new Date().toISOString()
       );
+  }
+
+  private async syncChangesFromRows(userId: EntityId, rows: SyncRow[]): Promise<SyncChange[]> {
+    const changes: SyncChange[] = [];
+    for (const row of rows) {
+      const parsed = parseCompactSyncPayload(row);
+      const change = await this.syncChangeFromCompactPayload(userId, parsed, String(row.cursor));
+      if (change) changes.push(change);
+    }
+    return changes;
+  }
+
+  private async syncChangeFromCompactPayload(
+    userId: EntityId,
+    payload: CompactSyncPayload,
+    cursor: string
+  ): Promise<SyncChange | null> {
+    if (payload.op === "delete") {
+      return deleteSyncChange(payload, cursor);
+    }
+    if (payload.type === "note") {
+      const note = await this.getNoteForSync(userId, payload.id);
+      return note
+        ? { type: "note", op: "upsert", note, cursor }
+        : { type: "note", op: "delete", id: payload.id, userId, cursor };
+    }
+    if (payload.type === "folder") {
+      const folder = await this.getFolder(userId, payload.id);
+      return folder
+        ? { type: "folder", op: "upsert", folder, cursor }
+        : { type: "folder", op: "delete", id: payload.id, userId, cursor };
+    }
+    if (payload.type === "tag") {
+      const tag = await this.getTag(userId, payload.id);
+      return tag
+        ? { type: "tag", op: "upsert", tag, cursor }
+        : { type: "tag", op: "delete", id: payload.id, userId, cursor };
+    }
+    if (payload.type === "notification") {
+      const notification = await this.getNotificationForSync(userId, payload.id);
+      return notification
+        ? { type: "notification", op: "upsert", notification, cursor }
+        : { type: "notification", op: "delete", id: payload.id, userId, cursor };
+    }
+    if (payload.type === "calendar_event") {
+      const event = await this.getCalendarEvent(userId, payload.id);
+      return event
+        ? { type: "calendar_event", op: "upsert", event, cursor }
+        : { type: "calendar_event", op: "delete", id: payload.id, userId, cursor };
+    }
+    if (payload.type === "webhook") {
+      const webhook = await this.getWebhook(userId, payload.id);
+      return webhook && webhook.enabled
+        ? { type: "webhook", op: "upsert", webhook, cursor }
+        : { type: "webhook", op: "delete", id: payload.id, userId, cursor };
+    }
+    if (payload.type === "connector_account") {
+      const account = await this.getConnectorAccount(userId, payload.id);
+      return account && account.status !== "deleted"
+        ? { type: "connector_account", op: "upsert", account, cursor }
+        : { type: "connector_account", op: "delete", id: payload.id, userId, cursor };
+    }
+    if (payload.type === "conflict") {
+      const conflict = await this.getConflict(userId, payload.id);
+      return conflict ? { type: "conflict", op: "upsert", conflict, cursor } : null;
+    }
+    return null;
   }
 
   private async all<T>(sql: string, values: Primitive[] = []): Promise<T[]> {
@@ -3028,12 +3398,31 @@ function compareNotifications(left: Notification, right: Notification): number {
   );
 }
 
+function compareCalendarEvents(left: CalendarEvent, right: CalendarEvent): number {
+  return left.startAt.localeCompare(right.startAt) || left.title.localeCompare(right.title);
+}
+
+function compareConnectorAccounts(left: ConnectorAccount, right: ConnectorAccount): number {
+  return left.displayName.localeCompare(right.displayName);
+}
+
+function decryptedNoteMatchesSearch(note: Note, search: string): boolean {
+  const normalized = search.trim().toLowerCase();
+  if (!normalized) return true;
+  return `${note.title} ${note.body}`.toLowerCase().includes(normalized);
+}
+
 function nextId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
 function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
+}
+
+async function hashStoredEmail(email: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(email));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function bool(value: boolean): number {
@@ -3130,6 +3519,64 @@ function parseTagIds(value: string | null): string[] {
   } catch {
     return [];
   }
+}
+
+function parseCompactSyncPayload(row: SyncRow): CompactSyncPayload {
+  try {
+    const parsed = JSON.parse(row.payload_json) as Partial<CompactSyncPayload>;
+    if (
+      parsed.type === row.entity_type &&
+      parsed.op === row.operation &&
+      typeof parsed.id === "string" &&
+      typeof parsed.userId === "string"
+    ) {
+      return {
+        type: parsed.type,
+        op: parsed.op,
+        id: parsed.id,
+        userId: parsed.userId
+      };
+    }
+  } catch {
+    // Older rows may contain legacy full payloads; fall back to indexed columns below.
+  }
+  return {
+    type: row.entity_type,
+    op: row.operation,
+    id: row.entity_id,
+    userId: row.user_id
+  };
+}
+
+function deleteSyncChange(payload: CompactSyncPayload, cursor: string): SyncChange | null {
+  if (payload.type === "note") {
+    return { type: "note", op: "delete", id: payload.id, userId: payload.userId, cursor };
+  }
+  if (payload.type === "folder") {
+    return { type: "folder", op: "delete", id: payload.id, userId: payload.userId, cursor };
+  }
+  if (payload.type === "tag") {
+    return { type: "tag", op: "delete", id: payload.id, userId: payload.userId, cursor };
+  }
+  if (payload.type === "notification") {
+    return { type: "notification", op: "delete", id: payload.id, userId: payload.userId, cursor };
+  }
+  if (payload.type === "calendar_event") {
+    return { type: "calendar_event", op: "delete", id: payload.id, userId: payload.userId, cursor };
+  }
+  if (payload.type === "webhook") {
+    return { type: "webhook", op: "delete", id: payload.id, userId: payload.userId, cursor };
+  }
+  if (payload.type === "connector_account") {
+    return {
+      type: "connector_account",
+      op: "delete",
+      id: payload.id,
+      userId: payload.userId,
+      cursor
+    };
+  }
+  return null;
 }
 
 function mapConstraintError(error: unknown, code: string, message: string): StoreError {

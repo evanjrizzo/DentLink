@@ -2,9 +2,11 @@
 
 Architecture Decision Records document long-lived decisions that shape DentLink implementation.
 
-Each ADR includes title, status, date, context, decision, consequences, and alternatives considered. Status values are Proposed, Accepted, Superseded, or Rejected.
+Each ADR includes title, status, date, context, decision, consequences, and alternatives considered.
+Status values are Proposed, Accepted, Superseded, or Rejected.
 
-Do not rewrite accepted history. If a decision changes, create a new ADR and mark the older ADR as superseded.
+Do not rewrite accepted history. If a decision changes, create a new ADR and mark the older ADR as
+superseded.
 
 ## Initial ADRs
 
@@ -15,7 +17,9 @@ Do not rewrite accepted history. If a decision changes, create a new ADR and mar
 - `0005-shared-ui-platform-capabilities.md`: Shared web UI plus platform capability layers
 - `0006-optional-provider-neutral-ai.md`: Optional provider-neutral AI
 - `0007-controlled-gmail-imap-ingestion.md`: Controlled Gmail IMAP ingestion
-- `0008-contextual-actions-adaptive-surfaces.md`: Contextual notification actions and adaptive surfaces
+- `0008-contextual-actions-adaptive-surfaces.md`: Contextual notification actions and adaptive
+  surfaces
 - `0009-queued-optimistic-mutations.md`: Queued optimistic mutations
 - `0010-timezone-appearance-ai-preferences.md`: Timezone, appearance, and AI preference ownership
 - `0011-android-mobile-widget-tabs.md`: Android mobile app and tabbed widget
+- `0012-zero-knowledge-user-data-archive.md`: Zero-knowledge user data archive

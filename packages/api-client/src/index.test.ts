@@ -168,4 +168,117 @@ describe("@dentlink/api-client", () => {
       client.askAssistant({ message: "What is this week?", timezone: "America/New_York" })
     ).resolves.toMatchObject({ answer: "You have one event this week." });
   });
+
+  it("uses archive endpoints for wrapped account keys and encrypted objects", async () => {
+    const seen: Array<{ url: string; method: string; body: string | null }> = [];
+    const client = new DentLinkApiClient({
+      token: "session-token",
+      fetchImpl: async (url, init) => {
+        seen.push({
+          url: String(url),
+          method: init?.method ?? "GET",
+          body: typeof init?.body === "string" ? init.body : null
+        });
+        if (url === "/v1/archive/key-wrappers" && init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              wrapper: {
+                id: "wrapper_1",
+                keyId: "account-archive-v1",
+                wrapperType: "recovery-secret",
+                wrappingAlgorithm: "PBKDF2-SHA-256+A256KW",
+                wrappedKeyB64: "d3JhcHBlZA==",
+                saltB64: "c2FsdA==",
+                publicMetadata: {},
+                createdAt: "2026-07-29T00:00:00.000Z",
+                updatedAt: "2026-07-29T00:00:00.000Z"
+              }
+            }),
+            { headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url === "/v1/archive/objects" && init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              object: {
+                id: "archive_object_1",
+                objectType: "notification",
+                sourceEntityType: "notification",
+                sourceEntityId: "notification_1",
+                encryptionAlgorithm: "AES-GCM-256",
+                keyId: "account-archive-v1",
+                nonceB64: "bm9uY2U=",
+                ciphertextSha256B64: "aGFzaA==",
+                sizeBytes: 64,
+                verifiedAt: null,
+                publicMetadata: {},
+                createdAt: "2026-07-29T00:00:00.000Z",
+                updatedAt: "2026-07-29T00:00:00.000Z"
+              }
+            }),
+            { headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url === "/v1/archive/objects/archive_object_1/verify" && init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              object: {
+                id: "archive_object_1",
+                objectType: "notification",
+                sourceEntityType: "notification",
+                sourceEntityId: "notification_1",
+                encryptionAlgorithm: "AES-GCM-256",
+                keyId: "account-archive-v1",
+                nonceB64: "bm9uY2U=",
+                ciphertextSha256B64: "aGFzaA==",
+                sizeBytes: 64,
+                verifiedAt: "2026-07-29T00:00:00.000Z",
+                publicMetadata: {},
+                createdAt: "2026-07-29T00:00:00.000Z",
+                updatedAt: "2026-07-29T00:00:00.000Z"
+              }
+            }),
+            { headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response(JSON.stringify({ wrappers: [], objects: [] }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    });
+
+    await expect(
+      client.createArchiveKeyWrapper({
+        keyId: "account-archive-v1",
+        wrapperType: "recovery-secret",
+        wrappingAlgorithm: "PBKDF2-SHA-256+A256KW",
+        wrappedKeyB64: "d3JhcHBlZA==",
+        saltB64: "c2FsdA=="
+      })
+    ).resolves.toMatchObject({ wrapper: { keyId: "account-archive-v1" } });
+    await expect(
+      client.createArchiveObject({
+        objectType: "notification",
+        sourceEntityType: "notification",
+        sourceEntityId: "notification_1",
+        encryptionAlgorithm: "AES-GCM-256",
+        keyId: "account-archive-v1",
+        nonceB64: "bm9uY2U=",
+        ciphertextSha256B64: "aGFzaA==",
+        ciphertextB64: "Y2lwaGVydGV4dA=="
+      })
+    ).resolves.toMatchObject({ object: { id: "archive_object_1" } });
+    await expect(client.verifyArchiveObject("archive_object_1")).resolves.toMatchObject({
+      object: { id: "archive_object_1", verifiedAt: "2026-07-29T00:00:00.000Z" }
+    });
+
+    expect(seen.map((request) => `${request.method} ${request.url}`)).toEqual([
+      "POST /v1/archive/key-wrappers",
+      "POST /v1/archive/objects",
+      "POST /v1/archive/objects/archive_object_1/verify"
+    ]);
+    expect(
+      seen.every((request) => request.body === null || !request.body.includes("plaintext"))
+    ).toBe(true);
+  });
 });

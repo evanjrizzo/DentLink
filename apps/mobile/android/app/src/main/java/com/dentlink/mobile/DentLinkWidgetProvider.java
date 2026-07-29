@@ -18,6 +18,7 @@ public final class DentLinkWidgetProvider extends AppWidgetProvider {
     private static final String TAG = "DentLinkWidget";
     static final String ACTION_SWITCH_TAB = "com.dentlink.mobile.widget.SWITCH_TAB";
     static final String ACTION_REFRESH = "com.dentlink.mobile.widget.REFRESH";
+    static final String ACTION_AUTO_REFRESH = "com.dentlink.mobile.widget.AUTO_REFRESH";
     static final String ACTION_COMPLETE_NOTE = "com.dentlink.mobile.widget.COMPLETE_NOTE";
     static final String ACTION_DISMISS_EMAIL = "com.dentlink.mobile.widget.DISMISS_EMAIL";
     static final String ACTION_NOOP = "com.dentlink.mobile.widget.NOOP";
@@ -61,6 +62,9 @@ public final class DentLinkWidgetProvider extends AppWidgetProvider {
     @Override
     public void onReceive(Context context, Intent intent) {
         String action = intent.getAction();
+        if (!ACTION_NOOP.equals(action)) {
+            scheduleAutoRefresh(context);
+        }
         Log.d(
                 TAG,
                 "onReceive action="
@@ -80,6 +84,10 @@ public final class DentLinkWidgetProvider extends AppWidgetProvider {
             return;
         } else if (ACTION_REFRESH.equals(action)) {
             DentLinkWidgetStore.markRefreshRequested(context);
+            updateAllWidgets(context, true);
+            syncInBackground(context);
+            return;
+        } else if (ACTION_AUTO_REFRESH.equals(action)) {
             updateAllWidgets(context, true);
             syncInBackground(context);
             return;
@@ -147,13 +155,9 @@ public final class DentLinkWidgetProvider extends AppWidgetProvider {
                         + state.emails.size());
         RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.dentlink_widget);
 
-        views.setOnClickPendingIntent(R.id.widget_root, noOpIntent(context, 299));
         views.setImageViewResource(R.id.widget_logo, R.drawable.dentlink_dark);
         views.setTextViewText(R.id.widget_status, state.statusText);
-        views.setOnClickPendingIntent(R.id.widget_header, noOpIntent(context, 300));
-        views.setOnClickPendingIntent(R.id.widget_logo, noOpIntent(context, 301));
-        views.setOnClickPendingIntent(R.id.widget_status, noOpIntent(context, 302));
-        views.setOnClickPendingIntent(R.id.widget_empty, noOpIntent(context, 304));
+        views.setOnClickPendingIntent(R.id.widget_logo, openAppIntent(context));
         views.setOnClickPendingIntent(R.id.widget_refresh, refreshIntent(context));
         bindBottomBar(context, views, state);
 
@@ -178,6 +182,8 @@ public final class DentLinkWidgetProvider extends AppWidgetProvider {
                 context,
                 views,
                 R.id.widget_tab_calendar_v2,
+                R.id.widget_tab_calendar_icon,
+                R.id.widget_tab_calendar_badge,
                 DentLinkWidgetStore.TAB_CALENDAR,
                 state.activeTab,
                 state.hasNewCalendar);
@@ -185,6 +191,8 @@ public final class DentLinkWidgetProvider extends AppWidgetProvider {
                 context,
                 views,
                 R.id.widget_tab_notes_v2,
+                R.id.widget_tab_notes_icon,
+                R.id.widget_tab_notes_badge,
                 DentLinkWidgetStore.TAB_NOTES,
                 state.activeTab,
                 state.hasNewNotes);
@@ -192,10 +200,15 @@ public final class DentLinkWidgetProvider extends AppWidgetProvider {
                 context,
                 views,
                 R.id.widget_tab_emails_v2,
+                R.id.widget_tab_emails_icon,
+                R.id.widget_tab_emails_badge,
                 DentLinkWidgetStore.TAB_EMAILS,
                 state.activeTab,
                 state.hasNewEmails);
-        views.setOnClickPendingIntent(R.id.widget_create_note_zone, noOpIntent(context, 310));
+        int iconColor = context.getColor(R.color.dentlink_text_primary);
+        views.setInt(R.id.widget_create_note_zone, "setBackgroundResource", R.drawable.widget_tab_unselected);
+        views.setInt(R.id.widget_create_note, "setColorFilter", iconColor);
+        views.setOnClickPendingIntent(R.id.widget_create_note_zone, createNoteIntent(context));
         views.setOnClickPendingIntent(R.id.widget_create_note, createNoteIntent(context));
     }
 
@@ -203,6 +216,8 @@ public final class DentLinkWidgetProvider extends AppWidgetProvider {
             Context context,
             RemoteViews views,
             int tabId,
+            int iconId,
+            int badgeId,
             String tab,
             String activeTab,
             boolean hasNewContent) {
@@ -212,13 +227,15 @@ public final class DentLinkWidgetProvider extends AppWidgetProvider {
                         selected
                                 ? R.color.dentlink_accent_contrast
                                 : R.color.dentlink_text_primary);
-        views.setInt(tabId, "setColorFilter", iconColor);
+        views.setInt(iconId, "setColorFilter", iconColor);
         views.setInt(
                 tabId,
                 "setBackgroundResource",
                 selected ? R.drawable.widget_tab_selected : R.drawable.widget_tab_unselected);
+        views.setViewVisibility(badgeId, hasNewContent ? View.VISIBLE : View.GONE);
         PendingIntent intent = switchTabIntent(context, tab);
         views.setOnClickPendingIntent(tabId, intent);
+        views.setOnClickPendingIntent(iconId, intent);
     }
 
     private static PendingIntent switchTabIntent(Context context, String tab) {
@@ -248,6 +265,19 @@ public final class DentLinkWidgetProvider extends AppWidgetProvider {
                 PendingIntent.FLAG_UPDATE_CURRENT | immutableFlag());
     }
 
+    private static PendingIntent autoRefreshIntent(Context context) {
+        Intent intent =
+                new Intent(context, DentLinkWidgetProvider.class)
+                        .setAction(ACTION_AUTO_REFRESH)
+                        .setData(Uri.parse("dentlink://widget/auto-refresh"))
+                        .putExtra(EXTRA_SOURCE, "auto_refresh");
+        return PendingIntent.getBroadcast(
+                context,
+                201,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | immutableFlag());
+    }
+
     private static int tabOrdinal(String tab) {
         if (DentLinkWidgetStore.TAB_NOTES.equals(tab)) return 2;
         if (DentLinkWidgetStore.TAB_EMAILS.equals(tab)) return 3;
@@ -259,6 +289,13 @@ public final class DentLinkWidgetProvider extends AppWidgetProvider {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         return PendingIntent.getActivity(
                 context, 40, intent, PendingIntent.FLAG_UPDATE_CURRENT | immutableFlag());
+    }
+
+    private static PendingIntent openAppIntent(Context context) {
+        Intent intent = new Intent(context, MainActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        return PendingIntent.getActivity(
+                context, 41, intent, PendingIntent.FLAG_UPDATE_CURRENT | immutableFlag());
     }
 
     private static PendingIntent noOpIntent(Context context, int requestCode) {
@@ -315,16 +352,20 @@ public final class DentLinkWidgetProvider extends AppWidgetProvider {
     }
 
     private static void syncInBackground(Context context) {
-        if (DentLinkWidgetStore.sessionToken(context).isEmpty()) return;
+        if (DentLinkWidgetStore.sessionToken(context).isEmpty()) {
+            scheduleAutoRefresh(context);
+            return;
+        }
         Context appContext = context.getApplicationContext();
         new Thread(
                         () -> {
                             try {
-                                DentLinkApiSync.syncWidgetCache(appContext);
+                                DentLinkApiSync.refreshWidgetCache(appContext);
                             } catch (Exception error) {
                                 DentLinkWidgetStore.saveSyncError(appContext, error.getMessage());
                             }
                             updateAllWidgets(appContext);
+                            scheduleAutoRefresh(appContext);
                         })
                 .start();
     }
@@ -360,18 +401,26 @@ public final class DentLinkWidgetProvider extends AppWidgetProvider {
     private static void scheduleAutoRefresh(Context context) {
         AlarmManager alarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
         if (alarmManager == null) return;
-        long first = System.currentTimeMillis() + REFRESH_INTERVAL_MS;
-        alarmManager.setInexactRepeating(
-                AlarmManager.RTC,
-                first,
-                REFRESH_INTERVAL_MS,
-                refreshIntent(context));
+        long next = System.currentTimeMillis() + REFRESH_INTERVAL_MS;
+        PendingIntent intent = autoRefreshIntent(context);
+        alarmManager.cancel(intent);
+        alarmManager.cancel(refreshIntent(context));
+        if (android.os.Build.VERSION.SDK_INT >= 23) {
+            try {
+                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, intent);
+            } catch (SecurityException exactAlarmDenied) {
+                alarmManager.setWindow(AlarmManager.RTC_WAKEUP, next, REFRESH_INTERVAL_MS / 2, intent);
+            }
+        } else {
+            alarmManager.set(AlarmManager.RTC_WAKEUP, next, intent);
+        }
     }
 
     private static void cancelAutoRefresh(Context context) {
         AlarmManager alarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
         if (alarmManager != null) {
             alarmManager.cancel(refreshIntent(context));
+            alarmManager.cancel(autoRefreshIntent(context));
         }
     }
 

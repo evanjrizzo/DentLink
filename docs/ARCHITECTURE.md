@@ -26,10 +26,11 @@ tokens.
 Platform layers: Tauri desktop shell, native Android widget, Android services, and trusted desktop
 agent.
 
-The Android mobile app is a normal DentLink client. It stores session material in Android secure
-storage, keeps a local cache, queues optimistic mutations, and reconciles through the versioned API
-and cursor sync. The Android widget renders native UI backed by the mobile client's authenticated
-cache and WorkManager-style refresh/mutation jobs. Its first product surface is a three-tab widget:
+The Android mobile app is a normal DentLink client. Its current app shell is a temporary WebView
+wrapper around the deployed DentLink web client so mobile app navigation can converge with the web
+surface before a fuller native app is rebuilt. The Android widget remains native UI backed by the
+mobile client's authenticated cache and WorkManager-style refresh/mutation jobs. Its first product
+surface is a three-tab widget:
 `Calendar` for calendar events, `Notes` for notes, and `Emails` for email notifications. The widget
 uses shared design tokens, logo assets, and navigation icon shapes, and refreshes cached content
 every five minutes.

@@ -576,8 +576,8 @@ export async function syncGmailAccount(
         latest.id,
         latest.version,
         {
-          status: isGmailAuthFailure(error) ? "error" : "connected",
-          healthStatus: isGmailAuthFailure(error) ? "error" : "degraded",
+          status: "connected",
+          healthStatus: "degraded",
           syncStatus: "idle",
           lastHealthAt: now,
           settings: withGmailOperationFailure(latest.settings, "incremental", now, error),
@@ -717,8 +717,8 @@ export async function backfillGmailAccount(
         latest.id,
         latest.version,
         {
-          status: isGmailAuthFailure(error) ? "error" : "connected",
-          healthStatus: isGmailAuthFailure(error) ? "error" : "degraded",
+          status: "connected",
+          healthStatus: "degraded",
           syncStatus: "idle",
           lastHealthAt: now,
           settings: withGmailOperationFailure(latest.settings, "backfill", now, error),
@@ -972,7 +972,7 @@ export async function syncConnectedGmailAccounts(
   let failed = 0;
   let skipped = 0;
   for (const account of accounts) {
-    if (account.status !== "connected") {
+    if (!shouldAttemptGmailSync(account)) {
       skipped += 1;
       continue;
     }
@@ -1018,6 +1018,15 @@ export async function syncConnectedGmailAccounts(
     }
   }
   return { attempted, succeeded, failed, skipped };
+}
+
+function shouldAttemptGmailSync(account: ConnectorAccount): boolean {
+  if (account.status === "connected") return true;
+  return (
+    account.status === "error" &&
+    account.connectorKey === GMAIL_CONNECTOR_KEY &&
+    account.credentialStatus === "configured"
+  );
 }
 
 function gmailSyncStaleMs(trigger: ConnectorSyncAttemptTrigger): number {

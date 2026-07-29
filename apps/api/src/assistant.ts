@@ -6,6 +6,7 @@ import {
   type AssistantAiClient
 } from "../../../packages/ai/src";
 import type {
+  AssistantArchivedNotificationContext,
   AssistantChatResponse,
   AssistantChatSource,
   CalendarEvent,
@@ -18,6 +19,7 @@ import type {
 import type { DentLinkStore } from "./storage";
 
 const DEFAULT_RECENT_CONTEXT_LIMIT = 5;
+const MAX_CLIENT_ARCHIVED_NOTIFICATIONS = 8;
 
 export type AssistantRuntimeEnv = {
   OPENAI_API_KEY?: string;
@@ -57,6 +59,9 @@ export async function answerAssistantQuestion(
   }
   const accounts = (await store.listConnectorAccounts(userId)).accounts;
   const notificationContext = await collectNotificationContext(store, userId, request.message, env);
+  const archivedNotificationContext = collectClientArchivedNotificationContext(
+    request.archivedNotifications
+  );
   const emailContext = await collectEmailContext(store, userId, accounts, request.message, env);
   const calendarContext = await collectCalendarContext(store, userId, request.timezone, now);
   const client =
@@ -69,15 +74,21 @@ export async function answerAssistantQuestion(
       now,
       context: {
         help: dentLinkAssistantHelp(),
-        notifications: notificationContext.notifications,
+        notifications: [
+          ...notificationContext.notifications,
+          ...archivedNotificationContext.notifications
+        ],
         emails: emailContext.emails,
         calendarEvents: calendarContext.events
       }
     });
     const sourcesById = new Map<string, AssistantChatSource>(
-      [...notificationContext.sources, ...emailContext.sources, ...calendarContext.sources].map(
-        (source) => [source.id, source]
-      )
+      [
+        ...notificationContext.sources,
+        ...archivedNotificationContext.sources,
+        ...emailContext.sources,
+        ...calendarContext.sources
+      ].map((source) => [source.id, source])
     );
     const sources = result.sourceIds
       .map((sourceId) => sourcesById.get(sourceId))
@@ -106,7 +117,11 @@ export async function answerAssistantQuestion(
   }
 }
 
-function parseAssistantRequest(value: unknown): { message: string; timezone: string } {
+function parseAssistantRequest(value: unknown): {
+  message: string;
+  timezone: string;
+  archivedNotifications: AssistantArchivedNotificationContext[];
+} {
   if (!value || typeof value !== "object") {
     throw new AssistantError("invalid_assistant_request", "Assistant request is invalid.", 400);
   }
@@ -124,7 +139,43 @@ function parseAssistantRequest(value: unknown): { message: string; timezone: str
   }
   const timezone =
     typeof object.timezone === "string" && validTimezone(object.timezone) ? object.timezone : "UTC";
-  return { message, timezone };
+  return {
+    message,
+    timezone,
+    archivedNotifications: parseArchivedNotificationContext(object.archivedNotifications)
+  };
+}
+
+function parseArchivedNotificationContext(value: unknown): AssistantArchivedNotificationContext[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(0, MAX_CLIENT_ARCHIVED_NOTIFICATIONS)
+    .map((item) => parseArchivedNotificationItem(item))
+    .filter((item): item is AssistantArchivedNotificationContext => Boolean(item));
+}
+
+function parseArchivedNotificationItem(value: unknown): AssistantArchivedNotificationContext | null {
+  if (!value || typeof value !== "object") return null;
+  const object = value as Record<string, unknown>;
+  const id = boundedString(object.id, 160);
+  const title = boundedString(object.title, 240);
+  if (!id || !title) return null;
+  const createdAt = isoStringOrEmpty(object.createdAt);
+  const updatedAt = isoStringOrEmpty(object.updatedAt);
+  const sourceTimestamp = isoStringOrEmpty(object.sourceTimestamp) || createdAt || updatedAt;
+  return {
+    id,
+    title,
+    summary: boundedString(object.summary, 600),
+    body: boundedString(object.body, 1200),
+    sourceLabel: boundedString(object.sourceLabel, 120) || "Archive",
+    severity: notificationSeverity(object.severity),
+    status: notificationStatus(object.status),
+    createdAt,
+    updatedAt: updatedAt || createdAt,
+    sourceTimestamp,
+    sourceUrl: nullableUrlString(object.sourceUrl)
+  };
 }
 
 function assistantConfig(env: AssistantRuntimeEnv): {
@@ -238,6 +289,50 @@ async function collectNotificationContext(
       sourceTimestamp: timestampForNotification(notification),
       sourceUrl: notification.sourceUrl
     }));
+  return {
+    notifications,
+    sources: notifications.map((notification) => ({
+      id: notification.id,
+      kind: "notification",
+      title: notification.title,
+      subtitle: `${notification.sourceLabel} - ${notification.status}`,
+      timestamp: notification.sourceTimestamp,
+      sourceUrl: notification.sourceUrl
+    }))
+  };
+}
+
+function collectClientArchivedNotificationContext(
+  archivedNotifications: AssistantArchivedNotificationContext[]
+): {
+  notifications: Array<{
+    id: string;
+    title: string;
+    summary: string;
+    body: string;
+    sourceLabel: string;
+    severity: string;
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+    sourceTimestamp: string;
+    sourceUrl: string | null;
+  }>;
+  sources: AssistantChatSource[];
+} {
+  const notifications = archivedNotifications.map((notification) => ({
+    id: archiveSourceId(notification.id),
+    title: notification.title,
+    summary: notification.summary,
+    body: notification.body,
+    sourceLabel: `Archive - ${notification.sourceLabel}`,
+    severity: notification.severity,
+    status: notification.status,
+    createdAt: notification.createdAt,
+    updatedAt: notification.updatedAt,
+    sourceTimestamp: notification.sourceTimestamp,
+    sourceUrl: notification.sourceUrl
+  }));
   return {
     notifications,
     sources: notifications.map((notification) => ({
@@ -525,6 +620,37 @@ function timestampForEmail(record: ConnectorSourceRecord): string {
 function stringField(payload: Record<string, unknown>, key: string): string {
   const value = payload[key];
   return typeof value === "string" ? value : "";
+}
+
+function boundedString(value: unknown, maxLength: number): string {
+  return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
+}
+
+function isoStringOrEmpty(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  return Number.isFinite(Date.parse(trimmed)) ? trimmed : "";
+}
+
+function nullableUrlString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, 1000);
+}
+
+function notificationSeverity(value: unknown): Notification["severity"] {
+  return value === "low" || value === "medium" || value === "high" ? value : "medium";
+}
+
+function notificationStatus(value: unknown): Notification["status"] {
+  return value === "active" || value === "done" || value === "dismissed" || value === "deleted"
+    ? value
+    : "done";
+}
+
+function archiveSourceId(notificationId: string): string {
+  return `archive:${notificationId}`;
 }
 
 function boundedInteger(

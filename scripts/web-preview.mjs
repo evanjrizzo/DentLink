@@ -10,7 +10,7 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const distDir = join(root, "apps", "web", "dist");
 const apiBaseUrl = process.env.DENTLINK_PREVIEW_API_BASE_URL?.replace(/\/$/, "");
 const pagesProject = process.env.DENTLINK_PREVIEW_PAGES_PROJECT;
-const pagesBranch = process.env.DENTLINK_PREVIEW_PAGES_BRANCH ?? "development";
+const pagesBranch = process.env.DENTLINK_PREVIEW_PAGES_BRANCH ?? "main";
 
 if (!["build", "verify", "deploy"].includes(command)) {
   fail("Usage: node scripts/web-preview.mjs <build|verify|deploy>");

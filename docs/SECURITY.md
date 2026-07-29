@@ -34,7 +34,8 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
 ## Sessions
 
 - Session tokens are generated from 32 cryptographically random bytes.
-- Session tokens expire after 30 days in Milestone 1.
+- Session tokens use a 30-day sliding expiry: successful authenticated API use renews the session,
+  while inactive sessions still expire and logout remains revocable.
 - Logout removes the server-side session hash, so the prior bearer token cannot be reused.
 - `GET /v1/auth/session` confirms identity without echoing the raw bearer token.
 - The D1 adapter stores only token hashes in `sessions.token_hash`; raw bearer tokens are not
@@ -68,6 +69,20 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   during reconnect or a controlled maintenance task.
 - Gmail OAuth state values are high-entropy random values. Only SHA-256 state hashes are stored
   server-side, and state records expire after 10 minutes and are consumed once.
+- Active D1 user-content fields are encrypted at rest with AES-GCM when
+  `DENTLINK_CONTENT_ENCRYPTION_KEY` or `DENTLINK_CONTENT_ENCRYPTION_KEY_V2` is configured. This
+  covers user email addresses, note text, notification text and safe metadata JSON, folder/tag
+  names, connector display/settings/error text, normalized connector payload JSON, sync-attempt
+  JSON, calendar text fields, annotation notes, note history/conflict snapshots, preferences, and
+  webhook names. User email lookup stores a SHA-256 normalized email hash plus encrypted email.
+- Plaintext may exist transiently inside the API runtime while serving an authenticated request,
+  connector sync, assistant request, or maintenance backfill, but user-content plaintext must not be
+  written to D1. Preview and production set `DENTLINK_REQUIRE_CONTENT_ENCRYPTION=true`, so the D1
+  adapter fails closed if no content key is bound.
+- Content-encryption backfill runs only through a disabled-by-default maintenance path gated by
+  `DENTLINK_CONTENT_ENCRYPTION_BACKFILL_ENABLED=true` and a Worker secret maintenance token. It
+  uses the Worker-bound content key in-process and returns aggregate counts only; it must be turned
+  off after a migration/backfill run.
 
 ## Webhooks and source content
 
@@ -132,6 +147,11 @@ payloads, secret leakage, unauthorized local commands, injection, and prompt inj
   data, or connector diagnostics. Source content is treated as untrusted prompt context, and
   assistant output is not allowed to mutate Gmail, Google Calendar, notifications, notes, connector
   accounts, or provider state.
+- Encrypted archive objects remain zero-knowledge to the backend. When the browser has the user's
+  account archive recovery material, it may locally decrypt a small number of matching archived
+  notifications and include bounded snippets in a single `/v1/assistant/chat` request. The backend
+  validates caps, treats that text as client-provided untrusted context, and still cannot fetch,
+  unwrap, or decrypt archive objects by itself.
 - Milestone 4 Google Calendar synchronization uses the read-only Calendar scope, stores normalized
   event metadata and provider identifiers, and does not create, edit, delete, RSVP to, or manage
   attendees on Google Calendar events. Calendar refresh tokens use the same AES-GCM encrypted

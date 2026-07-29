@@ -27,6 +27,7 @@
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
                 <action android:name="com.dentlink.mobile.widget.SWITCH_TAB" />
                 <action android:name="com.dentlink.mobile.widget.REFRESH" />
+                <action android:name="com.dentlink.mobile.widget.AUTO_REFRESH" />
                 <action android:name="com.dentlink.mobile.widget.COMPLETE_NOTE" />
                 <action android:name="com.dentlink.mobile.widget.DISMISS_EMAIL" />
                 <action android:name="com.dentlink.mobile.widget.NOOP" />

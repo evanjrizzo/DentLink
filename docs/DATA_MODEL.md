@@ -331,3 +331,38 @@ rebuildable `sync_changes` cursor log to 10,000 recent rows and installs a trigg
 tail as calendar/account churn creates new rows. The scheduled Worker cron also runs the same D1
 maintenance thresholds, so cleanup continues even when churn comes from routes that do not hit the
 insert trigger frequently.
+
+`migrations/0015_compact_sync_changes_payloads.sql` converts historical `sync_changes.payload_json`
+from full entity snapshots into compact invalidation envelopes containing only type, operation,
+entity ID, and user ID. New D1 writes use the same compact payload shape. `/v1/sync` hydrates live
+upsert responses from the authoritative user-scoped tables, preserving client response shape without
+using `sync_changes` as a user-data archive.
+
+Active D1 user-content fields are encrypted at rest by the D1 adapter with `dlenc:v1.` AES-GCM
+string envelopes or JSON wrappers containing `__dentlinkEncrypted`. `users.email` is now a
+normalized-email SHA-256 lookup hash for new/backfilled rows, with the display email stored in
+`users.encrypted_email`. Reads decrypt inside the Worker and keep the existing API response shape.
+Text search over encrypted note fields falls back to authenticated post-decrypt filtering in the D1
+adapter.
+
+The content-encryption maintenance backfill is idempotent and bounded. It updates legacy plaintext
+rows for users, notes, folders, tags, notifications, connector accounts/source records/sync
+attempts, calendar events/annotations, note history/conflicts, preferences, and webhook names using
+the Worker-bound content key. It does not expose plaintext or key material in API responses.
+
+ADR `0012-zero-knowledge-user-data-archive.md` defines the stronger archive storage boundary:
+archived user content uses client-held envelope encryption before D1/R2 direct access can be
+considered unable to read user content. Active D1 rows use backend-held encryption at rest to
+preserve current functionality and are not zero-knowledge.
+
+`migrations/0017_user_encrypted_archive.sql` adds the additive archive foundation:
+
+- `user_archive_key_wrappers`: user-scoped wrapped content encryption keys. Rows store wrapper
+  ciphertext and public wrapper metadata only; the backend does not derive or unwrap archive keys.
+- `user_archive_objects`: user-scoped encrypted object index rows. D1 stores object type, optional
+  source entity reference, per-object encryption metadata, ciphertext hash, size, and R2 key. The
+  encrypted envelope itself is stored under a user-scoped R2 prefix.
+
+The archive tables do not change existing notes, notifications, calendar, Gmail, sync, or assistant
+behavior. Client-held key creation/unlock/recovery remains required before active content can be
+moved into zero-knowledge archive storage.

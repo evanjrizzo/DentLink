@@ -48,14 +48,14 @@ final class DentLinkWidgetStore {
                 parseItems(prefs.getString(KEY_EMAILS, "[]"), prefs.getString(KEY_DISMISSING_EMAILS, ""));
         String error = prefs.getString(KEY_LAST_ERROR, "");
         String statusText;
-        if (error != null && !error.isEmpty()) {
-            statusText = context.getString(R.string.widget_sync_error);
-        } else if (prefs.contains(KEY_REFRESH_REQUESTED)) {
+        if (prefs.contains(KEY_REFRESH_REQUESTED)) {
             statusText = context.getString(R.string.widget_refresh_requested);
         } else if (prefs.contains(KEY_LAST_SYNC)) {
             statusText = context.getString(
                     R.string.widget_last_sync,
                     formatLastSync(prefs.getLong(KEY_LAST_SYNC, System.currentTimeMillis())));
+        } else if (error != null && !error.isEmpty()) {
+            statusText = context.getString(R.string.widget_sync_error);
         } else {
             statusText = context.getString(R.string.widget_not_synced);
         }
@@ -89,6 +89,7 @@ final class DentLinkWidgetStore {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit()
                 .putLong(KEY_REFRESH_REQUESTED, System.currentTimeMillis())
+                .remove(KEY_LAST_ERROR)
                 .commit();
     }
 
@@ -158,13 +159,18 @@ final class DentLinkWidgetStore {
     }
 
     static void saveSyncError(Context context, String message) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .edit()
-                .putString(KEY_LAST_ERROR, message == null ? "Sync failed" : message)
-                .remove(KEY_COMPLETING_NOTES)
-                .remove(KEY_DISMISSING_EMAILS)
-                .remove(KEY_REFRESH_REQUESTED)
-                .commit();
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        SharedPreferences.Editor editor =
+                prefs.edit()
+                        .remove(KEY_COMPLETING_NOTES)
+                        .remove(KEY_DISMISSING_EMAILS)
+                        .remove(KEY_REFRESH_REQUESTED);
+        if (prefs.contains(KEY_LAST_SYNC)) {
+            editor.remove(KEY_LAST_ERROR);
+        } else {
+            editor.putString(KEY_LAST_ERROR, message == null ? "Sync failed" : message);
+        }
+        editor.commit();
     }
 
     private static List<WidgetItem> parseItems(String json, String completingIds) {

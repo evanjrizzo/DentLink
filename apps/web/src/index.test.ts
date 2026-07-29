@@ -4,7 +4,8 @@ import {
   connectorReconnectWarningsForTest,
   DentLinkNotesApp,
   gmailSelectedEngineForTest,
-  nextScheduledSyncLabel
+  nextScheduledSyncLabel,
+  reconnectWarningExtraTextForTest
 } from "./notes-app";
 
 describe("@dentlink/web", () => {
@@ -75,5 +76,15 @@ describe("@dentlink/web", () => {
       message:
         "Google Calendar (frontdesk@example.com) cannot sync until you reconnect this source."
     });
+  });
+
+  it("names additional accounts in the reconnect header summary", () => {
+    expect(
+      reconnectWarningExtraTextForTest([
+        { title: "Gmail (office@example.com) needs to be reconnected" },
+        { title: "Google Calendar (frontdesk@example.com) needs to be reconnected" },
+        { title: "Gmail (billing@example.com) needs to be reconnected" }
+      ])
+    ).toBe("Google Calendar (frontdesk@example.com), Gmail (billing@example.com)");
   });
 });

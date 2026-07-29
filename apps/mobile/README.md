@@ -17,7 +17,8 @@ Initial widget design:
   client.
 - Widget tab buttons reuse the desktop navigation icon shapes.
 - Widget actions enqueue versioned DentLink API mutations and reconcile from backend state. The
-  widget auto-refreshes on the same five-minute cadence as the backend-driven app refresh path.
+  widget self-schedules a five-minute native auto-refresh alarm and refreshes from DentLink's backend
+  cache even when a connector sync attempt is deferred or interrupted.
 
 Native Android implementation:
 

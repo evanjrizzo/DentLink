@@ -1,4 +1,13 @@
 import type {
+  ArchiveKeyWrapper,
+  ArchiveKeyWrapperInput,
+  ArchiveKeyWrappersList,
+  ArchiveObjectCreateResponse,
+  ArchiveObjectInput,
+  ArchiveObjectReadResponse,
+  ArchiveObjectVerifyResponse,
+  ArchiveObjectsList,
+  AssistantChatRequest,
   AuthSession,
   CalendarEventAnnotation,
   CalendarEventAnnotationPatch,
@@ -446,6 +455,40 @@ export class DentLinkApiClient {
     });
   }
 
+  async listArchiveKeyWrappers(): Promise<ArchiveKeyWrappersList> {
+    return this.request<ArchiveKeyWrappersList>("/v1/archive/key-wrappers");
+  }
+
+  async createArchiveKeyWrapper(
+    input: ArchiveKeyWrapperInput
+  ): Promise<{ wrapper: ArchiveKeyWrapper }> {
+    return this.request<{ wrapper: ArchiveKeyWrapper }>("/v1/archive/key-wrappers", {
+      method: "POST",
+      body: input
+    });
+  }
+
+  async listArchiveObjects(): Promise<ArchiveObjectsList> {
+    return this.request<ArchiveObjectsList>("/v1/archive/objects");
+  }
+
+  async createArchiveObject(input: ArchiveObjectInput): Promise<ArchiveObjectCreateResponse> {
+    return this.request<ArchiveObjectCreateResponse>("/v1/archive/objects", {
+      method: "POST",
+      body: input
+    });
+  }
+
+  async getArchiveObject(objectId: EntityId): Promise<ArchiveObjectReadResponse> {
+    return this.request<ArchiveObjectReadResponse>(`/v1/archive/objects/${objectId}`);
+  }
+
+  async verifyArchiveObject(objectId: EntityId): Promise<ArchiveObjectVerifyResponse> {
+    return this.request<ArchiveObjectVerifyResponse>(`/v1/archive/objects/${objectId}/verify`, {
+      method: "POST"
+    });
+  }
+
   async reprocessEmailAi(input: {
     timezone: string;
     accountId?: EntityId | null;
@@ -456,10 +499,7 @@ export class DentLinkApiClient {
     });
   }
 
-  async askAssistant(input: {
-    message: string;
-    timezone?: string;
-  }): Promise<AssistantChatResponse> {
+  async askAssistant(input: AssistantChatRequest): Promise<AssistantChatResponse> {
     return this.request<AssistantChatResponse>("/v1/assistant/chat", {
       method: "POST",
       body: input

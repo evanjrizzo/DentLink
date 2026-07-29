@@ -61,6 +61,7 @@ export interface DentLinkStore {
     expiresAt: string
   ): Promise<Session>;
   findSessionByTokenHash(tokenHash: string, now: string): Promise<CurrentSession | null>;
+  extendSession(tokenHash: string, expiresAt: string): Promise<void>;
   deleteSessionByTokenHash(tokenHash: string): Promise<void>;
   listNotes(
     userId: EntityId,
@@ -418,6 +419,12 @@ export class MemoryDentLinkStore implements DentLinkStore {
       user: publicUser(user),
       session: { expiresAt: session.expiresAt }
     };
+  }
+
+  async extendSession(tokenHash: string, expiresAt: string): Promise<void> {
+    const session = this.sessions.get(tokenHash);
+    if (!session) return;
+    session.expiresAt = expiresAt;
   }
 
   async deleteSessionByTokenHash(tokenHash: string): Promise<void> {

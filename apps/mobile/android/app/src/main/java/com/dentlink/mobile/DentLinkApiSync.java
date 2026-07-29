@@ -43,8 +43,23 @@ final class DentLinkApiSync {
         JSONObject response = requestJson(apiBase, "/v1/auth/login", "POST", null, request);
         String token = response.getJSONObject("session").getString("token");
         DentLinkWidgetStore.saveSession(context, apiBase, token);
-        syncWidgetCache(context);
+        refreshWidgetCache(context);
         return token;
+    }
+
+    static void refreshWidgetCache(Context context) throws IOException, JSONException {
+        String token = DentLinkWidgetStore.sessionToken(context);
+        if (token == null || token.isEmpty()) {
+            throw new IOException("Sign in before syncing");
+        }
+
+        try {
+            requestJson(DentLinkWidgetStore.apiBase(context), "/v1/connectors/sync-all", "POST", token, null);
+        } catch (IOException syncError) {
+            // The widget should still refresh from DentLink's backend cache if a connector sync
+            // request times out or is interrupted.
+        }
+        syncWidgetCache(context);
     }
 
     static void syncWidgetCache(Context context) throws IOException, JSONException {

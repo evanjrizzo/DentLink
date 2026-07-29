@@ -3,105 +3,69 @@ package com.dentlink.mobile;
 import android.app.Activity;
 import android.os.Bundle;
 import android.view.View;
-import android.widget.Button;
-import android.widget.EditText;
-import android.widget.LinearLayout;
-import android.widget.TextView;
+import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.widget.FrameLayout;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 
 public final class MainActivity extends Activity {
-    private TextView status;
+    private static final String DENTLINK_WEB_URL =
+            "https://dentlink-web-preview.pages.dev?dentlink_app=android&shell_version=2";
+    private WebView webView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        int padding = getResources().getDimensionPixelSize(R.dimen.screen_padding);
-
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(padding, padding, padding, padding);
+        FrameLayout root = new FrameLayout(this);
+        root.setLayoutParams(
+                new ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         root.setBackgroundColor(getColor(R.color.dentlink_app_bg));
+        root.setOnApplyWindowInsetsListener(
+                (view, insets) -> {
+                    view.setPadding(0, insets.getSystemWindowInsetTop(), 0, 0);
+                    return insets;
+                });
 
-        TextView title = label(R.string.app_name, 28, true);
-        EditText apiBase = input(DentLinkWidgetStore.apiBase(this), false);
-        EditText email = input("", false);
-        email.setHint(R.string.mobile_email_hint);
-        EditText password = input("", true);
-        password.setHint(R.string.mobile_password_hint);
-        Button signIn = new Button(this);
-        signIn.setText(R.string.mobile_sign_in_sync);
-        Button sync = new Button(this);
-        sync.setText(R.string.mobile_sync_widget);
-        status = label(R.string.mobile_shell_placeholder, 16, false);
+        webView = new WebView(this);
+        webView.setLayoutParams(
+                new ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        webView.setWebViewClient(new WebViewClient());
 
-        root.addView(title);
-        root.addView(apiBase);
-        root.addView(email);
-        root.addView(password);
-        root.addView(signIn);
-        root.addView(sync);
-        root.addView(status);
+        WebSettings settings = webView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        settings.setLoadWithOverviewMode(true);
+        settings.setUseWideViewPort(true);
+        webView.clearCache(false);
+
+        root.addView(webView);
         setContentView(root);
-
-        signIn.setOnClickListener(
-                view ->
-                        runSync(
-                                () ->
-                                        DentLinkApiSync.loginAndSync(
-                                                this,
-                                                apiBase.getText().toString().trim(),
-                                                email.getText().toString().trim(),
-                                                password.getText().toString())));
-        sync.setOnClickListener(view -> runSync(() -> DentLinkApiSync.syncWidgetCache(this)));
-    }
-
-    private TextView label(int stringId, int size, boolean strong) {
-        TextView view = new TextView(this);
-        view.setText(stringId);
-        view.setTextColor(getColor(R.color.dentlink_text_primary));
-        view.setTextSize(size);
-        if (strong) view.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-        view.setPadding(0, 0, 0, 14);
-        return view;
-    }
-
-    private EditText input(String value, boolean password) {
-        EditText view = new EditText(this);
-        view.setText(value);
-        view.setTextColor(getColor(R.color.dentlink_text_primary));
-        view.setHintTextColor(getColor(R.color.dentlink_text_muted));
-        if (password) {
-            view.setInputType(
-                    android.text.InputType.TYPE_CLASS_TEXT
-                            | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        root.requestApplyInsets();
+        if (savedInstanceState == null) {
+            webView.loadUrl(DENTLINK_WEB_URL);
+        } else {
+            webView.restoreState(savedInstanceState);
         }
-        return view;
     }
 
-    private void runSync(SyncOperation operation) {
-        setBusy(true, getString(R.string.mobile_syncing));
-        new Thread(
-                        () -> {
-                            try {
-                                operation.run();
-                                DentLinkWidgetProvider.refreshAllWidgets(this);
-                                runOnUiThread(
-                                        () -> setBusy(false, getString(R.string.mobile_sync_complete)));
-                            } catch (Exception error) {
-                                DentLinkWidgetStore.saveSyncError(this, error.getMessage());
-                                DentLinkWidgetProvider.refreshAllWidgets(this);
-                                runOnUiThread(() -> setBusy(false, error.getMessage()));
-                            }
-                        })
-                .start();
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        if (webView != null) webView.saveState(outState);
     }
 
-    private void setBusy(boolean busy, String message) {
-        status.setText(message);
-        status.setVisibility(View.VISIBLE);
-    }
-
-    private interface SyncOperation {
-        void run() throws Exception;
+    @Override
+    public void onBackPressed() {
+        if (webView != null && webView.canGoBack()) {
+            webView.goBack();
+            return;
+        }
+        super.onBackPressed();
     }
 }

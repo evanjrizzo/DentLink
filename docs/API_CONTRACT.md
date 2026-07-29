@@ -84,7 +84,14 @@ Conflict responses must preserve both edits and expose stable resolution choices
 Implemented in the Worker-style API handler:
 
 - `POST /v1/auth/register`: create a user with email/password and return a session.
-- `GET /v1/health`: return safe deployment health, environment, build, and database reachability.
+- `GET /v1/health`: return safe deployment health, environment, build, database reachability, and
+  aggregate D1 storage diagnostics. Storage diagnostics include table row counts and `sync_changes`
+  payload byte metrics only; they must not include row contents, user identifiers, tokens, secrets,
+  provider payloads, titles, bodies, or email addresses.
+- `POST /v1/maintenance/content-encryption/backfill`: disabled-by-default operator endpoint for
+  bounded D1 content-encryption backfill. It requires
+  `DENTLINK_CONTENT_ENCRYPTION_BACKFILL_ENABLED=true` plus `X-DentLink-Maintenance-Token` matching
+  the Worker secret. The response contains only aggregate per-table update counts.
 - `POST /v1/auth/login`: verify credentials and return a session.
 - `GET /v1/auth/session`: return the authenticated user/session from the bearer token without
   echoing the raw token.
@@ -104,6 +111,15 @@ Implemented in the Worker-style API handler:
 - `DELETE /v1/tags/:id`: delete one owned tag and remove it from notes.
 - `GET /v1/preferences`: return account-level timezone and AI importance preferences.
 - `PATCH /v1/preferences`: update account-level timezone and AI importance preferences.
+- `GET /v1/archive/key-wrappers`: list the authenticated user's encrypted content-key wrappers.
+- `POST /v1/archive/key-wrappers`: upsert one wrapped content key. The API stores wrapped-key
+  ciphertext only; it does not derive, unwrap, or log the content key.
+- `GET /v1/archive/objects`: list the authenticated user's encrypted archive object metadata.
+- `POST /v1/archive/objects`: store one already-encrypted archive envelope in object storage under a
+  server-generated `users/{userId}/archive/{objectId}.json` key and record only ciphertext metadata
+  in D1.
+- `GET /v1/archive/objects/:id`: return the authenticated user's encrypted envelope. Cross-user
+  object IDs return `404`.
 - `GET /v1/sync`: return cursor-based changes for the authenticated user. Empty cursor means `0`;
   invalid cursor values return `invalid_cursor`.
 - `GET /v1/events`: authenticated Server-Sent Events stream for DentLink-owned change metadata.
@@ -121,6 +137,12 @@ overwriting local state.
 
 Milestone 1.1 keeps these endpoint shapes unchanged while adding a Cloudflare D1 storage adapter.
 Clients should not observe different API behavior between the in-memory adapter and D1 adapter.
+
+Archive requests must send ciphertext fields such as `wrappedKeyB64`, `nonceB64`,
+`ciphertextSha256B64`, and `ciphertextB64`. Plaintext content is not accepted by the archive API. If
+`ARCHIVE_BUCKET` is not configured, archive object routes return `archive_unavailable` without
+affecting normal app traffic. Archive writes are refused with `archive_quota_exceeded` before the
+next object would push indexed archive storage above the configured hard cap.
 
 ## Milestone 2 endpoints
 
@@ -163,16 +185,20 @@ Notes, sync, history, or conflict contracts.
   plus partial-failure details with HTTP `202`.
 - `POST /v1/assistant/chat`: answer one authenticated read-only assistant question from bounded
   DentLink context. Body:
-  `{ "message": "What do I have going on this week?", "timezone": "America/New_York" }`. The backend
-  resolves user identity from the session, gathers newest-first normalized notification context,
-  normalized Gmail source-record context, earliest-upcoming calendar events, and bounded static
-  DentLink usage guidance, calls the configured AI provider when available, and returns
-  `{ answer, sources, ai }`. Sources contain DentLink source IDs, kind (`notification`, `email`, or
+  `{ "message": "What do I have going on this week?", "timezone": "America/New_York", "archivedNotifications": [] }`.
+  The backend resolves user identity from the session, gathers newest-first normalized notification
+  context, normalized Gmail source-record context, earliest-upcoming calendar events, optional
+  client-decrypted archived notification snippets, and bounded static DentLink usage guidance, calls
+  the configured AI provider when available, and returns `{ answer, sources, ai }`. Optional
+  `archivedNotifications` items are accepted only as bounded text snippets already decrypted by the
+  authenticated client; the API does not fetch, unwrap, or decrypt encrypted archive objects.
+  Archived notification context is capped before the AI call and appears in source previews with
+  `archive:` IDs. Sources contain DentLink source IDs, kind (`notification`, `email`, or
   `calendar_event`), title, subtitle, timestamp, and optional source URL. Notification and email
   source previews are returned newest-first; calendar source previews are returned earliest-upcoming
-  first. The endpoint does not mutate Gmail, calendar providers, notifications, notes, or connector
-  state. Missing or globally disabled AI returns a stable error such as `missing_api_key` or
-  `disabled_by_environment`.
+  first. The endpoint does not mutate Gmail, calendar providers, notifications, notes, archives, or
+  connector state. Missing or globally disabled AI returns a stable error such as `missing_api_key`
+  or `disabled_by_environment`.
 - `GET /v1/webhooks`: list authenticated user's named webhook endpoints. Responses include
   `ingestUrl` but never include the endpoint secret or secret hash.
 - `POST /v1/webhooks`: create a named webhook endpoint. The response returns the generated webhook

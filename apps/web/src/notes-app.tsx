@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement } from "react";
 
 import { DentLinkApiClient, DentLinkApiError } from "@dentlink/api-client";
+import { archiveEligibleNotifications, buildAssistantArchiveNotificationContext } from "./archive";
 import type {
+  AssistantArchivedNotificationContext,
   AssistantChatSource,
   AuthSession,
   CalendarEvent,
@@ -228,6 +230,14 @@ type AppearanceBrandingSettings = {
 type IconName = "check" | "close" | "external" | "pin" | "restore";
 
 const API_BASE_URL = import.meta.env.VITE_DENTLINK_API_BASE_URL ?? "";
+const ARCHIVE_WRITES_ENABLED = import.meta.env.VITE_DENTLINK_ARCHIVE_WRITES_ENABLED === "true";
+const ARCHIVE_MIN_AGE_DAYS = positiveIntegerEnv(
+  import.meta.env.VITE_DENTLINK_ARCHIVE_MIN_AGE_DAYS,
+  30
+);
+const ARCHIVE_MAX_WRITES = positiveIntegerEnv(import.meta.env.VITE_DENTLINK_ARCHIVE_MAX_WRITES, 5);
+const ARCHIVE_WRITE_USER_IDS = safeUserIdSet(import.meta.env.VITE_DENTLINK_ARCHIVE_WRITE_USER_IDS);
+const ARCHIVE_RECOVERY_STORAGE_KEY = "dentlink.archive.recoverySecret.v1";
 const UI_REFRESH_INTERVAL_MS = 60_000;
 const DEFAULT_IMPORTANCE_INSTRUCTION =
   "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.";
@@ -307,6 +317,8 @@ export function DentLinkNotesApp(): ReactElement {
   const refreshPromise = useRef<Promise<void> | null>(null);
   const connectorSyncPromise = useRef<Promise<ConnectorSyncAllResult | null> | null>(null);
   const refreshAllRunning = useRef(false);
+  const archiveWriterRunning = useRef(false);
+  const lastArchiveWriterSignature = useRef("");
   const eventsAbort = useRef<AbortController | null>(null);
   const syncCursor = useRef("0");
   const noteMutations = useRef(new Map<EntityId, QueuedNoteMutation>());
@@ -331,6 +343,35 @@ export function DentLinkNotesApp(): ReactElement {
   }, [notesList]);
 
   useEffect(() => {
+    if (!auth || !ARCHIVE_WRITES_ENABLED || notifications.length === 0) return;
+    if (ARCHIVE_WRITE_USER_IDS.size > 0 && !ARCHIVE_WRITE_USER_IDS.has(auth.user.id)) return;
+    if (archiveWriterRunning.current) return;
+    const recoverySecret = storedArchiveRecoverySecret();
+    if (!recoverySecret) return;
+    const signature = notifications
+      .map(
+        (notification) =>
+          `${notification.id}:${notification.status}:${notification.updatedAt}:${notification.completedAt}:${notification.dismissedAt}:${notification.pinned}`
+      )
+      .join("|");
+    if (signature === lastArchiveWriterSignature.current) return;
+    lastArchiveWriterSignature.current = signature;
+    archiveWriterRunning.current = true;
+    void archiveEligibleNotifications(client, notifications, {
+      enabled: true,
+      recoverySecret,
+      minAgeDays: ARCHIVE_MIN_AGE_DAYS,
+      maxWrites: ARCHIVE_MAX_WRITES
+    })
+      .catch((caught: unknown) => {
+        console.warn("DentLink archive writer failed", caught);
+      })
+      .finally(() => {
+        archiveWriterRunning.current = false;
+      });
+  }, [auth, client, notifications]);
+
+  useEffect(() => {
     if (!isDesktopClient()) return;
     document.documentElement.classList.add("dentlink-desktop-client");
     const removeMomentumScrolling = installDesktopMomentumScrolling();
@@ -353,12 +394,20 @@ export function DentLinkNotesApp(): ReactElement {
   }, []);
 
   useEffect(() => {
+    if (!isAndroidAppClient()) return;
+    document.documentElement.classList.add("dentlink-android-app");
+    return () => document.documentElement.classList.remove("dentlink-android-app");
+  }, []);
+
+  useEffect(() => {
     localStorage.setItem(DEBUG_MODE_STORAGE_KEY, debugMode ? "true" : "false");
   }, [debugMode]);
 
   useEffect(() => {
     localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify(appearance));
-    applyAppearanceToDocument(appearance);
+    applyAppearanceToDocument(
+      isAndroidAppClient() ? androidWidgetAppearance(appearance) : appearance
+    );
   }, [appearance]);
 
   useEffect(() => {
@@ -1385,9 +1434,11 @@ export function DentLinkNotesApp(): ReactElement {
     setAssistantRunning(true);
     setAssistantMessages((current) => [...current, userMessage]);
     try {
+      const archivedNotifications = await assistantArchiveNotificationContext(client, trimmed);
       const response = await client.askAssistant({
         message: trimmed,
-        timezone: effectiveTimezone
+        timezone: effectiveTimezone,
+        archivedNotifications
       });
       setAssistantMessages((current) => [
         ...current,
@@ -1599,7 +1650,14 @@ export function DentLinkNotesApp(): ReactElement {
           </>
         )}
       </header>
-      <AppNavigation view={view} onViewChange={setView} variant="bottom" />
+      <AppNavigation
+        view={view}
+        onViewChange={setView}
+        variant="bottom"
+        title={pageTitle(view, settingsTab)}
+        refreshRunning={refreshState.running}
+        onRefreshAll={refreshAll}
+      />
       {desktopClient ? null : (
         <PageHeader
           title={pageTitle(view, settingsTab)}
@@ -2241,6 +2299,7 @@ function PageHeader(props: {
 }): ReactElement {
   const reconnectWarning = props.reconnectWarnings[0];
   const extraReconnectCount = Math.max(0, props.reconnectWarnings.length - 1);
+  const extraReconnectText = reconnectWarningExtraText(props.reconnectWarnings);
   return (
     <section className="page-header" aria-label={`${props.title} page controls`}>
       <h1>{props.title}</h1>
@@ -2257,7 +2316,7 @@ function PageHeader(props: {
             <span>
               {reconnectWarning.message}
               {extraReconnectCount > 0
-                ? ` ${extraReconnectCount} more source(s) need attention.`
+                ? ` ${extraReconnectCount} more source(s) need attention: ${extraReconnectText}.`
                 : ""}
             </span>
             <button type="button" onClick={props.onOpenConnections}>
@@ -2279,6 +2338,17 @@ function PageHeader(props: {
       </button>
     </section>
   );
+}
+
+export function reconnectWarningExtraTextForTest(warnings: Array<{ title: string }>): string {
+  return reconnectWarningExtraText(warnings);
+}
+
+function reconnectWarningExtraText(warnings: Array<{ title: string }>): string {
+  return warnings
+    .slice(1)
+    .map((warning) => warning.title.replace(/\s+needs to be reconnected$/, ""))
+    .join(", ");
 }
 
 function RefreshIcon(): ReactElement {
@@ -2341,6 +2411,50 @@ function pageTitle(view: View, settingsTab?: SettingsTab): string {
 
 function storedDebugMode(): boolean {
   return localStorage.getItem(DEBUG_MODE_STORAGE_KEY) === "true";
+}
+
+function storedArchiveRecoverySecret(): string | null {
+  try {
+    const value = localStorage.getItem(ARCHIVE_RECOVERY_STORAGE_KEY);
+    return value && value.trim() ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+async function assistantArchiveNotificationContext(
+  client: DentLinkApiClient,
+  message: string
+): Promise<AssistantArchivedNotificationContext[]> {
+  const recoverySecret = storedArchiveRecoverySecret();
+  if (!recoverySecret) return [];
+  try {
+    return await buildAssistantArchiveNotificationContext(client, {
+      recoverySecret,
+      message,
+      maxObjects: 50,
+      maxItems: 8
+    });
+  } catch (caught) {
+    console.warn("DentLink assistant archive context unavailable", caught);
+    return [];
+  }
+}
+
+function positiveIntegerEnv(value: unknown, fallback: number): number {
+  if (typeof value !== "string" || !value.trim()) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function safeUserIdSet(value: unknown): Set<string> {
+  if (typeof value !== "string" || !value.trim()) return new Set();
+  return new Set(
+    value
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => /^user_[A-Za-z0-9]+$/.test(item))
+  );
 }
 
 function defaultAppearance(): AppearancePreferences {
@@ -2737,10 +2851,90 @@ function applyAppearanceToDocument(appearance: AppearancePreferences): void {
   for (const [key, value] of Object.entries(vars)) root.style.setProperty(key, value);
 }
 
+function androidWidgetAppearance(appearance: AppearancePreferences): AppearancePreferences {
+  return {
+    ...appearance,
+    preset: "charcoal",
+    accent: "#7c3aed",
+    colors: {
+      ...appearance.colors,
+      primaryText: "#f4f7fb",
+      secondaryText: "#d7dde6",
+      mutedText: "#aab5c2",
+      headings: "#f4f7fb",
+      navigationText: "#f4f7fb",
+      cardTitles: "#f4f7fb",
+      bodyText: "#d7dde6",
+      metadataText: "#aab5c2",
+      links: "#a78bfa",
+      warningText: "#fbbf24",
+      dangerText: "#f87171",
+      notificationMetadata: "#aab5c2"
+    },
+    surfaces: {
+      ...appearance.surfaces,
+      appBackground: "#0c0f14",
+      headerBackground: "#141b24",
+      toolbarBackground: "#141b24",
+      cardBackground: "#141b24",
+      elevatedPanel: "#1b2531",
+      modalBackground: "#141b24",
+      selectedBackground: "#2e1065",
+      hoverBackground: "#1b2531",
+      divider: "rgb(255 255 255 / 14%)"
+    },
+    buttons: {
+      ...appearance.buttons,
+      primaryBackground: "#7c3aed",
+      primaryText: "#ffffff",
+      secondaryBackground: "#1b2531",
+      secondaryText: "#f4f7fb",
+      destructiveBackground: "#b42318",
+      destructiveText: "#ffffff",
+      iconBackground: "#1b2531",
+      iconColor: "#f4f7fb",
+      hoverBackground: "#223044",
+      pressedBackground: "#2e1065",
+      disabledBackground: "#273343",
+      disabledText: "#aab5c2",
+      focusRing: "#a78bfa"
+    },
+    inputs: {
+      ...appearance.inputs,
+      background: "#090d13",
+      text: "#f4f7fb",
+      placeholder: "#aab5c2",
+      border: "rgb(255 255 255 / 24%)",
+      focusBorder: "#a78bfa",
+      invalidBorder: "#f87171",
+      disabledBackground: "#1b2531",
+      disabledText: "#aab5c2"
+    },
+    cards: {
+      ...appearance.cards,
+      background: "#141b24",
+      border: "rgb(255 255 255 / 14%)",
+      title: "#f4f7fb",
+      body: "#d7dde6",
+      metadata: "#aab5c2",
+      hover: "#1b2531",
+      pinnedAccent: "#7c3aed"
+    },
+    branding: {
+      ...appearance.branding,
+      logoBackground: "#141b24",
+      logoBorder: "rgb(255 255 255 / 14%)"
+    }
+  };
+}
+
 function AppNavigation(props: {
   view: View;
   onViewChange: (view: View) => void;
   variant: "top" | "bottom";
+  title?: string;
+  refreshRunning?: boolean;
+  onRefreshAll?: () => Promise<void>;
 }): ReactElement {
   const desktopClient = isDesktopClient();
   const items: Array<{ view: View; label: string; short: string }> = [
@@ -2750,11 +2944,16 @@ function AppNavigation(props: {
     { view: "notes", label: "Notes", short: "Notes" },
     { view: "settings", label: "Settings", short: "Settings" }
   ];
+  const mobileTitle =
+    props.title ?? items.find((item) => item.view === props.view)?.label ?? "DentLink";
   return (
     <nav
       className={props.variant === "top" ? "app-tabs" : "mobile-bottom-tabs"}
       aria-label={props.variant === "top" ? "Primary" : "Mobile primary"}
     >
+      {props.variant === "bottom" ? (
+        <span className="mobile-nav-title truncate">{mobileTitle}</span>
+      ) : null}
       {items.map((item) => (
         <button
           key={item.view}
@@ -2765,10 +2964,23 @@ function AppNavigation(props: {
           title={item.label}
           onClick={() => props.onViewChange(item.view)}
         >
-          {desktopClient ? <NavIcon view={item.view} /> : null}
+          <NavIcon view={item.view} />
           <span>{desktopClient ? item.short : item.label}</span>
         </button>
       ))}
+      {props.variant === "bottom" ? (
+        <button
+          type="button"
+          className="icon-refresh-button mobile-nav-refresh"
+          aria-label="Refresh All"
+          title="Refresh all connected services"
+          aria-busy={props.refreshRunning}
+          onClick={() => void props.onRefreshAll?.()}
+          disabled={props.refreshRunning}
+        >
+          <RefreshIcon />
+        </button>
+      ) : null}
     </nav>
   );
 }
@@ -3304,6 +3516,16 @@ function NotificationListActions(props: {
     notification.status === "suppressed";
   return (
     <div className="notification-touch-actions notification-list-actions">
+      {!isHistory ? (
+        <label className="notification-dismiss-checkbox">
+          <input
+            type="checkbox"
+            aria-label={`Dismiss ${notification.email?.subject || notification.title}`}
+            checked={false}
+            onChange={() => void props.onUpdateNotification(notification, { status: "dismissed" })}
+          />
+        </label>
+      ) : null}
       <IconButton
         label={notification.pinned ? "Unpin" : "Pin"}
         icon="pin"
@@ -8041,6 +8263,11 @@ function clearStoredSession(): void {
 function isDesktopClient(): boolean {
   if (typeof window === "undefined") return false;
   return new URLSearchParams(window.location.search).get("dentlinkDesktop") === "1";
+}
+
+function isAndroidAppClient(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).get("dentlink_app") === "android";
 }
 
 function postDesktopSession(message: { type: string; session?: AuthSession }): void {

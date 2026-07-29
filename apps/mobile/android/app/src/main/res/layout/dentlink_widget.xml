@@ -81,53 +81,101 @@
         android:layout_height="34dp"
         android:orientation="horizontal">
 
-        <ImageView
+        <FrameLayout
             android:id="@+id/widget_tab_calendar_v2"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:background="@drawable/widget_tab_unselected"
-            android:contentDescription="@string/widget_tab_calendar"
-            android:padding="7dp"
-            android:scaleType="fitCenter"
-            android:src="@drawable/ic_nav_calendar" />
+            android:contentDescription="@string/widget_tab_calendar">
 
-        <ImageView
+            <ImageView
+                android:id="@+id/widget_tab_calendar_icon"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:padding="7dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_nav_calendar" />
+
+            <ImageView
+                android:id="@+id/widget_tab_calendar_badge"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:layout_gravity="top|end"
+                android:layout_marginTop="5dp"
+                android:layout_marginEnd="10dp"
+                android:background="@drawable/widget_notification_dot"
+                android:visibility="gone" />
+        </FrameLayout>
+
+        <FrameLayout
             android:id="@+id/widget_tab_notes_v2"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:background="@drawable/widget_tab_unselected"
-            android:contentDescription="@string/widget_tab_notes"
-            android:padding="7dp"
-            android:scaleType="fitCenter"
-            android:src="@drawable/ic_nav_notes" />
+            android:contentDescription="@string/widget_tab_notes">
 
-        <ImageView
+            <ImageView
+                android:id="@+id/widget_tab_notes_icon"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:padding="7dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_nav_notes" />
+
+            <ImageView
+                android:id="@+id/widget_tab_notes_badge"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:layout_gravity="top|end"
+                android:layout_marginTop="5dp"
+                android:layout_marginEnd="10dp"
+                android:background="@drawable/widget_notification_dot"
+                android:visibility="gone" />
+        </FrameLayout>
+
+        <FrameLayout
             android:id="@+id/widget_tab_emails_v2"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:background="@drawable/widget_tab_unselected"
-            android:contentDescription="@string/widget_tab_emails"
-            android:padding="7dp"
-            android:scaleType="fitCenter"
-            android:src="@drawable/ic_nav_emails" />
+            android:contentDescription="@string/widget_tab_emails">
+
+            <ImageView
+                android:id="@+id/widget_tab_emails_icon"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:padding="7dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_nav_emails" />
+
+            <ImageView
+                android:id="@+id/widget_tab_emails_badge"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:layout_gravity="top|end"
+                android:layout_marginTop="5dp"
+                android:layout_marginEnd="10dp"
+                android:background="@drawable/widget_notification_dot"
+                android:visibility="gone" />
+        </FrameLayout>
 
         <FrameLayout
             android:id="@+id/widget_create_note_zone"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
-            android:background="@drawable/widget_square_button">
+            android:background="@drawable/widget_tab_unselected"
+            android:contentDescription="@string/widget_create_note">
 
             <ImageView
                 android:id="@+id/widget_create_note"
-                android:layout_width="34dp"
-                android:layout_height="34dp"
-                android:layout_gravity="center"
-                android:contentDescription="@string/widget_create_note"
-                android:padding="8dp"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:padding="7dp"
+                android:scaleType="fitCenter"
                 android:src="@drawable/ic_plus" />
         </FrameLayout>
     </LinearLayout>

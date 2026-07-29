@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { hashPassword, hashSessionToken } from "./auth";
-import { D1DentLinkStore } from "./d1-storage";
+import { D1DentLinkStore, type D1DatabaseLike } from "./d1-storage";
 import type { GoogleCalendarApiClient } from "./google-calendar";
 import {
   createGoogleGmailClient,
@@ -98,10 +98,35 @@ const syncChangesTailRetentionSchemaPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../migrations/0014_sync_changes_tail_retention.sql"
 );
+const compactSyncChangesPayloadsSchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0015_compact_sync_changes_payloads.sql"
+);
+const systemAlertStateSchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0016_system_alert_state.sql"
+);
+const userEncryptedArchiveSchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0017_user_encrypted_archive.sql"
+);
+const verifiedNotificationArchiveRetentionSchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0018_verified_notification_archive_retention.sql"
+);
+const encryptedUserEmailsSchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0019_encrypted_user_emails.sql"
+);
 
 type StoreFixture = {
   name: string;
-  createStore(): { store: DentLinkStore; hasRawSessionToken?(token: string): Promise<boolean> };
+  createStore(): {
+    store: DentLinkStore;
+    db?: D1DatabaseLike;
+    hasRawSessionToken?(token: string): Promise<boolean>;
+    readSyncPayloads?(): Promise<string[]>;
+  };
 };
 
 const fixtures: StoreFixture[] = [
@@ -134,16 +159,30 @@ const fixtures: StoreFixture[] = [
         notificationSuppressedSchemaPath,
         connectorSyncAttemptsSchemaPath,
         d1StorageRetentionSchemaPath,
-        syncChangesTailRetentionSchemaPath
+        syncChangesTailRetentionSchemaPath,
+        compactSyncChangesPayloadsSchemaPath,
+        systemAlertStateSchemaPath,
+        userEncryptedArchiveSchemaPath,
+        verifiedNotificationArchiveRetentionSchemaPath,
+        encryptedUserEmailsSchemaPath
       ]);
       return {
-        store: new D1DentLinkStore(db),
+        db,
+        store: new D1DentLinkStore(db, {
+          contentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+        }),
         async hasRawSessionToken(token: string) {
           const row = await db
             .prepare("SELECT token_hash FROM sessions WHERE token_hash = ?")
             .bind(token)
             .first();
           return Boolean(row);
+        },
+        async readSyncPayloads() {
+          const result = await db
+            .prepare("SELECT payload_json FROM sync_changes ORDER BY cursor ASC")
+            .all<{ payload_json: string }>();
+          return (result.results ?? []).map((row) => row.payload_json);
         }
       };
     }
@@ -152,9 +191,10 @@ const fixtures: StoreFixture[] = [
 
 describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({ createStore }) => {
   it("serves deployment health without exposing secrets", async () => {
-    const { store } = createStore();
+    const { store, db } = createStore();
     const response = await handleApiRequest(new Request("https://api.dentlink.test/v1/health"), {
       store,
+      DB: db,
       DENTLINK_ENV: "test",
       DENTLINK_BUILD_ID: "test-build"
     });
@@ -164,14 +204,43 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       status: string;
       environment: string;
       build: string;
-      database: { reachable: boolean };
+      database: {
+        reachable: boolean;
+        adapter: "memory" | "d1";
+        storage?: {
+          syncChanges: {
+            rows: number;
+            avgPayloadBytes: number;
+            maxPayloadBytes: number;
+            retentionTargetRows: number;
+          };
+          tables: Array<{ name: string; rows: number }>;
+        };
+      };
     };
-    expect(body).toEqual({
+    expect(body).toMatchObject({
       status: "ok",
       environment: "test",
       build: "test-build",
-      database: { reachable: true, adapter: "memory" }
+      database: { reachable: true, adapter: db ? "d1" : "memory" }
     });
+    if (db) {
+      expect(body.database).toEqual(
+        expect.objectContaining({
+          storage: expect.objectContaining({
+            syncChanges: expect.objectContaining({
+              rows: expect.any(Number),
+              avgPayloadBytes: expect.any(Number),
+              maxPayloadBytes: expect.any(Number),
+              retentionTargetRows: 10000
+            }),
+            tables: expect.arrayContaining([
+              expect.objectContaining({ name: "sync_changes", rows: expect.any(Number) })
+            ])
+          })
+        })
+      );
+    }
     expect(JSON.stringify(body)).not.toMatch(/token|secret|password/i);
   });
 
@@ -417,6 +486,31 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       "2026-01-02T00:00:00.000Z"
     );
     await requestJson<ApiErrorBody>(store, "GET", "/v1/auth/session", undefined, expiredToken, 401);
+  });
+
+  it("renews valid sessions on authenticated API use", async () => {
+    const { store } = createStore();
+    const password = await hashPassword("correct horse");
+    const user = await store.createUser({ email: "renew@example.com", password });
+    const token = "session_renew";
+    const initialExpiry = "2026-07-30T00:00:00.000Z";
+    await store.createSession(
+      user.id,
+      await hashSessionToken(token),
+      "2026-07-01T00:00:00.000Z",
+      initialExpiry
+    );
+
+    const session = await requestJson<AuthSession>(
+      store,
+      "GET",
+      "/v1/auth/session",
+      undefined,
+      token
+    );
+
+    expect(session.session.expiresAt).not.toBe(initialExpiry);
+    expect(new Date(session.session.expiresAt).getTime()).toBeGreaterThan(Date.now());
   });
 
   it("isolates notes by authenticated session user", async () => {
@@ -1762,7 +1856,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
   it("applies per-account AI overrides, suppresses below-threshold notifications, and reprocesses same-day stored data idempotently", async () => {
     const { store } = createStore();
     const owner = await register(store, "gmail-ai-reprocess@example.com");
-    const now = "2026-07-16T16:00:00.000Z";
+    const now = "2026-07-29T16:00:00.000Z";
     const account = await store.createConnectorAccount(
       owner.user.id,
       {
@@ -2010,8 +2104,8 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       {
         title: "Implant consult",
         description: "Review chart",
-        startAt: "2026-07-17T15:00:00.000Z",
-        endAt: "2026-07-17T15:30:00.000Z",
+        startAt: "2026-07-30T15:00:00.000Z",
+        endAt: "2026-07-30T15:30:00.000Z",
         timezone: "America/New_York",
         location: "Operatory 2"
       },
@@ -2246,6 +2340,73 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     ]);
   });
 
+  it("answers assistant questions with client-decrypted archived notification context", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "assistant-archive@example.com");
+    const now = "2026-07-29T17:30:00.000Z";
+    const archivedId = "notification_clown_archive_test_1785345010";
+    let sawArchiveContext = false;
+    const env: Partial<ApiEnv> = {
+      OPENAI_API_KEY: "test-key",
+      assistantAiClient: {
+        async answer(input) {
+          sawArchiveContext = true;
+          expect(input.context.notifications).toHaveLength(1);
+          expect(input.context.notifications[0]).toMatchObject({
+            id: `archive:${archivedId}`,
+            title: "Killer clowns on the rampage at the Cincinnati Zoo",
+            sourceLabel: "Archive - Archive Assistant Test",
+            status: "done"
+          });
+          return {
+            answer: "The clown alert is a fake archived notification.",
+            sourceIds: [`archive:${archivedId}`],
+            outputTokens: 9
+          };
+        }
+      }
+    };
+
+    const response = await requestJson<AssistantChatResponse>(
+      store,
+      "POST",
+      "/v1/assistant/chat",
+      {
+        message: "can you find any clowns?",
+        timezone: "America/New_York",
+        archivedNotifications: [
+          {
+            id: archivedId,
+            title: "Killer clowns on the rampage at the Cincinnati Zoo",
+            summary: "Fake archive assistant test about killer clowns at the Cincinnati Zoo.",
+            body: "This is not a real alert.",
+            sourceLabel: "Archive Assistant Test",
+            severity: "medium",
+            status: "done",
+            createdAt: "2026-07-29T17:14:50.220Z",
+            updatedAt: "2026-07-29T17:14:50.220Z",
+            sourceTimestamp: "2026-07-27T00:00:00.000Z",
+            sourceUrl: null
+          }
+        ]
+      },
+      owner.session.token,
+      200,
+      env
+    );
+
+    expect(sawArchiveContext).toBe(true);
+    expect(response.answer).toContain("fake archived notification");
+    expect(response.sources).toEqual([
+      expect.objectContaining({
+        id: `archive:${archivedId}`,
+        kind: "notification",
+        title: "Killer clowns on the rampage at the Cincinnati Zoo",
+        subtitle: "Archive - Archive Assistant Test - done"
+      })
+    ]);
+  });
+
   it("sorts calendar source previews earliest upcoming first", async () => {
     const { store } = createStore();
     const owner = await register(store, "assistant-calendar-order@example.com");
@@ -2253,21 +2414,21 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       owner.user.id,
       {
         title: "Later event",
-        startAt: "2026-07-18T15:00:00.000Z",
-        endAt: "2026-07-18T15:30:00.000Z",
+        startAt: "2026-07-31T15:00:00.000Z",
+        endAt: "2026-07-31T15:30:00.000Z",
         timezone: "America/New_York"
       },
-      "2026-07-16T12:00:00.000Z"
+      "2026-07-29T12:00:00.000Z"
     );
     const earlier = await store.createLocalCalendarEvent(
       owner.user.id,
       {
         title: "Earlier event",
-        startAt: "2026-07-17T15:00:00.000Z",
-        endAt: "2026-07-17T15:30:00.000Z",
+        startAt: "2026-07-30T15:00:00.000Z",
+        endAt: "2026-07-30T15:30:00.000Z",
         timezone: "America/New_York"
       },
-      "2026-07-16T12:00:00.000Z"
+      "2026-07-29T12:00:00.000Z"
     );
     const env: Partial<ApiEnv> = {
       OPENAI_API_KEY: "test-key",
@@ -2533,6 +2694,53 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       owner.session.token
     );
     expect(afterDuplicate.notifications).toHaveLength(1);
+  });
+
+  it("retries scheduled Gmail sync for configured accounts left in error state", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-recoverable-scheduled@example.com");
+    const env = gmailTestEnv(fakeGmailClient());
+    const linked = await connectGmailForTest(store, owner, env);
+    const recoverable = await store.updateConnectorAccount(
+      owner.user.id,
+      linked.id,
+      linked.version,
+      {
+        status: "error",
+        healthStatus: "error",
+        syncStatus: "idle",
+        errorCode: "gmail_auth_failed",
+        errorMessage: "Gmail authentication failed. Reconnect the account."
+      },
+      "2026-07-14T20:00:00.000Z"
+    );
+    expect(recoverable?.credentialStatus).toBe("configured");
+
+    await expect(
+      syncConnectedGmailAccounts(store, env, "2026-07-14T20:05:00.000Z")
+    ).resolves.toMatchObject({
+      attempted: 1,
+      succeeded: 1,
+      failed: 0,
+      skipped: 0
+    });
+
+    const notifications = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      owner.session.token
+    );
+    expect(notifications.notifications).toHaveLength(1);
+    const account = await store.getConnectorAccount(owner.user.id, linked.id);
+    expect(account).toMatchObject({
+      status: "connected",
+      healthStatus: "healthy",
+      syncStatus: "idle",
+      errorCode: null,
+      errorMessage: null
+    });
   });
 
   it("runs scheduled Gmail IMAP sync for IMAP-enabled accounts", async () => {
@@ -2887,6 +3095,46 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     expect(text).toContain("calendar_updated");
   });
 
+  it("includes recoverable Gmail error accounts in Refresh All", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "sync-all-gmail-recoverable@example.com");
+    const env = gmailTestEnv(fakeGmailClient());
+    const linked = await connectGmailForTest(store, owner, env);
+    const recoverable = await store.updateConnectorAccount(
+      owner.user.id,
+      linked.id,
+      linked.version,
+      {
+        status: "error",
+        healthStatus: "error",
+        syncStatus: "idle",
+        errorCode: "gmail_auth_failed",
+        errorMessage: "Gmail authentication failed. Reconnect the account."
+      },
+      "2026-07-14T20:20:00.000Z"
+    );
+    expect(recoverable?.credentialStatus).toBe("configured");
+
+    const result = await requestJson<ConnectorSyncAllResult>(
+      store,
+      "POST",
+      "/v1/connectors/sync-all",
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+    expect(result.status).toBe("success");
+    expect(result.connectors).toEqual([
+      expect.objectContaining({
+        provider: "gmail",
+        status: "success",
+        created: 1,
+        failed: 0
+      })
+    ]);
+  });
+
   it("returns partial Refresh All results when one connector fails", async () => {
     const { store } = createStore();
     const owner = await register(store, "sync-all-partial@example.com");
@@ -2941,6 +3189,35 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
         expect.objectContaining({ provider: "generic-email", status: "skipped" })
       ])
     );
+  });
+
+  it("returns failed Refresh All connector results instead of hanging on slow connectors", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "sync-all-timeout@example.com");
+    await connectGmailForTest(store, owner, gmailTestEnv(hangingGmailClient()));
+
+    const result = await requestJson<ConnectorSyncAllResult>(
+      store,
+      "POST",
+      "/v1/connectors/sync-all",
+      undefined,
+      owner.session.token,
+      200,
+      {
+        ...gmailTestEnv(hangingGmailClient()),
+        DENTLINK_SYNC_ALL_CONNECTOR_TIMEOUT_MS: "10"
+      }
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.connectors).toEqual([
+      expect.objectContaining({
+        provider: "gmail",
+        status: "failed",
+        failed: 1,
+        message: expect.stringContaining("timed out")
+      })
+    ]);
   });
 
   it("records Gmail per-message outcomes and keeps partial sync failures observable", async () => {
@@ -4399,6 +4676,649 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     );
   });
 
+  it("keeps D1 sync cursor payloads compact while preserving sync responses", async () => {
+    const fixture = createStore();
+    if (!fixture.readSyncPayloads) return;
+    const auth = await register(fixture.store, "compact-sync@example.com");
+    const notification = await requestJson<Notification>(
+      fixture.store,
+      "POST",
+      "/v1/notifications",
+      {
+        title: "Private dental billing issue",
+        summary: "This summary must not be copied into sync_changes",
+        body: "This full body must only live in the authoritative notification row",
+        sourceLabel: "Billing"
+      },
+      auth.session.token,
+      201
+    );
+    const sync = await requestJson<SyncResponse>(
+      fixture.store,
+      "GET",
+      "/v1/sync?cursor=0",
+      undefined,
+      auth.session.token
+    );
+    expect(
+      sync.changes.some(
+        (change) =>
+          change.type === "notification" &&
+          change.op === "upsert" &&
+          change.notification.id === notification.id &&
+          change.notification.summary === "This summary must not be copied into sync_changes"
+      )
+    ).toBe(true);
+
+    const payloads = await fixture.readSyncPayloads();
+    const serialized = payloads.join("\n");
+    expect(payloads.length).toBeGreaterThan(0);
+    expect(serialized).not.toContain("Private dental billing issue");
+    expect(serialized).not.toContain("This summary must not be copied into sync_changes");
+    expect(serialized).not.toContain("This full body must only live");
+    expect(
+      payloads.some(
+        (payload) =>
+          payload ===
+          JSON.stringify({
+            type: "notification",
+            op: "upsert",
+            id: notification.id,
+            userId: auth.user.id
+          })
+      )
+    ).toBe(true);
+  });
+
+  it("encrypts D1 user content at rest while preserving authenticated reads", async () => {
+    const fixture = createStore();
+    if (!fixture.db) return;
+    const auth = await register(fixture.store, "encrypted-d1-content@example.com");
+    const account = await fixture.store.createConnectorAccount(
+      auth.user.id,
+      {
+        connectorKey: "gmail",
+        displayName: "Encrypted Gmail",
+        settings: { googleEmail: "encrypted@example.test" },
+        credentialRef: "credential",
+        credentialStatus: "configured"
+      },
+      "2026-07-29T18:00:00.000Z"
+    );
+
+    const note = await requestJson<Note>(
+      fixture.store,
+      "POST",
+      "/v1/notes",
+      {
+        kind: "task",
+        title: "Encrypt this note title",
+        body: "Encrypt this note body",
+        sourceUrl: "https://example.test/private-note"
+      },
+      auth.session.token,
+      201
+    );
+    const notification = await requestJson<Notification>(
+      fixture.store,
+      "POST",
+      "/v1/notifications",
+      {
+        title: "Encrypt this notification title",
+        summary: "Encrypt this notification summary",
+        body: "Encrypt this notification body",
+        sourceLabel: "Private Source"
+      },
+      auth.session.token,
+      201
+    );
+    const calendar = await requestJson<CalendarEvent>(
+      fixture.store,
+      "POST",
+      "/v1/calendar/events",
+      {
+        title: "Encrypt this calendar title",
+        description: "Encrypt this calendar description",
+        startAt: "2026-07-30T15:00:00.000Z",
+        endAt: "2026-07-30T15:30:00.000Z",
+        timezone: "America/New_York",
+        location: "Private operatory"
+      },
+      auth.session.token,
+      201
+    );
+    const record = await fixture.store.createConnectorSourceRecord(
+      auth.user.id,
+      {
+        accountId: account.id,
+        sourceExternalId: "encrypted-message-1",
+        sourceType: "email",
+        payloadHash: "encrypted-payload-hash",
+        normalizedPayload: {
+          provider: "gmail",
+          subject: "Encrypt this email subject",
+          snippet: "Encrypt this email snippet"
+        }
+      },
+      "2026-07-29T18:00:00.000Z"
+    );
+
+    expect(note.title).toBe("Encrypt this note title");
+    expect(notification.summary).toBe("Encrypt this notification summary");
+    expect(calendar.title).toBe("Encrypt this calendar title");
+    expect(record.normalizedPayload.subject).toBe("Encrypt this email subject");
+
+    const raw = await fixture.db
+      .prepare(
+        `SELECT
+           (SELECT title || ' ' || body || ' ' || COALESCE(source_url, '') FROM notes WHERE id = ?) AS note_text,
+           (SELECT title || ' ' || summary || ' ' || body || ' ' || source_label FROM notifications WHERE id = ?) AS notification_text,
+           (SELECT title || ' ' || description || ' ' || COALESCE(location, '') FROM calendar_events WHERE id = ?) AS calendar_text,
+           (SELECT normalized_payload_json FROM connector_source_records WHERE id = ?) AS source_text,
+           (SELECT email || ' ' || COALESCE(encrypted_email, '') FROM users WHERE id = ?) AS user_text`
+      )
+      .bind(note.id, notification.id, calendar.id, record.id, auth.user.id)
+      .first<{
+        note_text: string;
+        notification_text: string;
+        calendar_text: string;
+        source_text: string;
+        user_text: string;
+      }>();
+    const serialized = JSON.stringify(raw);
+    expect(serialized).toContain("dlenc:v1.");
+    expect(serialized).not.toContain("Encrypt this note title");
+    expect(serialized).not.toContain("Encrypt this notification summary");
+    expect(serialized).not.toContain("Encrypt this calendar title");
+    expect(serialized).not.toContain("Encrypt this email subject");
+    expect(serialized).not.toContain("Private Source");
+    expect(serialized).not.toContain("encrypted-d1-content@example.com");
+  });
+
+  it("backfills legacy plaintext D1 content without changing API reads", async () => {
+    const fixture = createStore();
+    if (!fixture.db) return;
+    const userId = "user_legacycontent";
+    const timestamp = "2026-07-29T18:30:00.000Z";
+    const password = await hashPassword("correct horse");
+    await fixture.db
+      .prepare(
+        `INSERT INTO users
+           (id, email, password_hash, password_salt, password_iterations, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .bind(
+        userId,
+        "legacy-content@example.com",
+        password.hash,
+        password.salt,
+        password.iterations,
+        timestamp
+      )
+      .run();
+    await fixture.db
+      .prepare(
+        `INSERT INTO notes
+           (id, user_id, kind, title, body, folder_id, due_at, priority, pinned, status,
+            global_order, source_url, version, created_at, updated_at, completed_at)
+         VALUES ('note_legacycontent', ?, 'task', 'Legacy note title', 'Legacy note body',
+                 NULL, NULL, 'none', 0, 'active', 0, 'https://example.test/legacy-note',
+                 1, ?, ?, NULL)`
+      )
+      .bind(userId, timestamp, timestamp)
+      .run();
+    await fixture.db
+      .prepare(
+        `INSERT INTO notifications
+           (id, user_id, title, summary, body, source, source_label, source_url, severity,
+            status, pinned, rank, global_order, version, created_at, updated_at,
+            completed_at, dismissed_at, email_metadata_json, rule_metadata_json, ai_metadata_json)
+         VALUES ('notification_legacycontent', ?, 'Legacy notification title',
+                 'Legacy notification summary', 'Legacy notification body', 'manual',
+                 'Legacy source', 'https://example.test/legacy-notification', 'info',
+                 'active', 0, 0, 0, 1, ?, ?, NULL, NULL,
+                 '{"subject":"Legacy email subject"}', NULL, NULL)`
+      )
+      .bind(userId, timestamp, timestamp)
+      .run();
+
+    const backfill = await handleApiRequest(
+      new Request("https://api.dentlink.test/v1/maintenance/content-encryption/backfill", {
+        method: "POST",
+        headers: { "X-DentLink-Maintenance-Token": "test-maintenance-token" }
+      }),
+      {
+        DB: fixture.db,
+        DENTLINK_ENV: "test",
+        DENTLINK_CONTENT_ENCRYPTION_KEY:
+          "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        DENTLINK_CONTENT_ENCRYPTION_BACKFILL_ENABLED: "true",
+        DENTLINK_MAINTENANCE_TOKEN: "test-maintenance-token"
+      }
+    );
+    expect(backfill.status).toBe(200);
+    expect(((await backfill.json()) as { updated: number }).updated).toBeGreaterThanOrEqual(3);
+
+    const store = new D1DentLinkStore(fixture.db, {
+      contentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+    });
+    const auth = await requestJson<AuthSession>(
+      store,
+      "POST",
+      "/v1/auth/login",
+      { email: "legacy-content@example.com", password: "correct horse" }
+    );
+    const notes = await requestJson<NotesList>(
+      store,
+      "GET",
+      "/v1/notes",
+      undefined,
+      auth.session.token
+    );
+    const notifications = await requestJson<{ notifications: Notification[] }>(
+      store,
+      "GET",
+      "/v1/notifications",
+      undefined,
+      auth.session.token
+    );
+    expect(notes.notes.find((note) => note.id === "note_legacycontent")?.title).toBe(
+      "Legacy note title"
+    );
+    expect(
+      notifications.notifications.find(
+        (notification) => notification.id === "notification_legacycontent"
+      )?.summary
+    ).toBe("Legacy notification summary");
+
+    const raw = await fixture.db
+      .prepare(
+        `SELECT
+           (SELECT email || ' ' || COALESCE(encrypted_email, '') FROM users WHERE id = ?) AS user_text,
+           (SELECT title || ' ' || body || ' ' || source_url FROM notes WHERE id = 'note_legacycontent') AS note_text,
+           (SELECT title || ' ' || summary || ' ' || body || ' ' || source_label || ' ' ||
+                   COALESCE(email_metadata_json, '')
+              FROM notifications WHERE id = 'notification_legacycontent') AS notification_text`
+      )
+      .bind(userId)
+      .first<{ user_text: string; note_text: string; notification_text: string }>();
+    const serialized = JSON.stringify(raw);
+    expect(serialized).toContain("dlenc:v1.");
+    expect(serialized).not.toContain("legacy-content@example.com");
+    expect(serialized).not.toContain("Legacy note title");
+    expect(serialized).not.toContain("Legacy notification summary");
+    expect(serialized).not.toContain("Legacy email subject");
+  });
+
+  it("sends storage health alerts with cooldown when D1 thresholds are crossed", async () => {
+    const fixture = createStore();
+    if (!fixture.db) return;
+    const auth = await register(fixture.store, "storage-alert@example.com");
+    await requestJson<Note>(
+      fixture.store,
+      "POST",
+      "/v1/notes",
+      { kind: "task", title: "Storage alert row one" },
+      auth.session.token,
+      201
+    );
+    await requestJson<Notification>(
+      fixture.store,
+      "POST",
+      "/v1/notifications",
+      { title: "Storage alert row two", summary: "aggregate only" },
+      auth.session.token,
+      201
+    );
+
+    const sent: unknown[] = [];
+    const env: ApiEnv = {
+      store: fixture.store,
+      DB: fixture.db,
+      DENTLINK_ENV: "test",
+      DENTLINK_ALERT_EMAIL_FROM: "alerts@dentlabs.net",
+      DENTLINK_SYNC_CHANGES_ROW_ALERT_THRESHOLD: "1",
+      ALERT_EMAIL: {
+        async send(input) {
+          sent.push(input);
+        }
+      }
+    };
+    const runScheduled = async () => {
+      const promises: Promise<unknown>[] = [];
+      apiDefaultForTest.scheduled({ scheduledTime: Date.now(), cron: "*/5 * * * *" }, env, {
+        waitUntil: (promise) => promises.push(promise)
+      });
+      await Promise.all(promises);
+    };
+
+    await runScheduled();
+    await runScheduled();
+
+    expect(sent).toHaveLength(1);
+    expect(JSON.stringify(sent[0])).toContain("evanjrizzo@gmail.com");
+    expect(JSON.stringify(sent[0])).toContain("storage health");
+    expect(JSON.stringify(sent[0])).not.toContain("Storage alert row one");
+    expect(JSON.stringify(sent[0])).not.toContain("Storage alert row two");
+    expect(JSON.stringify(sent[0])).not.toMatch(/token|secret|password/i);
+  });
+
+  it("stores encrypted archive objects and key wrappers by authenticated user only", async () => {
+    const fixture = createStore();
+    if (!fixture.db) return;
+    const first = await register(fixture.store, "archive-first@example.com");
+    const second = await register(fixture.store, "archive-second@example.com");
+    const storedObjects = new Map<string, string>();
+    const archiveEnv: Partial<ApiEnv> = {
+      DB: fixture.db,
+      ARCHIVE_BUCKET: {
+        async put(key, value) {
+          storedObjects.set(key, value);
+        },
+        async get(key) {
+          const value = storedObjects.get(key);
+          return value === undefined
+            ? null
+            : {
+                async text() {
+                  return value;
+                }
+              };
+        }
+      }
+    };
+
+    const plaintext = "patient should not be readable by backend storage metadata";
+    const ciphertextB64 = btoa("opaque encrypted bytes only");
+    const wrapper = await requestJson<{ wrapper: { keyId: string; wrappedKeyB64: string } }>(
+      fixture.store,
+      "POST",
+      "/v1/archive/key-wrappers",
+      {
+        keyId: "archive-key-v1",
+        wrapperType: "device-passkey",
+        wrappingAlgorithm: "AES-GCM",
+        wrappedKeyB64: btoa("wrapped-key-ciphertext"),
+        publicMetadata: { label: "Pixel" }
+      },
+      first.session.token,
+      201,
+      archiveEnv
+    );
+    expect(wrapper.wrapper).toMatchObject({
+      keyId: "archive-key-v1",
+      wrappedKeyB64: btoa("wrapped-key-ciphertext")
+    });
+
+    const created = await requestJson<{
+      object: { id: string; keyId: string; objectType: string; sizeBytes: number };
+    }>(
+      fixture.store,
+      "POST",
+      "/v1/archive/objects",
+      {
+        objectType: "notification",
+        sourceEntityType: "notification",
+        sourceEntityId: "notification_private",
+        encryptionAlgorithm: "AES-GCM",
+        keyId: "archive-key-v1",
+        nonceB64: btoa("unique nonce"),
+        ciphertextSha256B64: btoa("hash bytes"),
+        ciphertextB64,
+        publicMetadata: { schema: 1 }
+      },
+      first.session.token,
+      201,
+      archiveEnv
+    );
+    expect(created.object).toMatchObject({
+      keyId: "archive-key-v1",
+      objectType: "notification",
+      sizeBytes: expect.any(Number)
+    });
+
+    const listedFirst = await requestJson<{ objects: Array<{ id: string }> }>(
+      fixture.store,
+      "GET",
+      "/v1/archive/objects",
+      undefined,
+      first.session.token,
+      200,
+      archiveEnv
+    );
+    expect(listedFirst.objects.map((object) => object.id)).toContain(created.object.id);
+    const listedSecond = await requestJson<{ objects: Array<{ id: string }> }>(
+      fixture.store,
+      "GET",
+      "/v1/archive/objects",
+      undefined,
+      second.session.token,
+      200,
+      archiveEnv
+    );
+    expect(listedSecond.objects).toHaveLength(0);
+    await requestJson<ApiErrorBody>(
+      fixture.store,
+      "GET",
+      `/v1/archive/objects/${created.object.id}`,
+      undefined,
+      second.session.token,
+      404,
+      archiveEnv
+    );
+
+    const rawD1 = await fixture.db
+      .prepare(
+        `SELECT group_concat(public_metadata_json || ' ' || r2_key || ' ' || key_id, ' ')
+         AS serialized
+         FROM user_archive_objects`
+      )
+      .first<{ serialized: string }>();
+    expect(rawD1?.serialized ?? "").not.toContain(plaintext);
+    expect([...storedObjects.values()].join("\n")).not.toContain(plaintext);
+  });
+
+  it("refuses encrypted archive writes before the configured storage cap is exceeded", async () => {
+    const fixture = createStore();
+    if (!fixture.db) return;
+    const auth = await register(fixture.store, "archive-quota@example.com");
+    let putCount = 0;
+    const archiveEnv: Partial<ApiEnv> = {
+      DB: fixture.db,
+      DENTLINK_ARCHIVE_MAX_TOTAL_BYTES: "1",
+      ARCHIVE_BUCKET: {
+        async put() {
+          putCount += 1;
+        },
+        async get() {
+          return null;
+        }
+      }
+    };
+
+    const rejected = await requestJson<ApiErrorBody>(
+      fixture.store,
+      "POST",
+      "/v1/archive/objects",
+      {
+        objectType: "notification",
+        encryptionAlgorithm: "AES-GCM",
+        keyId: "archive-key-v1",
+        nonceB64: btoa("unique nonce"),
+        ciphertextSha256B64: btoa("hash bytes"),
+        ciphertextB64: btoa("opaque encrypted bytes only")
+      },
+      auth.session.token,
+      413,
+      archiveEnv
+    );
+
+    expect(rejected.error.code).toBe("archive_quota_exceeded");
+    expect(putCount).toBe(0);
+    const rows = await fixture.db
+      .prepare("SELECT COUNT(*) AS rows FROM user_archive_objects")
+      .first<{ rows: number }>();
+    expect(rows?.rows).toBe(0);
+  });
+
+  it("retains notifications unless an old completed or dismissed row has a same-user verified archive", async () => {
+    const fixture = createStore();
+    if (!fixture.db) return;
+    const owner = await register(fixture.store, "archive-retention@example.com");
+    const other = await register(fixture.store, "archive-retention-other@example.com");
+    const storedObjects = new Map<string, string>();
+    const archiveEnv: Partial<ApiEnv> = {
+      DB: fixture.db,
+      ARCHIVE_BUCKET: {
+        async put(key, value) {
+          storedObjects.set(key, value);
+        },
+        async get(key) {
+          const value = storedObjects.get(key);
+          return value === undefined
+            ? null
+            : {
+                async text() {
+                  return value;
+                }
+              };
+        }
+      }
+    };
+    const oldVerified = await createNotificationForRetention(
+      fixture.store,
+      fixture.db,
+      owner.session.token,
+      "old verified",
+      { status: "done", age: "old" }
+    );
+    const oldUnverified = await createNotificationForRetention(
+      fixture.store,
+      fixture.db,
+      owner.session.token,
+      "old unverified",
+      { status: "done", age: "old" }
+    );
+    const oldPinned = await createNotificationForRetention(
+      fixture.store,
+      fixture.db,
+      owner.session.token,
+      "old pinned",
+      { status: "done", age: "old", pinned: true }
+    );
+    const recentVerified = await createNotificationForRetention(
+      fixture.store,
+      fixture.db,
+      owner.session.token,
+      "recent verified",
+      { status: "dismissed", age: "recent" }
+    );
+    const activeVerified = await createNotificationForRetention(
+      fixture.store,
+      fixture.db,
+      owner.session.token,
+      "active verified",
+      { status: "active", age: "old" }
+    );
+    const otherUserArchiveOnly = await createNotificationForRetention(
+      fixture.store,
+      fixture.db,
+      owner.session.token,
+      "other user archive only",
+      { status: "done", age: "old" }
+    );
+
+    await createAndVerifyArchiveObject(
+      fixture.store,
+      owner.session.token,
+      oldVerified.id,
+      archiveEnv
+    );
+    await createAndVerifyArchiveObject(
+      fixture.store,
+      owner.session.token,
+      oldPinned.id,
+      archiveEnv
+    );
+    await createAndVerifyArchiveObject(
+      fixture.store,
+      owner.session.token,
+      recentVerified.id,
+      archiveEnv
+    );
+    await createAndVerifyArchiveObject(
+      fixture.store,
+      owner.session.token,
+      activeVerified.id,
+      archiveEnv
+    );
+    await createAndVerifyArchiveObject(
+      fixture.store,
+      other.session.token,
+      otherUserArchiveOnly.id,
+      archiveEnv
+    );
+    await createArchiveObjectForNotification(
+      fixture.store,
+      owner.session.token,
+      oldUnverified.id,
+      archiveEnv
+    );
+
+    const cursorBeforeRetention = await fixture.db
+      .prepare("SELECT COALESCE(MAX(cursor), 0) AS cursor FROM sync_changes")
+      .first<{ cursor: number }>();
+    await runScheduledForTest({
+      store: fixture.store,
+      DB: fixture.db,
+      ...archiveEnv
+    });
+    expect(await notificationExists(fixture.db, owner.user.id, oldVerified.id)).toBe(true);
+
+    await runScheduledForTest({
+      store: fixture.store,
+      DB: fixture.db,
+      DENTLINK_ARCHIVE_NOTIFICATION_RETENTION_ENABLED: "true",
+      DENTLINK_ARCHIVE_NOTIFICATION_RETENTION_DAYS: "30",
+      DENTLINK_ARCHIVE_NOTIFICATION_RETENTION_BATCH_SIZE: "10",
+      ...archiveEnv
+    });
+    expect(await notificationExists(fixture.db, owner.user.id, oldVerified.id)).toBe(true);
+
+    await runScheduledForTest({
+      store: fixture.store,
+      DB: fixture.db,
+      DENTLINK_ARCHIVE_NOTIFICATION_RETENTION_ENABLED: "true",
+      DENTLINK_ARCHIVE_NOTIFICATION_RETENTION_DAYS: "30",
+      DENTLINK_ARCHIVE_NOTIFICATION_RETENTION_BATCH_SIZE: "10",
+      DENTLINK_ARCHIVE_NOTIFICATION_RETENTION_USER_IDS: owner.user.id,
+      ...archiveEnv
+    });
+
+    expect(await notificationExists(fixture.db, owner.user.id, oldVerified.id)).toBe(false);
+    expect(await notificationExists(fixture.db, owner.user.id, oldUnverified.id)).toBe(true);
+    expect(await notificationExists(fixture.db, owner.user.id, oldPinned.id)).toBe(true);
+    expect(await notificationExists(fixture.db, owner.user.id, recentVerified.id)).toBe(true);
+    expect(await notificationExists(fixture.db, owner.user.id, activeVerified.id)).toBe(true);
+    expect(await notificationExists(fixture.db, owner.user.id, otherUserArchiveOnly.id)).toBe(true);
+
+    const sync = await requestJson<SyncResponse>(
+      fixture.store,
+      "GET",
+      `/v1/sync?cursor=${cursorBeforeRetention?.cursor ?? 0}`,
+      undefined,
+      owner.session.token,
+      200,
+      { DB: fixture.db }
+    );
+    expect(
+      sync.changes.some(
+        (change) =>
+          change.type === "notification" && change.op === "delete" && change.id === oldVerified.id
+      )
+    ).toBe(true);
+  });
+
   it("supports user-isolated notifications and versioned notification actions", async () => {
     const { store } = createStore();
     const first = await register(store, "notifications@example.com");
@@ -4648,6 +5568,118 @@ async function register(store: DentLinkStore, email: string): Promise<AuthSessio
   );
 }
 
+async function runScheduledForTest(env: ApiEnv): Promise<void> {
+  const promises: Promise<unknown>[] = [];
+  apiDefaultForTest.scheduled({ scheduledTime: Date.now(), cron: "*/5 * * * *" }, env, {
+    waitUntil: (promise) => promises.push(promise)
+  });
+  await Promise.all(promises);
+}
+
+async function createNotificationForRetention(
+  store: DentLinkStore,
+  db: D1DatabaseLike,
+  token: string,
+  title: string,
+  options: {
+    status: "active" | "done" | "dismissed";
+    age: "old" | "recent";
+    pinned?: boolean;
+  }
+): Promise<Notification> {
+  const created = await requestJson<Notification>(
+    store,
+    "POST",
+    "/v1/notifications",
+    {
+      title,
+      summary: `${title} summary`,
+      pinned: options.pinned ?? false
+    },
+    token,
+    201
+  );
+  const current =
+    options.status === "active"
+      ? created
+      : await requestJson<Notification>(
+          store,
+          "PATCH",
+          `/v1/notifications/${created.id}`,
+          { expectedVersion: created.version, patch: { status: options.status } },
+          token
+        );
+  const reference = options.age === "old" ? "2026-06-01T00:00:00.000Z" : new Date().toISOString();
+  await db
+    .prepare(
+      `UPDATE notifications
+       SET updated_at = ?,
+           completed_at = CASE WHEN status = 'done' THEN ? ELSE completed_at END,
+           dismissed_at = CASE WHEN status = 'dismissed' THEN ? ELSE dismissed_at END
+       WHERE id = ? AND user_id = ?`
+    )
+    .bind(reference, reference, reference, current.id, current.userId)
+    .run();
+  return { ...current, updatedAt: reference };
+}
+
+async function createAndVerifyArchiveObject(
+  store: DentLinkStore,
+  token: string,
+  notificationId: string,
+  env: Partial<ApiEnv>
+): Promise<{ object: { id: string; verifiedAt: string | null } }> {
+  const created = await createArchiveObjectForNotification(store, token, notificationId, env);
+  return requestJson<{ object: { id: string; verifiedAt: string | null } }>(
+    store,
+    "POST",
+    `/v1/archive/objects/${created.object.id}/verify`,
+    undefined,
+    token,
+    200,
+    env
+  );
+}
+
+async function createArchiveObjectForNotification(
+  store: DentLinkStore,
+  token: string,
+  notificationId: string,
+  env: Partial<ApiEnv>
+): Promise<{ object: { id: string; verifiedAt: string | null } }> {
+  return requestJson<{ object: { id: string; verifiedAt: string | null } }>(
+    store,
+    "POST",
+    "/v1/archive/objects",
+    {
+      objectType: "notification",
+      sourceEntityType: "notification",
+      sourceEntityId: notificationId,
+      encryptionAlgorithm: "AES-GCM",
+      keyId: "archive-key-v1",
+      nonceB64: btoa(`nonce-${notificationId}`),
+      ciphertextSha256B64: btoa(`hash-${notificationId}`),
+      ciphertextB64: btoa(`opaque encrypted ${notificationId}`),
+      publicMetadata: { schema: 1 }
+    },
+    token,
+    201,
+    env
+  );
+}
+
+async function notificationExists(
+  db: D1DatabaseLike,
+  userId: string,
+  notificationId: string
+): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT id FROM notifications WHERE user_id = ? AND id = ?")
+    .bind(userId, notificationId)
+    .first<{ id: string }>();
+  return Boolean(row);
+}
+
 function debugSessions(store: MemoryDentLinkStore): Map<string, unknown> {
   return (store as unknown as { sessions: Map<string, unknown> }).sessions;
 }
@@ -4827,6 +5859,37 @@ function fakeGmailClientWithRefreshToken(refreshTokenValue: string): GmailApiCli
           ]
         }
       };
+    }
+  };
+}
+
+function hangingGmailClient(): GmailApiClient {
+  return {
+    async exchangeCode(code) {
+      expect(code).toBe("valid-code");
+      return {
+        accessToken: "access-token",
+        refreshToken: "hanging-refresh-token-secret",
+        scope: "https://www.googleapis.com/auth/gmail.readonly"
+      };
+    },
+    async refreshAccessToken() {
+      return new Promise(() => undefined);
+    },
+    async getAccessTokenScopes() {
+      return ["https://www.googleapis.com/auth/gmail.readonly"];
+    },
+    async getProfile() {
+      return { emailAddress: "owner.gmail@example.test", historyId: "100" };
+    },
+    async listMessages() {
+      return { messages: [] };
+    },
+    async listHistory() {
+      return { history: [] };
+    },
+    async getMessage() {
+      throw new Error("Message should not be fetched when token refresh hangs");
     }
   };
 }

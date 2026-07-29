@@ -144,6 +144,92 @@ export type UserPreferencesPatch = {
   };
 };
 
+export type ArchiveKeyWrapper = {
+  id: EntityId;
+  keyId: string;
+  wrapperType: string;
+  wrappingAlgorithm: string;
+  wrappedKeyB64: string;
+  saltB64: string | null;
+  publicMetadata: Record<string, unknown>;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+};
+
+export type ArchiveKeyWrapperInput = {
+  keyId: string;
+  wrapperType: string;
+  wrappingAlgorithm: string;
+  wrappedKeyB64: string;
+  saltB64?: string | null;
+  publicMetadata?: Record<string, unknown>;
+};
+
+export type ArchiveKeyWrappersList = {
+  wrappers: ArchiveKeyWrapper[];
+};
+
+export type ArchiveObjectMetadata = {
+  id: EntityId;
+  objectType: string;
+  sourceEntityType: string | null;
+  sourceEntityId: string | null;
+  encryptionAlgorithm: string;
+  keyId: string;
+  nonceB64: string;
+  ciphertextSha256B64: string;
+  sizeBytes: number;
+  verifiedAt: IsoDateTime | null;
+  publicMetadata: Record<string, unknown>;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+};
+
+export type ArchiveObjectInput = {
+  objectType: string;
+  sourceEntityType?: string | null;
+  sourceEntityId?: string | null;
+  encryptionAlgorithm: string;
+  keyId: string;
+  nonceB64: string;
+  ciphertextSha256B64: string;
+  ciphertextB64: string;
+  publicMetadata?: Record<string, unknown>;
+};
+
+export type ArchiveObjectEnvelope = {
+  version: 1;
+  id: EntityId;
+  objectType: string;
+  sourceEntityType: string | null;
+  sourceEntityId: string | null;
+  encryption: {
+    algorithm: string;
+    keyId: string;
+    nonceB64: string;
+    ciphertextSha256B64: string;
+  };
+  ciphertextB64: string;
+  createdAt: IsoDateTime;
+};
+
+export type ArchiveObjectsList = {
+  objects: ArchiveObjectMetadata[];
+};
+
+export type ArchiveObjectCreateResponse = {
+  object: ArchiveObjectMetadata;
+};
+
+export type ArchiveObjectReadResponse = {
+  object: ArchiveObjectMetadata;
+  envelope: ArchiveObjectEnvelope;
+};
+
+export type ArchiveObjectVerifyResponse = {
+  object: ArchiveObjectMetadata;
+};
+
 export type Note = {
   id: EntityId;
   userId: EntityId;
@@ -715,6 +801,21 @@ export type EmailAiReprocessResult = {
 export type AssistantChatRequest = {
   message: string;
   timezone?: string;
+  archivedNotifications?: AssistantArchivedNotificationContext[];
+};
+
+export type AssistantArchivedNotificationContext = {
+  id: EntityId;
+  title: string;
+  summary: string;
+  body: string;
+  sourceLabel: string;
+  severity: NotificationSeverity;
+  status: Notification["status"];
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  sourceTimestamp: IsoDateTime;
+  sourceUrl: string | null;
 };
 
 export type AssistantChatSource = {

@@ -119,19 +119,89 @@ Non-secret Worker variables:
 - `GOOGLE_CALENDAR_REDIRECT_URI`: OAuth callback URL for Google Calendar, for example
   `https://dentlink-api-preview.evanjrizzo.workers.dev/v1/connectors/google-calendar/callback`.
 - `DENTLINK_WEB_ORIGIN`: exact web origin allowed for Google connector OAuth return redirects.
+- `DENTLINK_ALERT_EMAIL_TO`: operational alert recipient. Preview is configured as
+  `evanjrizzo@gmail.com`.
+- `DENTLINK_ALERT_EMAIL_FROM`: verified Cloudflare Email Sending sender address for operational
+  alerts. Preview is configured as `alerts@dentlabs.net`.
+- `DENTLINK_STORAGE_ALERT_COOLDOWN_HOURS`: optional per-alert cooldown, default `6`.
+- `DENTLINK_SYNC_CHANGES_ROW_ALERT_THRESHOLD`: optional `sync_changes` row alert threshold, default
+  `12000`.
+- `DENTLINK_SYNC_CHANGES_AVG_PAYLOAD_ALERT_BYTES`: optional average payload alert threshold, default
+  `500`.
+- `DENTLINK_SYNC_CHANGES_MAX_PAYLOAD_ALERT_BYTES`: optional maximum payload alert threshold, default
+  `2000`.
+- `DENTLINK_ARCHIVE_MAX_TOTAL_BYTES`: hard cap for encrypted archive objects written through the
+  DentLink API. Preview is configured to `9000000000`, so API writes are refused before indexed
+  archive storage can reach 10 GB.
+- `DENTLINK_ARCHIVE_NOTIFICATION_RETENTION_ENABLED`: disabled by default. Set to `true` only after
+  preview verification; scheduled maintenance deletes old notification D1 rows only when a same-user
+  encrypted archive object has been marked verified.
+- `DENTLINK_ARCHIVE_NOTIFICATION_RETENTION_USER_IDS`: comma-separated allowlist of `user_...` ids
+  eligible for scheduled archive retention. Leave empty to make retention a no-op even if enabled.
+- `DENTLINK_ARCHIVE_NOTIFICATION_RETENTION_DAYS`: optional minimum age for verified archived
+  notification deletion, default `30`.
+- `DENTLINK_ARCHIVE_NOTIFICATION_RETENTION_BATCH_SIZE`: optional scheduled deletion batch size,
+  default `25`, capped at `100`.
+- `DENTLINK_REQUIRE_CONTENT_ENCRYPTION`: set to `true` in preview and production. When true, Worker
+  request handling fails closed if the D1 content-encryption key secret is missing.
+- `DENTLINK_CONTENT_ENCRYPTION_BACKFILL_ENABLED`: disabled by default. Temporarily set to `true`
+  only while running the token-gated D1 content-encryption backfill, then redeploy with `false`.
+- `DENTLINK_CONTENT_ENCRYPTION_BACKFILL_BATCH_SIZE`: optional maintenance backfill batch size,
+  default `50`, capped at `200`.
 
 Worker secrets for Google connectors:
 
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
 - `GMAIL_CREDENTIAL_ENCRYPTION_KEY`
+- `DENTLINK_CONTENT_ENCRYPTION_KEY`
+- `DENTLINK_CONTENT_ENCRYPTION_KEY_V2` for future key rotation; when present it takes precedence.
+- `DENTLINK_MAINTENANCE_TOKEN` for temporary maintenance endpoints.
 
 `GMAIL_CREDENTIAL_ENCRYPTION_KEY` must be a base64 or base64url value that decodes to 32 bytes.
 Generate it outside the repository and store it with Wrangler secrets or local `.dev.vars`.
+`DENTLINK_CONTENT_ENCRYPTION_KEY` must also decode to 32 bytes and must not be committed, logged, or
+passed as a command-line argument.
+
+Operational alert email uses the optional Cloudflare Email Sending binding `ALERT_EMAIL`. If the
+binding or verified sender domain is missing, scheduled jobs log `alert_email_unconfigured` instead
+of failing application traffic. Enable Email Sending for the sender domain and add the binding
+before relying on email delivery:
+
+```toml
+send_email = [
+  { name = "ALERT_EMAIL", allowed_sender_addresses = ["alerts@dentlabs.net"], allowed_destination_addresses = ["evanjrizzo@gmail.com"] }
+]
+```
+
+The encrypted archive endpoints require a Cloudflare R2 binding named `ARCHIVE_BUCKET`. R2 must be
+enabled for the Cloudflare account before binding a bucket in deployed environments. Without this
+binding, normal app routes continue to work and archive object routes return `archive_unavailable`.
+Archive writes are private, user-scoped, and capped by `DENTLINK_ARCHIVE_MAX_TOTAL_BYTES`; the API
+checks the current indexed archive bytes plus the next serialized object size before writing to R2.
+Notification retention requires the client to read back and decrypt the archive object, then mark
+the same-user archive row verified; unverified, active, pinned, or recent notifications are not
+retention eligible.
+
+```toml
+r2_buckets = [
+  { binding = "ARCHIVE_BUCKET", bucket_name = "dentlink-user-archive-preview" }
+]
+```
 
 Client-side Vite variable:
 
 - `VITE_DENTLINK_API_BASE_URL`: API origin for preview or production web builds.
+- `VITE_DENTLINK_ARCHIVE_WRITES_ENABLED`: optional hidden client archive-writer flag. Defaults to
+  disabled. When enabled, the web client still requires user-held recovery material in
+  `localStorage` under `dentlink.archive.recoverySecret.v1`; it archives only old done/dismissed
+  notifications, skips already archived notifications, and does not mutate active D1 notification
+  rows.
+- `VITE_DENTLINK_ARCHIVE_MIN_AGE_DAYS`: optional hidden archive-writer age threshold, default `30`.
+- `VITE_DENTLINK_ARCHIVE_MAX_WRITES`: optional hidden archive-writer per-run limit, default `5`.
+- `VITE_DENTLINK_ARCHIVE_WRITE_USER_IDS`: optional comma-separated `user_...` id allowlist for
+  hidden client archive writes. Leave empty to allow any signed-in browser with archive writes
+  enabled and local recovery material.
 
 Use `.dev.vars` for local non-committed Worker values and Wrangler secrets for preview/production.
 `.dev.vars` and `.dev.vars.*` are ignored by Git. Webhook endpoint secrets are generated through the
