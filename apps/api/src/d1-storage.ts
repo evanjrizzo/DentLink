@@ -2943,6 +2943,7 @@ export class D1DentLinkStore implements DentLinkStore {
     operation: "upsert" | "delete",
     _payload: SyncPayload
   ): D1PreparedStatement {
+    void _payload;
     const payload: CompactSyncPayload = {
       type: entityType,
       op: operation,
@@ -3080,10 +3081,6 @@ function folderFromRow(row: FolderRow): Folder {
   };
 }
 
-function tagFromRow(row: TagRow): Tag {
-  return folderFromRow(row);
-}
-
 function notificationFromRow(row: NotificationRow): Notification {
   return {
     id: row.id,
@@ -3129,10 +3126,6 @@ function defaultNotificationAi(): Notification["ai"] {
     errorCode: null,
     errorMessage: null
   };
-}
-
-function jsonOrNull(value: unknown): string | null {
-  return value === null || value === undefined ? null : JSON.stringify(value);
 }
 
 function parseJsonOrNull<T>(value: string | null): T | null {
@@ -3202,29 +3195,6 @@ function calendarAnnotationSelectColumns(): string {
           a.updated_at AS annotation_updated_at`;
 }
 
-function calendarEventWithAnnotationFromRow(
-  row: CalendarEventRow & CalendarAnnotationSelectRow
-): CalendarEvent {
-  const event = calendarEventFromRow(row);
-  event.annotation = row.annotation_id
-    ? {
-        id: row.annotation_id,
-        userId: row.user_id,
-        eventId: row.id,
-        notes: row.annotation_notes ?? "",
-        pinned: Boolean(row.annotation_pinned),
-        completed: Boolean(row.annotation_completed),
-        hidden: Boolean(row.annotation_hidden),
-        tagIds: parseTagIds(row.annotation_tag_ids_json),
-        tags: [],
-        version: row.annotation_version ?? 1,
-        createdAt: row.annotation_created_at ?? row.created_at,
-        updatedAt: row.annotation_updated_at ?? row.updated_at
-      }
-    : null;
-  return event;
-}
-
 function calendarAnnotationFromRow(
   row: CalendarAnnotationRow,
   tags: Tag[]
@@ -3262,70 +3232,6 @@ function webhookFromRow(row: WebhookRow): WebhookEndpoint {
   };
 }
 
-function connectorAccountFromRow(row: ConnectorAccountRow): ConnectorAccount {
-  return {
-    id: row.id,
-    userId: row.user_id,
-    connectorKey: row.connector_key,
-    displayName: row.display_name,
-    status: row.status,
-    healthStatus: row.health_status,
-    syncStatus: row.sync_status,
-    settings: JSON.parse(row.settings_json) as ConnectorAccount["settings"],
-    credentialRef: row.credential_ref,
-    credentialStatus: row.credential_status,
-    syncCursor: row.sync_cursor,
-    lastSyncAt: row.last_sync_at,
-    nextSyncAt: row.next_sync_at,
-    lastHealthAt: row.last_health_at,
-    errorCode: row.error_code,
-    errorMessage: row.error_message,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    version: row.version
-  };
-}
-
-function connectorSourceRecordFromRow(row: ConnectorSourceRecordRow): ConnectorSourceRecord {
-  return {
-    id: row.id,
-    userId: row.user_id,
-    accountId: row.account_id,
-    connectorKey: row.connector_key,
-    sourceExternalId: row.source_external_id,
-    sourceType: row.source_type,
-    payloadHash: row.payload_hash,
-    normalizedPayload: JSON.parse(row.normalized_payload_json) as Record<string, unknown>,
-    status: row.status,
-    receivedAt: row.received_at,
-    processedAt: row.processed_at,
-    processingReason: row.processing_reason,
-    errorMessage: row.error_message,
-    version: row.version
-  };
-}
-
-function connectorSyncAttemptFromRow(row: ConnectorSyncAttemptRow): ConnectorSyncAttempt {
-  return {
-    id: row.id,
-    userId: row.user_id,
-    accountId: row.account_id,
-    connectorKey: row.connector_key,
-    trigger: row.trigger,
-    engine: row.engine,
-    status: row.status,
-    startedAt: row.started_at,
-    completedAt: row.completed_at,
-    durationMs: row.duration_ms,
-    errorCode: row.error_code,
-    errorMessage: row.error_message,
-    summary: row.summary_json
-      ? (JSON.parse(row.summary_json) as ConnectorSyncAttempt["summary"])
-      : null,
-    details: JSON.parse(row.details_json) as Record<string, unknown>
-  };
-}
-
 function connectorOAuthStateFromRow(row: ConnectorOAuthStateRow): ConnectorOAuthState {
   return {
     id: row.id,
@@ -3350,35 +3256,6 @@ function connectorCredentialFromRow(row: ConnectorCredentialRow): ConnectorCrede
     encryptionVersion: row.encryption_version,
     createdAt: row.created_at,
     updatedAt: row.updated_at
-  };
-}
-
-function historyFromRow(row: HistoryRow): NoteHistoryEvent {
-  return {
-    id: row.id,
-    userId: row.user_id,
-    noteId: row.note_id,
-    action: row.action,
-    version: row.version,
-    snapshot: JSON.parse(row.snapshot_json) as Note,
-    createdAt: row.created_at
-  };
-}
-
-function conflictFromRow(row: ConflictRow): NoteConflict {
-  return {
-    id: row.id,
-    userId: row.user_id,
-    noteId: row.note_id,
-    expectedVersion: row.expected_version,
-    actualVersion: row.actual_version,
-    attemptedPatch: JSON.parse(row.attempted_patch_json) as NotePatch,
-    serverNote: JSON.parse(row.server_note_json) as Note,
-    status: row.status,
-    version: row.version,
-    createdAt: row.created_at,
-    resolvedAt: row.resolved_at,
-    resolution: row.resolution
   };
 }
 

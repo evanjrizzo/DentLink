@@ -2343,7 +2343,6 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
   it("answers assistant questions with client-decrypted archived notification context", async () => {
     const { store } = createStore();
     const owner = await register(store, "assistant-archive@example.com");
-    const now = "2026-07-29T17:30:00.000Z";
     const archivedId = "notification_clown_archive_test_1785345010";
     let sawArchiveContext = false;
     const env: Partial<ApiEnv> = {

@@ -3,6 +3,8 @@
 import { spawnSync } from "node:child_process";
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import { webcrypto } from "node:crypto";
+import { Buffer } from "node:buffer";
+import { TextDecoder, TextEncoder } from "node:util";
 
 const API_BASE_URL =
   process.env.DENTLINK_PREVIEW_API_BASE_URL ??
@@ -316,7 +318,7 @@ function sqlQuote(value) {
 }
 
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
 }
 
 function fail(message) {

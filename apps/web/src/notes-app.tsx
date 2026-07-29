@@ -2252,30 +2252,6 @@ function homeNoteDueLabel(note: Note, today: string): string {
   return `Due ${formatMonthDay(dueDate)}`;
 }
 
-function homeReviewItems(
-  notifications: Notification[]
-): Array<{ id: EntityId; title: string; reason: string; detail: string }> {
-  return notifications
-    .filter(
-      (notification) =>
-        notification.status === "suppressed" ||
-        notification.ai?.status === "failed" ||
-        notification.ai?.status === "skipped"
-    )
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-    .map((notification) => ({
-      id: notification.id,
-      title: notification.email?.subject || notification.title || "Notification",
-      reason:
-        notification.status === "suppressed"
-          ? "Below threshold"
-          : notification.ai?.status === "failed"
-            ? "AI failed"
-            : "AI skipped",
-      detail: notificationSummary(notification)
-    }));
-}
-
 function homePromptSuggestions(counts: {
   activeNotifications: number;
   dueNotes: number;
