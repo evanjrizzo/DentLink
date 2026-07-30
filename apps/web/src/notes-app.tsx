@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement } from "react";
 
 import { DentLinkApiClient, DentLinkApiError } from "@dentlink/api-client";
-import { archiveEligibleNotifications, buildAssistantArchiveNotificationContext } from "./archive";
+import {
+  archiveEligibleNotifications,
+  buildAssistantArchiveNotificationContextWithKey,
+  clearDeviceArchiveKey,
+  enrollDeviceArchiveKey,
+  exportDeviceArchiveTransferCode,
+  hasDeviceArchiveKey,
+  importDeviceArchiveTransferCode,
+  loadDeviceArchiveKey
+} from "./archive";
 import type {
   AssistantArchivedNotificationContext,
   AssistantChatSource,
@@ -17,6 +26,7 @@ import type {
   EmailAiSettings,
   EntityId,
   GmailDiagnostics,
+  GmailSyncResult,
   GmailRule,
   Notification,
   NotificationInput,
@@ -46,13 +56,7 @@ type AssistantMessage = {
 };
 type SettingsTab = "general" | "appearance" | "ai" | "connections" | "rules" | "debug" | "about";
 type CalendarMode = "agenda" | "day" | "week" | "month";
-type GmailSyncStage =
-  | "Connecting..."
-  | "Searching..."
-  | "Fetching..."
-  | "Applying rules..."
-  | "Creating notifications..."
-  | "Finished.";
+type GmailSyncStage = string;
 
 type GmailSyncUiState = {
   stage: GmailSyncStage;
@@ -239,6 +243,7 @@ const ARCHIVE_MAX_WRITES = positiveIntegerEnv(import.meta.env.VITE_DENTLINK_ARCH
 const ARCHIVE_WRITE_USER_IDS = safeUserIdSet(import.meta.env.VITE_DENTLINK_ARCHIVE_WRITE_USER_IDS);
 const ARCHIVE_RECOVERY_STORAGE_KEY = "dentlink.archive.recoverySecret.v1";
 const UI_REFRESH_INTERVAL_MS = 60_000;
+const REFRESH_ALL_GMAIL_BATCH_LIMIT = 8;
 const DEFAULT_IMPORTANCE_INSTRUCTION =
   "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.";
 const DEFAULT_SUMMARY_INSTRUCTION = "";
@@ -283,6 +288,13 @@ export function DentLinkNotesApp(): ReactElement {
     nextPollAt: null,
     lastAttemptAt: null
   });
+  const [archiveDeviceEnrolled, setArchiveDeviceEnrolled] = useState(false);
+  const [archiveLegacySecretAvailable, setArchiveLegacySecretAvailable] = useState(false);
+  const [archiveEnrollmentDraft, setArchiveEnrollmentDraft] = useState("");
+  const [archiveTransferCode, setArchiveTransferCode] = useState("");
+  const [archiveTransferImportDraft, setArchiveTransferImportDraft] = useState("");
+  const [archiveEnrollmentStatus, setArchiveEnrollmentStatus] = useState<string | null>(null);
+  const [archiveEnrollmentSaving, setArchiveEnrollmentSaving] = useState(false);
   const [preferences, setPreferences] = useState<UserPreferences | null>(null);
   const [aiReprocessResult, setAiReprocessResult] = useState<EmailAiReprocessResult | null>(null);
   const [aiReprocessRunning, setAiReprocessRunning] = useState(false);
@@ -341,6 +353,32 @@ export function DentLinkNotesApp(): ReactElement {
   useEffect(() => {
     notesListRef.current = notesList;
   }, [notesList]);
+
+  useEffect(() => {
+    let active = true;
+    if (!auth) {
+      setArchiveDeviceEnrolled(false);
+      setArchiveLegacySecretAvailable(false);
+      setArchiveEnrollmentDraft("");
+      setArchiveTransferCode("");
+      setArchiveTransferImportDraft("");
+      setArchiveEnrollmentStatus(null);
+      return () => {
+        active = false;
+      };
+    }
+    setArchiveLegacySecretAvailable(Boolean(storedArchiveRecoverySecret()));
+    void hasDeviceArchiveKey(archiveDeviceStorageScope(auth.user.id))
+      .then((enrolled) => {
+        if (active) setArchiveDeviceEnrolled(enrolled);
+      })
+      .catch(() => {
+        if (active) setArchiveDeviceEnrolled(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [auth]);
 
   useEffect(() => {
     if (!auth || !ARCHIVE_WRITES_ENABLED || notifications.length === 0) return;
@@ -638,7 +676,8 @@ export function DentLinkNotesApp(): ReactElement {
     try {
       setRefreshState((current) => ({ ...current, message: "Refreshing Gmail..." }));
       await refreshStepDelay();
-      const result = await client.syncAllConnectors();
+      let result = await client.syncAllConnectors();
+      result = await continueGmailRefreshBatches(result);
       setRefreshState((current) => ({ ...current, message: "Updating Notifications...", result }));
       await refreshStepDelay();
       await loadNotifications();
@@ -841,6 +880,119 @@ export function DentLinkNotesApp(): ReactElement {
       if (patch.ai) await loadNotifications();
     } catch (caught) {
       handleFailure(caught);
+    }
+  }
+
+  async function enrollArchiveDevice(recoverySecretOverride?: string): Promise<void> {
+    const recoverySecret = (recoverySecretOverride ?? archiveEnrollmentDraft).trim();
+    if (!recoverySecret) {
+      setArchiveEnrollmentStatus("Enter the archive recovery secret first.");
+      return;
+    }
+    setArchiveEnrollmentSaving(true);
+    setArchiveEnrollmentStatus("Enabling archive assistant on this device...");
+    try {
+      await nextFrame();
+      if (!auth) throw new Error("Sign in before enabling archive assistant.");
+      await withTimeout(
+        enrollDeviceArchiveKey(client, recoverySecret, archiveDeviceStorageScope(auth.user.id), {
+          onProgress: setArchiveEnrollmentStatus,
+          apiTimeoutMs: 15_000
+        }),
+        45_000,
+        "Archive enrollment timed out. Check the DentLink API connection and try again."
+      );
+      setArchiveDeviceEnrolled(true);
+      setArchiveEnrollmentDraft("");
+      setArchiveEnrollmentStatus("Archive assistant enabled on this device.");
+    } catch (caught) {
+      setArchiveEnrollmentStatus(
+        caught instanceof Error ? caught.message : "Could not enroll this device."
+      );
+    } finally {
+      setArchiveEnrollmentSaving(false);
+    }
+  }
+
+  async function enrollArchiveDeviceFromStoredSecret(): Promise<void> {
+    const storedSecret = storedArchiveRecoverySecret();
+    if (!storedSecret) {
+      setArchiveLegacySecretAvailable(false);
+      setArchiveEnrollmentStatus("This browser does not have the saved archive recovery secret.");
+      return;
+    }
+    await enrollArchiveDevice(storedSecret);
+  }
+
+  async function forgetArchiveDevice(): Promise<void> {
+    setArchiveEnrollmentSaving(true);
+    setArchiveEnrollmentStatus("Forgetting archive assistant access on this device...");
+    try {
+      await nextFrame();
+      if (!auth) throw new Error("Sign in before changing archive assistant access.");
+      await withTimeout(
+        clearDeviceArchiveKey(archiveDeviceStorageScope(auth.user.id)),
+        10_000,
+        "Could not update device storage. Try closing and reopening DentLink."
+      );
+      setArchiveDeviceEnrolled(false);
+      setArchiveEnrollmentStatus("Archive assistant disabled on this device.");
+    } catch (caught) {
+      setArchiveEnrollmentStatus(
+        caught instanceof Error ? caught.message : "Could not forget this device."
+      );
+    } finally {
+      setArchiveEnrollmentSaving(false);
+    }
+  }
+
+  async function generateArchiveTransferCode(): Promise<void> {
+    setArchiveEnrollmentSaving(true);
+    setArchiveEnrollmentStatus("Generating archive transfer code...");
+    try {
+      await nextFrame();
+      if (!auth) throw new Error("Sign in before generating an archive transfer code.");
+      const code = await withTimeout(
+        exportDeviceArchiveTransferCode(archiveDeviceStorageScope(auth.user.id)),
+        10_000,
+        "Could not read this device's archive key."
+      );
+      setArchiveTransferCode(code);
+      setArchiveEnrollmentStatus("Archive transfer code generated.");
+    } catch (caught) {
+      setArchiveEnrollmentStatus(
+        caught instanceof Error ? caught.message : "Could not generate archive transfer code."
+      );
+    } finally {
+      setArchiveEnrollmentSaving(false);
+    }
+  }
+
+  async function importArchiveTransferCode(): Promise<void> {
+    const code = archiveTransferImportDraft.trim();
+    if (!code) {
+      setArchiveEnrollmentStatus("Paste the archive transfer code first.");
+      return;
+    }
+    setArchiveEnrollmentSaving(true);
+    setArchiveEnrollmentStatus("Importing archive transfer code...");
+    try {
+      await nextFrame();
+      if (!auth) throw new Error("Sign in before importing an archive transfer code.");
+      await withTimeout(
+        importDeviceArchiveTransferCode(code, archiveDeviceStorageScope(auth.user.id)),
+        10_000,
+        "Could not import the archive transfer code."
+      );
+      setArchiveDeviceEnrolled(true);
+      setArchiveTransferImportDraft("");
+      setArchiveEnrollmentStatus("Archive assistant enabled on this device.");
+    } catch (caught) {
+      setArchiveEnrollmentStatus(
+        caught instanceof Error ? caught.message : "Could not import archive transfer code."
+      );
+    } finally {
+      setArchiveEnrollmentSaving(false);
     }
   }
 
@@ -1167,7 +1319,20 @@ export function DentLinkNotesApp(): ReactElement {
       setGmailSyncStage(account.id, "Connecting...", true);
       await nextFrame();
       setGmailSyncStage(account.id, "Searching...", true);
-      const result = await client.syncGmailAccount(account.id);
+      let result = await client.syncGmailAccount(account.id);
+      for (
+        let batch = 1;
+        result.progress?.hasMore === true && batch < REFRESH_ALL_GMAIL_BATCH_LIMIT;
+        batch += 1
+      ) {
+        setGmailSyncStage(
+          account.id,
+          `Fetching... ${gmailProgressLabel(result.progress.remaining)}`,
+          true
+        );
+        await nextFrame();
+        result = await client.syncGmailAccount(account.id);
+      }
       setGmailSyncStage(account.id, "Fetching...", true);
       await nextFrame();
       setGmailSyncStage(account.id, "Applying rules...", true);
@@ -1194,6 +1359,30 @@ export function DentLinkNotesApp(): ReactElement {
       ...current,
       [accountId]: { stage, running, error: null }
     }));
+  }
+
+  async function continueGmailRefreshBatches(
+    initial: ConnectorSyncAllResult
+  ): Promise<ConnectorSyncAllResult> {
+    let result = initial;
+    for (let batch = 1; batch < REFRESH_ALL_GMAIL_BATCH_LIMIT; batch += 1) {
+      const gmailConnector = result.connectors.find(
+        (connector) =>
+          connector.provider === "gmail" &&
+          connector.engine === "gmail_imap" &&
+          connector.progress?.hasMore === true
+      );
+      if (!gmailConnector) break;
+      setRefreshState((current) => ({
+        ...current,
+        message: `Refreshing Gmail... ${gmailProgressLabel(gmailConnector.progress?.remaining ?? 0)}`,
+        result
+      }));
+      await refreshStepDelay();
+      const gmailResult = await client.syncGmailAccount(gmailConnector.accountId);
+      result = mergeGmailSyncIntoRefreshResult(result, gmailResult);
+    }
+    return result;
   }
 
   async function updateGmailEngine(
@@ -1434,7 +1623,11 @@ export function DentLinkNotesApp(): ReactElement {
     setAssistantRunning(true);
     setAssistantMessages((current) => [...current, userMessage]);
     try {
-      const archivedNotifications = await assistantArchiveNotificationContext(client, trimmed);
+      const archivedNotifications = await assistantArchiveNotificationContext(
+        client,
+        auth?.user.id ?? null,
+        trimmed
+      );
       const response = await client.askAssistant({
         message: trimmed,
         timezone: effectiveTimezone,
@@ -1676,10 +1869,9 @@ export function DentLinkNotesApp(): ReactElement {
           <strong>{refreshState.error ?? refreshState.message}</strong>
           {refreshState.result ? (
             <div className="refresh-results">
-              {refreshState.result.connectors.map((connector) => (
-                <span key={connector.accountId}>
-                  {connectorLabel(connector.provider)}: {connector.status}
-                  {connector.message ? ` - ${connector.message}` : ""}
+              {refreshConnectorResultLines(refreshState.result).map((line) => (
+                <span key={line.key}>
+                  {line.text}
                 </span>
               ))}
             </div>
@@ -1807,6 +1999,20 @@ export function DentLinkNotesApp(): ReactElement {
           onAppearanceChange={setAppearance}
           preferences={preferences}
           onPreferencesChange={updatePreferences}
+          archiveDeviceEnrolled={archiveDeviceEnrolled}
+          archiveLegacySecretAvailable={archiveLegacySecretAvailable}
+          archiveEnrollmentDraft={archiveEnrollmentDraft}
+          archiveTransferCode={archiveTransferCode}
+          archiveTransferImportDraft={archiveTransferImportDraft}
+          archiveEnrollmentStatus={archiveEnrollmentStatus}
+          archiveEnrollmentSaving={archiveEnrollmentSaving}
+          onArchiveEnrollmentDraftChange={setArchiveEnrollmentDraft}
+          onArchiveTransferImportDraftChange={setArchiveTransferImportDraft}
+          onEnrollArchiveDevice={enrollArchiveDevice}
+          onEnrollArchiveDeviceFromStoredSecret={enrollArchiveDeviceFromStoredSecret}
+          onForgetArchiveDevice={forgetArchiveDevice}
+          onGenerateArchiveTransferCode={generateArchiveTransferCode}
+          onImportArchiveTransferCode={importArchiveTransferCode}
           aiSettings={emailAiSettings}
           onEmailAiEnabledChange={updateEmailAiEnabled}
           aiReprocessResult={aiReprocessResult}
@@ -2400,13 +2606,23 @@ function storedArchiveRecoverySecret(): string | null {
 
 async function assistantArchiveNotificationContext(
   client: DentLinkApiClient,
+  userId: EntityId | null,
   message: string
 ): Promise<AssistantArchivedNotificationContext[]> {
-  const recoverySecret = storedArchiveRecoverySecret();
-  if (!recoverySecret) return [];
   try {
-    return await buildAssistantArchiveNotificationContext(client, {
-      recoverySecret,
+    const storageScope = archiveDeviceStorageScope(userId);
+    const deviceKey = await loadDeviceArchiveKey(storageScope);
+    if (deviceKey) {
+      return await buildAssistantArchiveNotificationContextWithKey(client, deviceKey, {
+        message,
+        maxObjects: 50,
+        maxItems: 8
+      });
+    }
+    const recoverySecret = storedArchiveRecoverySecret();
+    if (!recoverySecret) return [];
+    const archiveKey = await enrollDeviceArchiveKey(client, recoverySecret, storageScope);
+    return await buildAssistantArchiveNotificationContextWithKey(client, archiveKey, {
       message,
       maxObjects: 50,
       maxItems: 8
@@ -2415,6 +2631,10 @@ async function assistantArchiveNotificationContext(
     console.warn("DentLink assistant archive context unavailable", caught);
     return [];
   }
+}
+
+function archiveDeviceStorageScope(userId: EntityId | null): string {
+  return userId ? `user:${userId}:account-archive-v1` : "account-archive-v1";
 }
 
 function positiveIntegerEnv(value: unknown, fallback: number): number {
@@ -5002,6 +5222,16 @@ function nextFrame(): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, 80));
 }
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise
+      .then(resolve)
+      .catch(reject)
+      .finally(() => window.clearTimeout(timeout));
+  });
+}
+
 function refreshStepDelay(): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, 250));
 }
@@ -5058,9 +5288,79 @@ function hasOAuthReturnFlag(): boolean {
 }
 
 function refreshAllSummary(result: ConnectorSyncAllResult): string {
+  const remaining = result.connectors.reduce(
+    (total, connector) => total + (connector.progress?.remaining ?? 0),
+    0
+  );
+  if (remaining > 0) return `Refresh paused with ${gmailProgressLabel(remaining)}.`;
   if (result.status === "success") return "Refresh All finished.";
   if (result.status === "partial") return "Refresh completed with warnings.";
   return "Refresh All failed.";
+}
+
+function refreshConnectorResultLines(result: ConnectorSyncAllResult): Array<{ key: string; text: string }> {
+  const lines: Array<{ key: string; text: string }> = [];
+  const gmailImapPending = result.connectors.filter(
+    (connector) =>
+      connector.provider === "gmail" &&
+      connector.engine === "gmail_imap" &&
+      connector.status === "skipped" &&
+      connector.progress?.hasMore === true
+  );
+  const pendingIds = new Set(gmailImapPending.map((connector) => connector.accountId));
+  if (gmailImapPending.length > 0) {
+    const remaining = gmailImapPending.reduce(
+      (total, connector) => total + (connector.progress?.remaining ?? 0),
+      0
+    );
+    lines.push({
+      key: "gmail-imap-pending",
+      text: `Gmail: syncing in small batches (${gmailProgressLabel(remaining)})`
+    });
+  }
+  for (const connector of result.connectors) {
+    if (pendingIds.has(connector.accountId)) continue;
+    lines.push({
+      key: connector.accountId,
+      text: `${connectorLabel(connector.provider)}: ${connector.status}${
+        connector.progress?.hasMore ? ` (${gmailProgressLabel(connector.progress.remaining)})` : ""
+      }${connector.message ? ` - ${connector.message}` : ""}`
+    });
+  }
+  return lines;
+}
+
+function mergeGmailSyncIntoRefreshResult(
+  result: ConnectorSyncAllResult,
+  gmail: GmailSyncResult
+): ConnectorSyncAllResult {
+  return {
+    ...result,
+    completedAt: new Date().toISOString(),
+    connectors: result.connectors.map((connector) => {
+      if (connector.accountId !== gmail.account.id || connector.provider !== "gmail") {
+        return connector;
+      }
+      return {
+        ...connector,
+        status: gmail.summary.failed > 0 ? "failed" : "success",
+        engine: gmail.account.settings.gmailLastSyncEngine === "gmail_imap" ? "gmail_imap" : "gmail_api",
+        created: connector.created + gmail.summary.created,
+        updated: connector.updated + gmail.summary.updated,
+        duplicate: connector.duplicate + gmail.summary.duplicate,
+        failed: connector.failed + gmail.summary.failed,
+        progress: gmail.progress,
+        message: gmail.progress?.hasMore
+          ? `${gmailProgressLabel(gmail.progress.remaining)}. Refresh is continuing in batches.`
+          : null
+      };
+    })
+  };
+}
+
+function gmailProgressLabel(remaining: number): string {
+  const bounded = Math.max(0, Math.round(remaining));
+  return `${bounded} Gmail message${bounded === 1 ? "" : "s"} left`;
 }
 
 function refreshMessageFor(caught: unknown): string {
@@ -5336,6 +5636,20 @@ function SettingsView(props: {
   onPreferencesChange: (
     patch: Parameters<DentLinkApiClient["updatePreferences"]>[0]
   ) => Promise<void>;
+  archiveDeviceEnrolled: boolean;
+  archiveLegacySecretAvailable: boolean;
+  archiveEnrollmentDraft: string;
+  archiveTransferCode: string;
+  archiveTransferImportDraft: string;
+  archiveEnrollmentStatus: string | null;
+  archiveEnrollmentSaving: boolean;
+  onArchiveEnrollmentDraftChange: (value: string) => void;
+  onArchiveTransferImportDraftChange: (value: string) => void;
+  onEnrollArchiveDevice: () => Promise<void>;
+  onEnrollArchiveDeviceFromStoredSecret: () => Promise<void>;
+  onForgetArchiveDevice: () => Promise<void>;
+  onGenerateArchiveTransferCode: () => Promise<void>;
+  onImportArchiveTransferCode: () => Promise<void>;
   aiSettings: EmailAiSettings | null;
   onEmailAiEnabledChange: (enabled: boolean) => Promise<void>;
   aiReprocessResult: EmailAiReprocessResult | null;
@@ -5419,6 +5733,22 @@ function SettingsView(props: {
           <TimezoneSettingsPanel
             preferences={props.preferences}
             onPreferencesChange={props.onPreferencesChange}
+          />
+          <ArchiveDeviceSettingsPanel
+            enrolled={props.archiveDeviceEnrolled}
+            legacySecretAvailable={props.archiveLegacySecretAvailable}
+            recoverySecret={props.archiveEnrollmentDraft}
+            transferCode={props.archiveTransferCode}
+            transferImportDraft={props.archiveTransferImportDraft}
+            status={props.archiveEnrollmentStatus}
+            saving={props.archiveEnrollmentSaving}
+            onRecoverySecretChange={props.onArchiveEnrollmentDraftChange}
+            onTransferImportDraftChange={props.onArchiveTransferImportDraftChange}
+            onEnroll={props.onEnrollArchiveDevice}
+            onEnrollFromStoredSecret={props.onEnrollArchiveDeviceFromStoredSecret}
+            onForget={props.onForgetArchiveDevice}
+            onGenerateTransferCode={props.onGenerateArchiveTransferCode}
+            onImportTransferCode={props.onImportArchiveTransferCode}
           />
         </section>
       ) : null}
@@ -5567,6 +5897,130 @@ function TimezoneSettingsPanel(props: {
           ))}
         </select>
       </label>
+    </section>
+  );
+}
+
+function ArchiveDeviceSettingsPanel(props: {
+  enrolled: boolean;
+  legacySecretAvailable: boolean;
+  recoverySecret: string;
+  transferCode: string;
+  transferImportDraft: string;
+  status: string | null;
+  saving: boolean;
+  onRecoverySecretChange: (value: string) => void;
+  onTransferImportDraftChange: (value: string) => void;
+  onEnroll: () => Promise<void>;
+  onEnrollFromStoredSecret: () => Promise<void>;
+  onForget: () => Promise<void>;
+  onGenerateTransferCode: () => Promise<void>;
+  onImportTransferCode: () => Promise<void>;
+}): ReactElement {
+  return (
+    <section className="subsettings-panel" aria-label="Archive assistant device access">
+      <h3>Archive Assistant</h3>
+      <p>Status: {props.enrolled ? "Enabled on this device" : "Not enabled on this device"}</p>
+      <p>
+        Use the existing archive recovery secret. Creating a different phrase will not unlock older
+        archived notifications.
+      </p>
+      {props.legacySecretAvailable ? (
+        <button
+          type="button"
+          className="secondary-action"
+          disabled={props.saving}
+          onClick={() => void props.onEnrollFromStoredSecret()}
+        >
+          Use this browser's saved archive secret
+        </button>
+      ) : null}
+      <form
+        className="archive-device-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void props.onEnroll();
+        }}
+      >
+        <label className="field">
+          <span>Recovery secret</span>
+          <input
+            type="password"
+            value={props.recoverySecret}
+            autoComplete="off"
+            placeholder="Enter archive recovery secret"
+            disabled={props.saving}
+            onChange={(event) => props.onRecoverySecretChange(event.currentTarget.value)}
+          />
+        </label>
+        <button
+          type="submit"
+          className="primary"
+          disabled={props.saving || !props.recoverySecret.trim()}
+        >
+          {props.saving
+            ? "Working..."
+            : props.enrolled
+              ? "Update this device"
+              : "Enable on this device"}
+        </button>
+      </form>
+      <div className="settings-actions">
+        <button
+          type="button"
+          disabled={props.saving || !props.enrolled}
+          onClick={() => void props.onForget()}
+        >
+          Forget this device
+        </button>
+      </div>
+      <section className="archive-transfer-panel" aria-label="Archive assistant device transfer">
+        <h4>Device Transfer</h4>
+        <p>Use this when the recovery secret is not available. Treat the code like the archive key.</p>
+        <button
+          type="button"
+          className="secondary-action"
+          disabled={props.saving || !props.enrolled}
+          onClick={() => void props.onGenerateTransferCode()}
+        >
+          Generate transfer code
+        </button>
+        {props.transferCode ? (
+          <label className="field">
+            <span>Transfer code</span>
+            <textarea readOnly rows={4} value={props.transferCode} />
+          </label>
+        ) : null}
+        <form
+          className="archive-device-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void props.onImportTransferCode();
+          }}
+        >
+          <label className="field">
+            <span>Import transfer code</span>
+            <textarea
+              rows={4}
+              value={props.transferImportDraft}
+              placeholder="Paste transfer code from an enrolled device"
+              disabled={props.saving}
+              onChange={(event) => props.onTransferImportDraftChange(event.currentTarget.value)}
+            />
+          </label>
+          <button
+            type="submit"
+            disabled={props.saving || !props.transferImportDraft.trim()}
+          >
+            Import transfer code
+          </button>
+        </form>
+      </section>
+      {props.status ? (
+        <p className="connector-progress" role="status" aria-live="polite">
+          {props.status}
+        </p>
+      ) : null}
     </section>
   );
 }

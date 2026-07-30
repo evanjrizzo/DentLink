@@ -13,6 +13,10 @@ export function boundedLatest<T>(values: T[], limit: number): T[] {
   return values.slice(-Math.max(0, limit));
 }
 
+export function boundedOldest<T>(values: T[], limit: number): T[] {
+  return values.slice(0, Math.max(0, limit));
+}
+
 function nextImapUid(uid?: string | null): string | null {
   if (!uid || !/^\d+$/.test(uid)) return null;
   const next = BigInt(uid) + 1n;

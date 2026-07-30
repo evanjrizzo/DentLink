@@ -686,6 +686,7 @@ export type GmailSyncResult = {
   processed: number;
   createdNotifications: number;
   summary: GmailSyncSummary;
+  progress?: ConnectorSyncProgress;
   outcomes: Array<{
     messageId: EntityId;
     status: Extract<
@@ -702,6 +703,13 @@ export type GmailSyncResult = {
     reason: string;
     recordId: EntityId | null;
   }>;
+};
+
+export type ConnectorSyncProgress = {
+  discovered: number;
+  examined: number;
+  remaining: number;
+  hasMore: boolean;
 };
 
 export type GmailSyncSummary = {
@@ -858,6 +866,7 @@ export type ConnectorSyncAllResult = {
     updated: number;
     duplicate: number;
     failed: number;
+    progress?: ConnectorSyncProgress;
     message: string | null;
   }>;
 };

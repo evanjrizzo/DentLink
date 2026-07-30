@@ -152,7 +152,8 @@ export interface DentLinkStore {
   ): Promise<ConnectorSourceRecord>;
   listConnectorSourceRecords(
     userId: EntityId,
-    accountId: EntityId
+    accountId: EntityId,
+    limit?: number
   ): Promise<ConnectorSourceRecord[]>;
   createConnectorSyncAttempt(
     userId: EntityId,
@@ -876,13 +877,17 @@ export class MemoryDentLinkStore implements DentLinkStore {
 
   async listConnectorSourceRecords(
     userId: EntityId,
-    accountId: EntityId
+    accountId: EntityId,
+    limit?: number
   ): Promise<ConnectorSourceRecord[]> {
     const account = this.connectorAccounts.get(accountId);
     if (!account || account.userId !== userId || account.status === "deleted") return [];
-    return [...this.connectorSourceRecords.values()]
+    const boundedLimit =
+      limit === undefined ? undefined : Math.min(Math.max(Math.floor(limit), 1), 200);
+    const records = [...this.connectorSourceRecords.values()]
       .filter((record) => record.userId === userId && record.accountId === accountId)
-      .sort((left, right) => left.receivedAt.localeCompare(right.receivedAt))
+      .sort((left, right) => left.receivedAt.localeCompare(right.receivedAt));
+    return (boundedLimit === undefined ? records : records.slice(-boundedLimit))
       .map(copyConnectorSourceRecord);
   }
 

@@ -145,6 +145,8 @@ const MAX_ARCHIVE_NOTIFICATION_RETENTION_BATCH_SIZE = 100;
 const DEFAULT_SYNC_ALL_CONNECTOR_TIMEOUT_MS = 25_000;
 const DEFAULT_CONTENT_ENCRYPTION_BACKFILL_BATCH_SIZE = 50;
 const MAX_CONTENT_ENCRYPTION_BACKFILL_BATCH_SIZE = 200;
+const AUTH_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const AUTH_CHALLENGE_FAKE_ITERATIONS = 100_000;
 
 const connectorCatalog: ConnectorDefinition[] = [
   gmailConnectorDefinition(),
@@ -259,10 +261,31 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
       );
     }
 
+    if (method === "POST" && path === "/v1/auth/login-challenge") {
+      const { email } = parseLoginChallengeStart(await readJson(request));
+      const user = await store.findUserByEmail(email);
+      const salt = user?.password.salt ?? toBase64(crypto.getRandomValues(new Uint8Array(16)));
+      const iterations = user?.password.iterations ?? AUTH_CHALLENGE_FAKE_ITERATIONS;
+      return json({
+        email,
+        salt,
+        iterations,
+        challenge: await createAuthChallenge(env, email, now)
+      });
+    }
+
     if (method === "POST" && path === "/v1/auth/login") {
-      const credentials = parseCredentials(await readJson(request));
-      const user = await store.findUserByEmail(credentials.email);
-      if (!user || !(await verifyPassword(credentials.password, user.password))) {
+      const body = await readJson(request);
+      const challengeLogin = parseChallengeLogin(body);
+      const credentials = challengeLogin ? null : parseCredentials(body);
+      const email = challengeLogin?.email ?? credentials?.email ?? "";
+      const user = await store.findUserByEmail(email);
+      const passwordOk = challengeLogin
+        ? await verifyAuthChallengeLogin(env, challengeLogin, user?.password.hash ?? null, now)
+        : user
+          ? await verifyPassword(credentials?.password ?? "", user.password)
+          : false;
+      if (!user || !passwordOk) {
         return error("invalid_credentials", "Email or password is incorrect", 401);
       }
       const token = generateSessionToken();
@@ -1896,6 +1919,160 @@ function retentionUserIds(value: string | undefined): string[] {
     .filter((item) => /^user_[A-Za-z0-9]+$/.test(item));
 }
 
+type ChallengeLoginInput = {
+  email: string;
+  challenge: string;
+  response: string;
+};
+
+function parseLoginChallengeStart(value: unknown): { email: string } {
+  const object = objectValue(value, "credentials");
+  const email = stringValue(object.email, "email").trim().toLowerCase();
+  validateAuthEmail(email);
+  return { email };
+}
+
+function parseChallengeLogin(value: unknown): ChallengeLoginInput | null {
+  const object = objectValue(value, "credentials");
+  if (
+    typeof object.challenge !== "string" ||
+    typeof object.response !== "string" ||
+    typeof object.password === "string"
+  ) {
+    return null;
+  }
+  const email = stringValue(object.email, "email").trim().toLowerCase();
+  validateAuthEmail(email);
+  const challenge = boundedToken(object.challenge, "challenge", 2048);
+  const response = boundedToken(object.response, "response", 512);
+  return { email, challenge, response };
+}
+
+function validateAuthEmail(email: string): void {
+  if (email.length > 320) throw new ValidationError("invalid_email", "Email is too long");
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    throw new ValidationError("invalid_email", "Enter a valid email address");
+  }
+}
+
+function objectValue(value: unknown, field: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ValidationError(`invalid_${field}`, `${field} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function stringValue(value: unknown, field: string): string {
+  if (typeof value !== "string") {
+    throw new ValidationError(`invalid_${field}`, `${field} is required`);
+  }
+  return value;
+}
+
+function boundedToken(value: string, field: string, maxLength: number): string {
+  if (!/^[A-Za-z0-9._-]+$/.test(value) || value.length === 0 || value.length > maxLength) {
+    throw new ValidationError(`invalid_${field}`, `${field} is invalid`);
+  }
+  return value;
+}
+
+async function createAuthChallenge(env: ApiEnv, email: string, now: string): Promise<string> {
+  const payload = {
+    email,
+    nonce: toBase64Url(crypto.getRandomValues(new Uint8Array(18))),
+    expiresAt: new Date(Date.parse(now) + AUTH_CHALLENGE_TTL_MS).toISOString()
+  };
+  const encoded = toBase64Url(new TextEncoder().encode(JSON.stringify(payload)));
+  const signature = await hmacBase64Url(authChallengeKey(env), encoded);
+  return `${encoded}.${signature}`;
+}
+
+async function verifyAuthChallengeLogin(
+  env: ApiEnv,
+  input: ChallengeLoginInput,
+  passwordHash: string | null,
+  now: string
+): Promise<boolean> {
+  const payload = await verifyAuthChallengeToken(env, input.challenge);
+  if (!payload || payload.email !== input.email || Date.parse(payload.expiresAt) < Date.parse(now)) {
+    return false;
+  }
+  if (!passwordHash) return false;
+  const expected = await hmacBase64Url(fromBase64(passwordHash), input.challenge);
+  return constantTimeEqual(expected, input.response);
+}
+
+async function verifyAuthChallengeToken(
+  env: ApiEnv,
+  challenge: string
+): Promise<{ email: string; expiresAt: string } | null> {
+  const parts = challenge.split(".");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  const expected = await hmacBase64Url(authChallengeKey(env), parts[0]);
+  if (!constantTimeEqual(expected, parts[1])) return null;
+  try {
+    const payload = JSON.parse(new TextDecoder().decode(fromBase64Url(parts[0]))) as {
+      email?: unknown;
+      expiresAt?: unknown;
+    };
+    return typeof payload.email === "string" && typeof payload.expiresAt === "string"
+      ? { email: payload.email, expiresAt: payload.expiresAt }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function authChallengeKey(env: ApiEnv): Uint8Array {
+  const key = contentEncryptionKey(env) ?? "dentlink-local-auth-challenge-key";
+  return new TextEncoder().encode(key);
+}
+
+async function hmacBase64Url(keyBytes: Uint8Array, value: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    bufferSource(keyBytes),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value));
+  return toBase64Url(new Uint8Array(signature));
+}
+
+function constantTimeEqual(left: string, right: string): boolean {
+  if (left.length !== right.length) return false;
+  let mismatch = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    mismatch |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  }
+  return mismatch === 0;
+}
+
+function toBase64(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes));
+}
+
+function toBase64Url(bytes: Uint8Array): string {
+  return toBase64(bytes).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+function fromBase64(value: string): Uint8Array {
+  return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+}
+
+function fromBase64Url(value: string): Uint8Array {
+  const padded = value
+    .replaceAll("-", "+")
+    .replaceAll("_", "/")
+    .padEnd(Math.ceil(value.length / 4) * 4, "=");
+  return fromBase64(padded);
+}
+
+function bufferSource(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
 async function syncAllConnectors(
   store: DentLinkStore,
   userId: string,
@@ -1913,6 +2090,10 @@ async function syncAllConnectors(
   );
   for (const account of accounts) {
     if (account.connectorKey === "gmail") {
+      if (account.settings.gmailIngestionEngine === "gmail_imap") {
+        results.push(pendingGmailImapSyncAllConnector(account));
+        continue;
+      }
       try {
         const result = await withConnectorTimeout(
           syncGmailAccount(store, userId, account.id, env, new Date().toISOString(), "refresh_all"),
@@ -1931,12 +2112,16 @@ async function syncAllConnectors(
           updated: result.summary.updated,
           duplicate: result.summary.duplicate,
           failed: result.summary.failed,
+          progress: result.progress,
           message: null
         });
       } catch (caught) {
         if (caught instanceof StoreError && caught.code === "sync_in_progress") {
           results.push(skippedSyncAllConnector(account, caught.message));
           continue;
+        }
+        if (caught instanceof StoreError && caught.code === "sync_timeout") {
+          await markTimedOutConnectorIdle(store, userId, account, caught, new Date().toISOString());
         }
         results.push(failedSyncAllConnector(account, caught));
       }
@@ -1960,6 +2145,9 @@ async function syncAllConnectors(
           message: null
         });
       } catch (caught) {
+        if (caught instanceof StoreError && caught.code === "sync_timeout") {
+          await markTimedOutConnectorIdle(store, userId, account, caught, new Date().toISOString());
+        }
         results.push(failedSyncAllConnector(account, caught));
       }
       continue;
@@ -2012,6 +2200,30 @@ async function withConnectorTimeout<T>(
   }
 }
 
+async function markTimedOutConnectorIdle(
+  store: DentLinkStore,
+  userId: string,
+  account: ConnectorAccount,
+  error: StoreError,
+  now: string
+): Promise<void> {
+  const latest = await store.getConnectorAccount(userId, account.id);
+  if (!latest || latest.syncStatus !== "syncing") return;
+  await store.updateConnectorAccount(
+    userId,
+    latest.id,
+    latest.version,
+    {
+      healthStatus: "degraded",
+      syncStatus: "idle",
+      lastHealthAt: now,
+      errorCode: error.code,
+      errorMessage: error.message
+    },
+    now
+  );
+}
+
 function recoverableGmailAccount(account: ConnectorAccount): boolean {
   return (
     account.connectorKey === "gmail" &&
@@ -2039,6 +2251,28 @@ function skippedSyncAllConnector(
     duplicate: 0,
     failed: 0,
     message
+  };
+}
+
+function pendingGmailImapSyncAllConnector(
+  account: ConnectorAccount
+): ConnectorSyncAllResult["connectors"][number] {
+  return {
+    accountId: account.id,
+    provider: account.connectorKey,
+    status: "skipped",
+    engine: "gmail_imap",
+    created: 0,
+    updated: 0,
+    duplicate: 0,
+    failed: 0,
+    progress: {
+      discovered: 0,
+      examined: 0,
+      remaining: 1,
+      hasMore: true
+    },
+    message: "Gmail IMAP will continue in small batches."
   };
 }
 

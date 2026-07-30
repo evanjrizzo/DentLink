@@ -54,6 +54,70 @@ function redact(value) {
   );
 }
 
+async function login(email, password) {
+  const challenge = await request("/v1/auth/login-challenge", {
+    method: "POST",
+    body: { email }
+  });
+  assert(
+    challenge.status === 200 && challenge.json?.challenge,
+    "login challenge failed",
+    challenge
+  );
+  return request("/v1/auth/login", {
+    method: "POST",
+    body: {
+      email: challenge.json.email,
+      challenge: challenge.json.challenge,
+      response: await passwordChallengeResponse(password, challenge.json)
+    }
+  });
+}
+
+async function passwordChallengeResponse(password, challenge) {
+  const passwordKey = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    { name: "PBKDF2" },
+    false,
+    ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      salt: fromBase64(challenge.salt),
+      iterations: challenge.iterations
+    },
+    passwordKey,
+    256
+  );
+  const hmacKey = await crypto.subtle.importKey(
+    "raw",
+    bits,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    hmacKey,
+    new TextEncoder().encode(challenge.challenge)
+  );
+  return toBase64Url(new Uint8Array(signature));
+}
+
+function fromBase64(value) {
+  return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+}
+
+function toBase64Url(bytes) {
+  return btoa(String.fromCharCode(...bytes))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+}
+
 async function main() {
   const health = await request("/v1/health");
   assert(health.status === 200 && health.json?.status === "ok", "health failed", health);
@@ -70,10 +134,7 @@ async function main() {
   );
   record("register");
 
-  const loginA = await request("/v1/auth/login", {
-    method: "POST",
-    body: { email: emailA.toUpperCase(), password: passwordA }
-  });
+  const loginA = await login(emailA.toUpperCase(), passwordA);
   assert(loginA.status === 200 && loginA.json?.session?.token, "login failed", loginA);
   record("login");
   const tokenA = loginA.json.session.token;

@@ -11,7 +11,7 @@ import {
   selectedExistsCount,
   type ImapProtocolClient
 } from "./protocol";
-import { boundedLatest, recentSinceDate, uidSearchCommand } from "./search";
+import { boundedOldest, recentSinceDate, uidSearchCommand } from "./search";
 import { xoauth2InitialResponse } from "./xoauth2";
 
 import type { GmailImapIdentifiers } from "./gmail";
@@ -56,7 +56,7 @@ export async function pollGmailImap(
       : null;
   const search = await client.command(uidSearchCommand(since, newerThanUid));
   const discoveredUids = searchUids(search.response);
-  const fetchUids = boundedLatest(discoveredUids, options.maxMessages ?? 25);
+  const fetchUids = boundedOldest(discoveredUids, options.maxMessages ?? 25);
   const messages: GmailImapMessage[] = [];
   for (const uid of fetchUids) {
     const header = await client.command(headerFetchCommand(uid));

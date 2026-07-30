@@ -1218,17 +1218,22 @@ export class D1DentLinkStore implements DentLinkStore {
 
   async listConnectorSourceRecords(
     userId: EntityId,
-    accountId: EntityId
+    accountId: EntityId,
+    limit?: number
   ): Promise<ConnectorSourceRecord[]> {
     const account = await this.getConnectorAccount(userId, accountId);
     if (!account || account.status === "deleted") return [];
+    const boundedLimit =
+      limit === undefined ? undefined : Math.min(Math.max(Math.floor(limit), 1), 200);
     const rows = await this.all<ConnectorSourceRecordRow>(
       `SELECT * FROM connector_source_records
        WHERE user_id = ? AND account_id = ?
-       ORDER BY received_at ASC, id ASC`,
-      [userId, accountId]
+       ORDER BY received_at DESC, id DESC
+       ${boundedLimit === undefined ? "" : "LIMIT ?"}`,
+      boundedLimit === undefined ? [userId, accountId] : [userId, accountId, boundedLimit]
     );
-    return Promise.all(rows.map((row) => this.connectorSourceRecordFromRow(row)));
+    const records = await Promise.all(rows.map((row) => this.connectorSourceRecordFromRow(row)));
+    return records.sort((left, right) => left.receivedAt.localeCompare(right.receivedAt));
   }
 
   async createConnectorSyncAttempt(
@@ -1921,6 +1926,44 @@ export class D1DentLinkStore implements DentLinkStore {
       rule: patch.rule === undefined ? existing.rule : patch.rule,
       ai: patch.ai === undefined ? existing.ai : patch.ai
     };
+    if (isMetadataOnlyNotificationPatch(patch)) {
+      const result = await this.db
+        .prepare(
+          `UPDATE notifications
+           SET status = ?, pinned = ?, rank = ?, global_order = ?, version = ?, updated_at = ?,
+               completed_at = ?, dismissed_at = ?
+           WHERE id = ? AND user_id = ? AND status != 'deleted' AND version = ?`
+        )
+        .bind(
+          next.status,
+          bool(next.pinned),
+          next.rank,
+          next.globalOrder,
+          next.version,
+          next.updatedAt,
+          next.completedAt,
+          next.dismissedAt,
+          notificationId,
+          userId,
+          expectedVersion
+        )
+        .run();
+      if ((result.meta?.changes ?? 0) !== 1) {
+        throw new StoreError("version_mismatch", "Notification changed on the server");
+      }
+      await this.batch([
+        this.changeStatement(
+          userId,
+          "notification",
+          next.id,
+          next.status === "deleted" ? "delete" : "upsert",
+          next.status === "deleted"
+            ? { type: "notification", op: "delete", id: next.id, userId }
+            : { type: "notification", op: "upsert", notification: next }
+        )
+      ]);
+      return next;
+    }
     const result = await this.db
       .prepare(
         `UPDATE notifications
@@ -3406,6 +3449,19 @@ function parseTagIds(value: string | null): string[] {
   } catch {
     return [];
   }
+}
+
+function isMetadataOnlyNotificationPatch(patch: NotificationPatch): boolean {
+  return (
+    patch.title === undefined &&
+    patch.summary === undefined &&
+    patch.body === undefined &&
+    patch.sourceUrl === undefined &&
+    patch.severity === undefined &&
+    patch.email === undefined &&
+    patch.rule === undefined &&
+    patch.ai === undefined
+  );
 }
 
 function parseCompactSyncPayload(row: SyncRow): CompactSyncPayload {

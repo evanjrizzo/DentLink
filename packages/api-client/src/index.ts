@@ -111,6 +111,28 @@ export class DentLinkApiClient {
   }
 
   async login(email: string, password: string): Promise<AuthSession> {
+    const challenge = await this.request<{
+      email: string;
+      salt: string;
+      iterations: number;
+      challenge: string;
+    }>("/v1/auth/login-challenge", {
+      method: "POST",
+      body: { email }
+    });
+    const session = await this.request<AuthSession>("/v1/auth/login", {
+      method: "POST",
+      body: {
+        email: challenge.email,
+        challenge: challenge.challenge,
+        response: await passwordChallengeResponse(password, challenge)
+      }
+    });
+    this.token = session.session.token;
+    return session;
+  }
+
+  async legacyLogin(email: string, password: string): Promise<AuthSession> {
     const session = await this.request<AuthSession>("/v1/auth/login", {
       method: "POST",
       body: { email, password }
@@ -680,4 +702,55 @@ function isErrorBody(
     "error" in value &&
     typeof (value as { error?: unknown }).error === "object"
   );
+}
+
+async function passwordChallengeResponse(
+  password: string,
+  challenge: { salt: string; iterations: number; challenge: string }
+): Promise<string> {
+  const passwordKey = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    { name: "PBKDF2" },
+    false,
+    ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      salt: bufferSource(fromBase64(challenge.salt)),
+      iterations: challenge.iterations
+    },
+    passwordKey,
+    256
+  );
+  const hmacKey = await crypto.subtle.importKey(
+    "raw",
+    bits,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    hmacKey,
+    new TextEncoder().encode(challenge.challenge)
+  );
+  return toBase64Url(new Uint8Array(signature));
+}
+
+function fromBase64(value: string): Uint8Array {
+  return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+}
+
+function toBase64Url(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+}
+
+function bufferSource(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }

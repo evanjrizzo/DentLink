@@ -1,6 +1,8 @@
 import { extractFirstLiteral, type ImapCommandResult } from "./protocol";
 import { parseHeaders } from "./mime";
 
+const GMAIL_IMAP_BODY_PREVIEW_BYTES = 64 * 1024;
+
 export type GmailImapIdentifiers = {
   xGmMsgId: string | null;
   messageId: string | null;
@@ -38,7 +40,7 @@ export function headerFetchCommand(uid: string): string {
 }
 
 export function mimeFetchCommand(uid: string): string {
-  return `UID FETCH ${uid} (UID X-GM-MSGID INTERNALDATE BODY.PEEK[])`;
+  return `UID FETCH ${uid} (UID X-GM-MSGID INTERNALDATE BODY.PEEK[]<0.${GMAIL_IMAP_BODY_PREVIEW_BYTES}>)`;
 }
 
 export type GmailFetchedMessage = {

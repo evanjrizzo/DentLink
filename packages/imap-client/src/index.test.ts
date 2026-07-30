@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { gmailSourceExternalId } from "./gmail";
+import { gmailSourceExternalId, mimeFetchCommand } from "./gmail";
 import { parseMime } from "./mime";
 import { searchUids, selectedExistsCount } from "./protocol";
 import { recentSinceDate, uidSearchCommand } from "./search";
@@ -95,6 +95,10 @@ describe("@dentlink/imap-client", () => {
 
   it("builds rolling IMAP since dates", () => {
     expect(recentSinceDate("2026-07-14T12:00:00.000Z", 1)).toBe("13-Jul-2026");
+  });
+
+  it("bounds IMAP MIME body fetches", () => {
+    expect(mimeFetchCommand("42")).toContain("BODY.PEEK[]<0.65536>");
   });
 
   it("builds UID range searches when a prior UID is known", () => {

@@ -12,6 +12,8 @@ const WRAPPER_TYPE = "recovery-secret";
 const WRAPPING_ALGORITHM = "PBKDF2-SHA-256+A256KW";
 const ENCRYPTION_ALGORITHM = "AES-GCM-256";
 const PBKDF2_ITERATIONS = 310_000;
+const DEVICE_ARCHIVE_DB = "dentlink-archive-device-v1";
+const DEVICE_ARCHIVE_STORE = "keys";
 
 export type ArchiveClient = {
   listArchiveKeyWrappers(): Promise<{ wrappers: ArchiveKeyWrapper[] }>;
@@ -36,6 +38,27 @@ export type AccountArchiveKey = {
   keyId: string;
   key: CryptoKey;
   created: boolean;
+};
+
+type DeviceArchiveKeyRecord = {
+  version: 1;
+  keyId: string;
+  rawKeyB64: string;
+  createdAt: string;
+};
+
+type DeviceArchiveTransfer = {
+  version: 1;
+  type: "dentlink-archive-device-transfer";
+  keyId: string;
+  rawKeyB64: string;
+  createdAt: string;
+};
+
+type DeviceArchiveKeyEnrollmentOptions = {
+  cryptoImpl?: Crypto;
+  onProgress?: (message: string) => void;
+  apiTimeoutMs?: number;
 };
 
 export type EncryptedArchiveWrite = {
@@ -85,6 +108,24 @@ export async function buildAssistantArchiveNotificationContext(
 ): Promise<AssistantArchivedNotificationContext[]> {
   if (!options.recoverySecret?.trim()) return [];
   const archiveKey = await getOrCreateAccountArchiveKey(client, options.recoverySecret, cryptoImpl);
+  return buildAssistantArchiveNotificationContextWithKey(
+    client,
+    archiveKey,
+    {
+      message: options.message,
+      maxObjects: options.maxObjects,
+      maxItems: options.maxItems
+    },
+    cryptoImpl
+  );
+}
+
+export async function buildAssistantArchiveNotificationContextWithKey(
+  client: ArchiveClient,
+  archiveKey: AccountArchiveKey,
+  options: Omit<AssistantArchiveContextOptions, "recoverySecret">,
+  cryptoImpl: Crypto = crypto
+): Promise<AssistantArchivedNotificationContext[]> {
   const archived = await readArchivedNotifications(
     client,
     archiveKey,
@@ -93,6 +134,109 @@ export async function buildAssistantArchiveNotificationContext(
   );
   const maxItems = Math.max(0, options.maxItems ?? 8);
   return selectAssistantArchiveNotifications(archived.notifications, options.message, maxItems);
+}
+
+export async function enrollDeviceArchiveKey(
+  client: ArchiveClient,
+  recoverySecret: string,
+  storageScope = ACCOUNT_ARCHIVE_KEY_ID,
+  options: DeviceArchiveKeyEnrollmentOptions = {}
+): Promise<AccountArchiveKey> {
+  const cryptoImpl = options.cryptoImpl ?? crypto;
+  const apiTimeoutMs = options.apiTimeoutMs ?? 15_000;
+  const accountKey = await getOrCreateAccountArchiveKey(client, recoverySecret, cryptoImpl, {
+    apiTimeoutMs,
+    onProgress: options.onProgress
+  });
+  options.onProgress?.("Preparing device key...");
+  const rawKey = new Uint8Array(await cryptoImpl.subtle.exportKey("raw", accountKey.key));
+  const deviceKey = await importDeviceArchiveKey(rawKey, cryptoImpl);
+  options.onProgress?.("Saving device key...");
+  await storeDeviceArchiveKey(accountKey.keyId, rawKey, storageScope);
+  options.onProgress?.("Archive assistant enabled on this device.");
+  return { keyId: accountKey.keyId, key: deviceKey, created: accountKey.created };
+}
+
+export async function loadDeviceArchiveKey(
+  storageScope = ACCOUNT_ARCHIVE_KEY_ID,
+  cryptoImpl: Crypto = crypto
+): Promise<AccountArchiveKey | null> {
+  const record = await loadDeviceArchiveKeyRecord(storageScope);
+  if (!record?.rawKeyB64) return null;
+  return {
+    keyId: record.keyId,
+    key: await importDeviceArchiveKey(base64ToBytes(record.rawKeyB64), cryptoImpl),
+    created: false
+  };
+}
+
+async function loadDeviceArchiveKeyRecord(
+  storageScope = ACCOUNT_ARCHIVE_KEY_ID
+): Promise<DeviceArchiveKeyRecord | null> {
+  const db = await openDeviceArchiveDb();
+  if (!db) return null;
+  try {
+    return await idbGet<DeviceArchiveKeyRecord>(db, DEVICE_ARCHIVE_STORE, storageScope);
+  } finally {
+    db.close();
+  }
+}
+
+export async function hasDeviceArchiveKey(
+  storageScope = ACCOUNT_ARCHIVE_KEY_ID,
+  cryptoImpl: Crypto = crypto
+): Promise<boolean> {
+  return (await loadDeviceArchiveKey(storageScope, cryptoImpl)) !== null;
+}
+
+export async function clearDeviceArchiveKey(storageScope = ACCOUNT_ARCHIVE_KEY_ID): Promise<void> {
+  const db = await openDeviceArchiveDb();
+  if (!db) return;
+  try {
+    await idbDelete(db, DEVICE_ARCHIVE_STORE, storageScope);
+  } finally {
+    db.close();
+  }
+}
+
+export async function exportDeviceArchiveTransferCode(
+  storageScope = ACCOUNT_ARCHIVE_KEY_ID
+): Promise<string> {
+  const record = await loadDeviceArchiveKeyRecord(storageScope);
+  if (!record) throw new Error("This device is not enrolled for archive assistant.");
+  return bytesToBase64Url(
+    new TextEncoder().encode(
+      JSON.stringify({
+        version: 1,
+        type: "dentlink-archive-device-transfer",
+        keyId: record.keyId,
+        rawKeyB64: record.rawKeyB64,
+        createdAt: new Date().toISOString()
+      } satisfies DeviceArchiveTransfer)
+    )
+  );
+}
+
+export async function importDeviceArchiveTransferCode(
+  transferCode: string,
+  storageScope = ACCOUNT_ARCHIVE_KEY_ID,
+  cryptoImpl: Crypto = crypto
+): Promise<AccountArchiveKey> {
+  const parsed = JSON.parse(
+    new TextDecoder().decode(base64UrlToBytes(transferCode.trim()))
+  ) as Partial<DeviceArchiveTransfer>;
+  if (
+    parsed.version !== 1 ||
+    parsed.type !== "dentlink-archive-device-transfer" ||
+    parsed.keyId !== ACCOUNT_ARCHIVE_KEY_ID ||
+    typeof parsed.rawKeyB64 !== "string"
+  ) {
+    throw new Error("Archive transfer code is invalid.");
+  }
+  const rawKey = base64ToBytes(parsed.rawKeyB64);
+  const key = await importDeviceArchiveKey(rawKey, cryptoImpl);
+  await storeDeviceArchiveKey(parsed.keyId, rawKey, storageScope);
+  return { keyId: parsed.keyId, key, created: false };
 }
 
 export function selectAssistantArchiveNotifications(
@@ -243,12 +387,19 @@ export async function readArchivedNotifications(
 export async function getOrCreateAccountArchiveKey(
   client: ArchiveClient,
   recoverySecret: string,
-  cryptoImpl: Crypto = crypto
+  cryptoImpl: Crypto = crypto,
+  options: { apiTimeoutMs?: number; onProgress?: (message: string) => void } = {}
 ): Promise<AccountArchiveKey> {
   if (!recoverySecret.trim()) {
     throw new Error("Archive recovery secret is required");
   }
-  const wrappers = await client.listArchiveKeyWrappers();
+  const apiTimeoutMs = options.apiTimeoutMs ?? 15_000;
+  options.onProgress?.("Contacting DentLink archive API...");
+  const wrappers = await promiseWithTimeout(
+    client.listArchiveKeyWrappers(),
+    apiTimeoutMs,
+    "Could not reach the DentLink archive key API."
+  );
   const existing = wrappers.wrappers.find(
     (wrapper) =>
       wrapper.keyId === ACCOUNT_ARCHIVE_KEY_ID &&
@@ -256,6 +407,7 @@ export async function getOrCreateAccountArchiveKey(
       wrapper.wrappingAlgorithm === WRAPPING_ALGORITHM
   );
   if (existing) {
+    options.onProgress?.("Unwrapping existing archive key...");
     return {
       keyId: existing.keyId,
       key: await unwrapAccountArchiveKey(existing, recoverySecret, cryptoImpl),
@@ -263,6 +415,7 @@ export async function getOrCreateAccountArchiveKey(
     };
   }
 
+  options.onProgress?.("Creating new archive key...");
   const key = await cryptoImpl.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, [
     "encrypt",
     "decrypt"
@@ -270,19 +423,23 @@ export async function getOrCreateAccountArchiveKey(
   const salt = randomBytes(cryptoImpl, 16);
   const wrappingKey = await deriveWrappingKey(recoverySecret, salt, cryptoImpl);
   const wrapped = await cryptoImpl.subtle.wrapKey("raw", key, wrappingKey, "AES-KW");
-  await client.createArchiveKeyWrapper({
-    keyId: ACCOUNT_ARCHIVE_KEY_ID,
-    wrapperType: WRAPPER_TYPE,
-    wrappingAlgorithm: WRAPPING_ALGORITHM,
-    wrappedKeyB64: bytesToBase64(new Uint8Array(wrapped)),
-    saltB64: bytesToBase64(salt),
-    publicMetadata: {
-      version: 1,
-      kdf: "PBKDF2-SHA-256",
-      iterations: PBKDF2_ITERATIONS,
-      keyScope: "account"
-    }
-  });
+  await promiseWithTimeout(
+    client.createArchiveKeyWrapper({
+      keyId: ACCOUNT_ARCHIVE_KEY_ID,
+      wrapperType: WRAPPER_TYPE,
+      wrappingAlgorithm: WRAPPING_ALGORITHM,
+      wrappedKeyB64: bytesToBase64(new Uint8Array(wrapped)),
+      saltB64: bytesToBase64(salt),
+      publicMetadata: {
+        version: 1,
+        kdf: "PBKDF2-SHA-256",
+        iterations: PBKDF2_ITERATIONS,
+        keyScope: "account"
+      }
+    }),
+    apiTimeoutMs,
+    "Could not save the DentLink archive key wrapper."
+  );
   return { keyId: ACCOUNT_ARCHIVE_KEY_ID, key, created: true };
 }
 
@@ -411,6 +568,93 @@ async function unwrapAccountArchiveKey(
   );
 }
 
+async function importDeviceArchiveKey(
+  rawKey: Uint8Array,
+  cryptoImpl: Crypto
+): Promise<CryptoKey> {
+  return cryptoImpl.subtle.importKey(
+    "raw",
+    arrayBuffer(rawKey),
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+async function storeDeviceArchiveKey(
+  keyId: string,
+  rawKey: Uint8Array,
+  storageScope: string
+): Promise<void> {
+  const db = await openDeviceArchiveDb();
+  if (!db) throw new Error("Device archive key storage is unavailable");
+  try {
+    await idbPut(
+      db,
+      DEVICE_ARCHIVE_STORE,
+      {
+        version: 1,
+        keyId,
+        rawKeyB64: bytesToBase64(rawKey),
+        createdAt: new Date().toISOString()
+      },
+      storageScope
+    );
+  } finally {
+    db.close();
+  }
+}
+
+async function openDeviceArchiveDb(): Promise<IDBDatabase | null> {
+  if (typeof indexedDB === "undefined") return null;
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DEVICE_ARCHIVE_DB, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(DEVICE_ARCHIVE_STORE)) {
+        db.createObjectStore(DEVICE_ARCHIVE_STORE);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("Could not open archive key store"));
+    request.onblocked = () => reject(new Error("Archive key store is blocked"));
+  });
+}
+
+async function idbGet<T>(db: IDBDatabase, storeName: string, key: IDBValidKey): Promise<T | null> {
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(storeName, "readonly");
+    const request = transaction.objectStore(storeName).get(key);
+    request.onsuccess = () => resolve((request.result as T | undefined) ?? null);
+    request.onerror = () => reject(request.error ?? new Error("Could not read archive key"));
+    transaction.onerror = () => reject(transaction.error ?? new Error("Could not read archive key"));
+  });
+}
+
+async function idbPut(
+  db: IDBDatabase,
+  storeName: string,
+  value: DeviceArchiveKeyRecord,
+  key: IDBValidKey
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(storeName, "readwrite");
+    transaction.objectStore(storeName).put(value, key);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error("Could not save archive key"));
+  });
+}
+
+async function idbDelete(db: IDBDatabase, storeName: string, key: IDBValidKey): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(storeName, "readwrite");
+    transaction.objectStore(storeName).delete(key);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () =>
+      reject(transaction.error ?? new Error("Could not forget archive key"));
+  });
+}
+
 async function deriveWrappingKey(
   recoverySecret: string,
   salt: Uint8Array,
@@ -441,6 +685,16 @@ function randomBytes(cryptoImpl: Crypto, length: number): Uint8Array {
   const bytes = new Uint8Array(length);
   cryptoImpl.getRandomValues(bytes);
   return bytes;
+}
+
+function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise
+      .then(resolve)
+      .catch(reject)
+      .finally(() => clearTimeout(timeout));
+  });
 }
 
 function archiveSearchTerms(message: string): string[] {
@@ -512,6 +766,16 @@ function bytesToBase64(bytes: Uint8Array): string {
 
 function base64ToBytes(value: string): Uint8Array {
   return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+}
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  return bytesToBase64(bytes).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
+}
+
+function base64UrlToBytes(value: string): Uint8Array {
+  const normalized = value.replaceAll("-", "+").replaceAll("_", "/");
+  const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), "=");
+  return base64ToBytes(padded);
 }
 
 function arrayBuffer(bytes: Uint8Array): ArrayBuffer {

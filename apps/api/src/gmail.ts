@@ -55,8 +55,11 @@ const GMAIL_DEFAULT_SCOPE = GMAIL_READONLY_SCOPE;
 const GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1";
 const INITIAL_SYNC_PAGE_SIZE = 25;
 const HISTORY_PAGE_SIZE = 100;
+const GMAIL_DIAGNOSTIC_MESSAGE_LIMIT = 25;
+const GMAIL_DIAGNOSTIC_ATTEMPT_LIMIT = 10;
 const GMAIL_IMAP_RECENT_WINDOW_DAYS = 2;
-const GMAIL_IMAP_MAX_MESSAGES = 25;
+const GMAIL_IMAP_MAX_MESSAGES = 1;
+const GMAIL_IMAP_REFRESH_ALL_MAX_MESSAGES = 1;
 const GMAIL_SCHEDULED_SYNC_STALE_MS = 5 * 60 * 1000;
 const GMAIL_INTERACTIVE_SYNC_STALE_MS = 60 * 1000;
 const GMAIL_IMAP_POLL_TIMEOUT_MS = 25 * 1000;
@@ -453,13 +456,16 @@ export async function syncGmailAccount(
     });
     throw new StoreError("sync_in_progress", "Gmail sync is already in progress");
   }
-  const syncing = await store.updateConnectorAccount(
-    userId,
-    account.id,
-    account.version,
-    { syncStatus: "syncing", errorCode: null, errorMessage: null },
-    now
-  );
+  const syncing =
+    trigger === "refresh_all"
+      ? account
+      : await store.updateConnectorAccount(
+          userId,
+          account.id,
+          account.version,
+          { syncStatus: "syncing", lastHealthAt: now, errorCode: null, errorMessage: null },
+          now
+        );
   if (!syncing) throw new StoreError("not_found", "Gmail account not found");
 
   try {
@@ -622,7 +628,7 @@ export async function backfillGmailAccount(
     userId,
     account.id,
     account.version,
-    { syncStatus: "syncing", errorCode: null, errorMessage: null },
+    { syncStatus: "syncing", lastHealthAt: now, errorCode: null, errorMessage: null },
     now
   );
   if (!syncing) throw new StoreError("not_found", "Gmail account not found");
@@ -754,8 +760,16 @@ export async function getGmailDiagnostics(
   accountId: EntityId
 ): Promise<GmailDiagnostics> {
   const account = await requireGmailAccount(store, userId, accountId);
-  const records = await store.listConnectorSourceRecords(userId, account.id);
-  const attempts = await store.listConnectorSyncAttempts(userId, account.id, 50);
+  const records = await store.listConnectorSourceRecords(
+    userId,
+    account.id,
+    GMAIL_DIAGNOSTIC_MESSAGE_LIMIT
+  );
+  const attempts = await store.listConnectorSyncAttempts(
+    userId,
+    account.id,
+    GMAIL_DIAGNOSTIC_ATTEMPT_LIMIT
+  );
   const messages = records
     .filter(isGmailDiagnosticRecord)
     .sort((left, right) => {
@@ -1041,7 +1055,7 @@ function isStaleGmailSync(account: ConnectorAccount, now: string, staleAfterMs: 
 }
 
 function gmailSyncLockReferenceAt(account: ConnectorAccount): string | null {
-  return account.updatedAt ?? account.lastSyncAt ?? account.lastHealthAt ?? null;
+  return account.lastHealthAt ?? account.lastSyncAt ?? account.updatedAt ?? null;
 }
 
 function lockAgeMs(referenceAt: string | null, now: string): number | null {
@@ -1221,7 +1235,7 @@ async function syncGmailImapAccount(
       accessToken,
       now,
       recentWindowDays: GMAIL_IMAP_RECENT_WINDOW_DAYS,
-      maxMessages: GMAIL_IMAP_MAX_MESSAGES,
+      maxMessages: gmailImapMaxMessages(trigger),
       newerThanUid,
       expectedUidValidity: gmailImapUidValidity(account.settings)
     }),
@@ -1315,7 +1329,24 @@ async function syncGmailImapAccount(
     processed: summary.examined,
     createdNotifications: result.createdNotifications,
     summary,
+    progress: gmailImapProgress(poll),
     outcomes: result.outcomes
+  };
+}
+
+function gmailImapMaxMessages(trigger: ConnectorSyncAttemptTrigger): number {
+  return trigger === "refresh_all" ? GMAIL_IMAP_REFRESH_ALL_MAX_MESSAGES : GMAIL_IMAP_MAX_MESSAGES;
+}
+
+function gmailImapProgress(poll: GmailImapPollResult): GmailSyncResult["progress"] {
+  const discovered = poll.discoveredUids.length;
+  const examined = poll.messages.length;
+  const remaining = Math.max(0, discovered - examined);
+  return {
+    discovered,
+    examined,
+    remaining,
+    hasMore: remaining > 0
   };
 }
 
@@ -3191,7 +3222,7 @@ function withGmailImapCursor(
   poll: GmailImapPollResult | null
 ): ConnectorAccount["settings"] {
   if (!poll) return settings;
-  const maxUid = maxNumericString(poll.discoveredUids);
+  const maxUid = maxNumericString(poll.messages.map((message) => message.uid));
   if (!poll.uidValidity || !maxUid) {
     return settings;
   }

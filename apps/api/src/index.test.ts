@@ -1260,6 +1260,91 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     );
   });
 
+  it("bounds Gmail diagnostics history so encrypted records do not exhaust Worker CPU", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "gmail-diagnostics-bounds@example.com");
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const account = await store.createConnectorAccount(
+      owner.user.id,
+      {
+        connectorKey: "gmail",
+        displayName: "Gmail diagnostics bounds",
+        settings: { googleEmail: "gmail-diagnostics-bounds@example.com" },
+        credentialStatus: "configured"
+      },
+      now.toISOString()
+    );
+
+    for (let index = 0; index < 30; index += 1) {
+      const at = new Date(now.getTime() + index * 1000).toISOString();
+      await store.createConnectorSourceRecord(
+        owner.user.id,
+        {
+          accountId: account.id,
+          sourceExternalId: `gmail-diagnostic-${index}`,
+          sourceType: "email",
+          payloadHash: `hash-${index}`,
+          normalizedPayload: { provider: "gmail", notification_id: `notification-${index}` }
+        },
+        at
+      );
+      await store.updateConnectorSourceRecordProcessing(
+        owner.user.id,
+        account.id,
+        `gmail-diagnostic-${index}`,
+        {
+          status: "notification_created",
+          processingReason: "Created notification"
+        },
+        at
+      );
+    }
+
+    for (let index = 0; index < 12; index += 1) {
+      const at = new Date(now.getTime() + index * 1000).toISOString();
+      await store.createConnectorSyncAttempt(owner.user.id, {
+        accountId: account.id,
+        connectorKey: "gmail",
+        trigger: "manual",
+        engine: "gmail_api",
+        status: "success",
+        startedAt: at,
+        completedAt: at,
+        durationMs: index,
+        errorCode: null,
+        errorMessage: null,
+        summary: {
+          discovered: index,
+          examined: index,
+          created: index,
+          updated: 0,
+          duplicate: 0,
+          skipped: 0,
+          filtered: 0,
+          failed: 0
+        },
+        details: { index }
+      });
+    }
+
+    const diagnostics = await requestJson<{
+      messages: Array<{ messageId: string }>;
+      attempts: Array<{ details: Record<string, unknown> }>;
+    }>(
+      store,
+      "GET",
+      `/v1/connectors/gmail/${account.id}/diagnostics`,
+      undefined,
+      owner.session.token
+    );
+    expect(diagnostics.messages).toHaveLength(25);
+    expect(diagnostics.messages[0]?.messageId).toBe("gmail-diagnostic-29");
+    expect(diagnostics.messages.at(-1)?.messageId).toBe("gmail-diagnostic-5");
+    expect(diagnostics.attempts).toHaveLength(10);
+    expect(diagnostics.attempts[0]?.details).toMatchObject({ index: 11 });
+    expect(diagnostics.attempts.at(-1)?.details).toMatchObject({ index: 2 });
+  });
+
   it("applies deterministic Gmail rules before notification creation", async () => {
     const { store } = createStore();
     const owner = await register(store, "gmail-rules@example.com");
@@ -2872,7 +2957,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       owner.user.id,
       imap.id,
       imap.version,
-      { syncStatus: "syncing" },
+      { syncStatus: "syncing", lastHealthAt: "2026-07-14T20:09:00.000Z" },
       "2026-07-14T20:09:00.000Z"
     );
     expect(freshSyncing).not.toBeNull();
@@ -2913,7 +2998,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       owner.user.id,
       imap.id,
       latest?.version ?? 0,
-      { syncStatus: "syncing" },
+      { syncStatus: "syncing", lastHealthAt: "2026-07-14T20:00:00.000Z" },
       "2026-07-14T20:00:00.000Z"
     );
     expect(staleSyncing).not.toBeNull();
@@ -2945,7 +3030,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       imap.id,
       latestAfterRefreshAll?.version ?? 0,
       { syncStatus: "syncing" },
-      "2026-07-14T20:00:00.000Z"
+      "2026-07-14T20:19:00.000Z"
     );
     expect(staleForScheduled).not.toBeNull();
     expect(await syncConnectedGmailAccounts(store, env, "2026-07-14T20:20:00.000Z")).toMatchObject({
@@ -3094,6 +3179,46 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     expect(text).toContain("calendar_updated");
   });
 
+  it("returns Gmail IMAP Refresh All progress without doing IMAP work inline", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "sync-all-imap@example.com");
+    let polled = false;
+    const baseImapClient = fakeGmailImapClient();
+    const env = gmailTestEnv(fakeGmailClient(), {
+      async verify(options) {
+        return baseImapClient.verify(options);
+      },
+      async poll(options) {
+        polled = true;
+        return baseImapClient.poll(options);
+      }
+    });
+    await connectImapGmailForTest(store, owner, env);
+
+    const result = await requestJson<ConnectorSyncAllResult>(
+      store,
+      "POST",
+      "/v1/connectors/sync-all",
+      undefined,
+      owner.session.token,
+      200,
+      env
+    );
+
+    expect(polled).toBe(false);
+    expect(result.status).toBe("success");
+    expect(result.connectors).toEqual([
+      expect.objectContaining({
+        provider: "gmail",
+        status: "skipped",
+        engine: "gmail_imap",
+        created: 0,
+        failed: 0,
+        progress: expect.objectContaining({ hasMore: true, remaining: 1 })
+      })
+    ]);
+  });
+
   it("includes recoverable Gmail error accounts in Refresh All", async () => {
     const { store } = createStore();
     const owner = await register(store, "sync-all-gmail-recoverable@example.com");
@@ -3193,7 +3318,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
   it("returns failed Refresh All connector results instead of hanging on slow connectors", async () => {
     const { store } = createStore();
     const owner = await register(store, "sync-all-timeout@example.com");
-    await connectGmailForTest(store, owner, gmailTestEnv(hangingGmailClient()));
+    const account = await connectGmailForTest(store, owner, gmailTestEnv(hangingGmailClient()));
 
     const result = await requestJson<ConnectorSyncAllResult>(
       store,
@@ -3217,6 +3342,9 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
         message: expect.stringContaining("timed out")
       })
     ]);
+    await expect(store.getConnectorAccount(owner.user.id, account.id)).resolves.toMatchObject({
+      syncStatus: "idle"
+    });
   });
 
   it("records Gmail per-message outcomes and keeps partial sync failures observable", async () => {
@@ -5930,7 +6058,7 @@ function fakeGmailImapClient(): GmailImapClient {
       expect(options.recentWindowDays).toBeGreaterThan(0);
       expect(options.maxMessages).toBeGreaterThan(0);
       if (options.newerThanUid) {
-        expect(options.newerThanUid).toBe("11");
+        expect(options.newerThanUid).toBe("10");
         expect(options.expectedUidValidity).toBe("999");
         return {
           mailboxMessageCount: 10,

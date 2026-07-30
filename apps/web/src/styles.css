@@ -1809,6 +1809,26 @@ textarea::placeholder {
   width: max-content;
 }
 
+.archive-device-form {
+  display: grid;
+  gap: 10px;
+}
+
+.archive-device-form button {
+  width: max-content;
+}
+
+.archive-transfer-panel {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 12px;
+}
+
+.archive-transfer-panel h4 {
+  margin: 0;
+}
+
 .notification-card.done,
 .notification-card.dismissed,
 .notification-card.cancelled {
