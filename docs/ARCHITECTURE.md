@@ -41,6 +41,15 @@ poll providers directly.
 Clients use cursor-based incremental sync and optimistic versioned mutations. Conflicts are
 persisted and surfaced.
 
+Clients also report read freshness back to the backend after successful DentLink API reloads. The
+backend stores a user-scoped heartbeat per stable client ID for browser, desktop, mobile, and
+widget clients, including the backend revision read, client type, label, build, platform, and last
+read status. `/v1/status` returns those client-read heartbeats alongside provider connector sync
+freshness derived from connector account state. Settings -> Connections displays both signals
+separately: backend-read freshness answers "which client has the latest DentLink backend data",
+while connector freshness answers "when did providers such as Gmail or Google Calendar last sync
+into DentLink".
+
 ## Ingestion pipeline
 
 All provider polling, push subscriptions, named webhooks, manual submissions, and trusted agent
@@ -114,13 +123,21 @@ scheduled Worker cron use the active engine. IMAP comparison mode is diagnostic-
 API discovery after IMAP and stores comparison metrics without creating duplicate Notifications.
 
 Milestone 7 Slice 3.5 makes the web app behave more like a live dashboard without moving provider
-polling into the browser. The backend exposes a provider-neutral `sync-all` action that runs
-supported connected connector syncs independently and returns aggregate success, partial, or failed
-results. The web app has one refresh coordinator for Refresh All, individual Sync Now completion,
+polling into the browser. The backend exposes a provider-neutral `sync-all` action that queues
+supported connected connector syncs as durable backend jobs and returns queued aggregate results
+instead of performing provider polling in the browser request. The web app has one refresh
+coordinator for Refresh All, individual Sync Now completion,
 OAuth return, visibility changes, push events, and polling fallback. A metadata-only authenticated
 event stream watches DentLink sync changes and emits change hints such as `notifications_updated`,
 `calendar_updated`, and `connectors_updated`; clients then fetch normal API resources through the
 existing contracts.
+
+Connector sync jobs are stored in D1 with queued/running/completed state, user/account scope,
+priority, lease metadata, attempt counts, and safe error metadata. Manual Refresh All and
+per-account Sync Now enqueue jobs. The five-minute Worker cron enqueues scheduled Gmail and Google
+Calendar jobs, claims a bounded due batch, and runs each job independently, so connector work can
+continue after a client request ends and one slow provider does not block other clients from reading
+current DentLink backend data.
 
 Gmail sync observability is durable. Every manual Sync Now, Refresh All-triggered Gmail sync,
 scheduled Gmail sync, backfill, skipped fresh-lock attempt, partial attempt, and failed attempt
@@ -172,8 +189,10 @@ touchscreen dashboard.
 Milestone 4 adds Google Calendar using the same provider-neutral connector framework. Google
 Calendar OAuth links a calendar connector account, encrypted refresh tokens remain in connector
 credential storage, and synced event instances are normalized into `calendar_events` plus connector
-source records. Google Calendar remains authoritative: DentLink supports agenda viewing and local
-agenda dismissal only, not provider event creation, editing, deletion, RSVP, or attendee management.
+source records. A Worker cron trigger runs incremental Google Calendar sync for connected, idle
+Calendar accounts on the same five-minute cadence as scheduled Gmail sync. Google Calendar remains
+authoritative: DentLink supports agenda viewing and local agenda dismissal only, not provider event
+creation, editing, deletion, RSVP, or attendee management.
 
 Milestone 5 adds a provider-neutral local calendar foundation on top of the Google Calendar agenda.
 DentLink Local events use the shared normalized calendar event envelope with `source = 'local'`,
@@ -196,8 +215,12 @@ records and enough metadata for clients to update local caches without recalcula
 rank.
 
 The web client uses one refresh coordinator for SSE change hints, OAuth return, visibility restore,
-manual Refresh All, connector completion, and a DentLink-state polling fallback. UI polling reloads
-DentLink API resources only; provider polling remains in backend connector sync paths.
+manual Refresh All, connector completion, and a visible-tab polling fallback. UI polling can trigger
+bounded backend connector sync actions, but normal refreshes apply `/v1/sync` changes to a
+user-scoped browser IndexedDB cache instead of repeatedly downloading full resource lists. Full list
+endpoints remain bootstrap and repair paths, and calendar list bootstrap is scoped to the active
+calendar range so changing range or source can intentionally refresh that slice. Provider polling
+still remains inside backend connector sync paths rather than running directly in the browser.
 
 Notes text edits and reorders use queued optimistic client mutations. The client may coalesce rapid
 local intent and retry ordinary stale-version conflicts against fresh server versions, but the

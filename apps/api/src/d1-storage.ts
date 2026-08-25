@@ -15,6 +15,8 @@ import type {
   CalendarEventPatch,
   LocalCalendarEventPatch,
   CalendarSourceFilter,
+  ClientFreshness,
+  ClientFreshnessInput,
   ConnectorAccount,
   ConnectorAccountInput,
   ConnectorAccountPatch,
@@ -22,6 +24,8 @@ import type {
   ConnectorCredentialKind,
   ConnectorOAuthState,
   ConnectorSyncAttempt,
+  ConnectorSyncJob,
+  ConnectorSyncJobInput,
   ConnectorSourceRecord,
   ConnectorSourceRecordInput,
   CurrentSession,
@@ -227,6 +231,24 @@ type ConnectorAccountRow = {
   version: number;
 };
 
+type ClientFreshnessRow = {
+  id: string;
+  user_id: string;
+  client_id: string;
+  client_type: ClientFreshness["clientType"];
+  label: string;
+  build_id: string | null;
+  platform: string | null;
+  last_read_at: string;
+  last_read_revision: string;
+  last_read_status: ClientFreshness["lastReadStatus"];
+  last_error_code: string | null;
+  last_error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  version: number;
+};
+
 type ConnectorSourceRecordRow = {
   id: string;
   user_id: string;
@@ -259,6 +281,26 @@ type ConnectorSyncAttemptRow = {
   error_message: string | null;
   summary_json: string | null;
   details_json: string;
+};
+
+type ConnectorSyncJobRow = {
+  id: string;
+  user_id: string;
+  account_id: string;
+  connector_key: string;
+  trigger: ConnectorSyncJob["trigger"];
+  status: ConnectorSyncJob["status"];
+  priority: number;
+  attempts: number;
+  max_attempts: number;
+  run_after: string;
+  locked_at: string | null;
+  locked_by: string | null;
+  last_error_code: string | null;
+  last_error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
 };
 
 type ConnectorOAuthStateRow = {
@@ -867,6 +909,94 @@ export class D1DentLinkStore implements DentLinkStore {
     ]);
   }
 
+  async currentSyncCursor(userId: EntityId): Promise<string> {
+    const latest = await this.db
+      .prepare(`SELECT COALESCE(MAX(cursor), 0) AS cursor FROM sync_changes WHERE user_id = ?`)
+      .bind(userId)
+      .first<{ cursor: number }>();
+    return String(latest?.cursor ?? 0);
+  }
+
+  async upsertClientFreshness(
+    userId: EntityId,
+    input: ClientFreshnessInput,
+    now: string
+  ): Promise<ClientFreshness> {
+    const existing = await this.db
+      .prepare(`SELECT * FROM client_freshness WHERE user_id = ? AND client_id = ?`)
+      .bind(userId, input.clientId)
+      .first<ClientFreshnessRow>();
+    const next: ClientFreshness = {
+      id: existing?.id ?? nextId("client"),
+      userId,
+      clientId: input.clientId,
+      clientType: input.clientType,
+      label: input.label?.trim() || defaultClientLabel(input.clientType),
+      buildId: input.buildId ?? null,
+      platform: input.platform ?? null,
+      lastReadAt: now,
+      lastReadRevision: input.lastReadRevision ?? "0",
+      lastReadStatus: input.lastReadStatus ?? "current",
+      lastErrorCode: input.lastErrorCode ?? null,
+      lastErrorMessage: input.lastErrorMessage ?? null,
+      createdAt: existing?.created_at ?? now,
+      updatedAt: now,
+      version: (existing?.version ?? 0) + 1
+    };
+    await this.db
+      .prepare(
+        `INSERT INTO client_freshness
+         (id, user_id, client_id, client_type, label, build_id, platform, last_read_at,
+          last_read_revision, last_read_status, last_error_code, last_error_message,
+          created_at, updated_at, version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(user_id, client_id) DO UPDATE SET
+          client_type = excluded.client_type,
+          label = excluded.label,
+          build_id = excluded.build_id,
+          platform = excluded.platform,
+          last_read_at = excluded.last_read_at,
+          last_read_revision = excluded.last_read_revision,
+          last_read_status = excluded.last_read_status,
+          last_error_code = excluded.last_error_code,
+          last_error_message = excluded.last_error_message,
+          updated_at = excluded.updated_at,
+          version = client_freshness.version + 1`
+      )
+      .bind(
+        next.id,
+        userId,
+        next.clientId,
+        next.clientType,
+        await this.encryptText(next.label),
+        next.buildId,
+        next.platform,
+        next.lastReadAt,
+        next.lastReadRevision,
+        next.lastReadStatus,
+        next.lastErrorCode,
+        await this.encryptNullableText(next.lastErrorMessage),
+        next.createdAt,
+        next.updatedAt,
+        next.version
+      )
+      .run();
+    const saved = await this.db
+      .prepare(`SELECT * FROM client_freshness WHERE user_id = ? AND client_id = ?`)
+      .bind(userId, input.clientId)
+      .first<ClientFreshnessRow>();
+    if (!saved) throw new StoreError("client_freshness_failed", "Client freshness was not saved");
+    return this.clientFreshnessFromRow(saved);
+  }
+
+  async listClientFreshness(userId: EntityId): Promise<ClientFreshness[]> {
+    const rows = await this.all<ClientFreshnessRow>(
+      `SELECT * FROM client_freshness WHERE user_id = ? ORDER BY updated_at DESC`,
+      [userId]
+    );
+    return Promise.all(rows.map((row) => this.clientFreshnessFromRow(row)));
+  }
+
   async listConnectorAccounts(userId: EntityId): Promise<{ accounts: ConnectorAccount[] }> {
     const rows = await this.all<ConnectorAccountRow>(
       `SELECT * FROM connector_accounts
@@ -1272,6 +1402,178 @@ export class D1DentLinkStore implements DentLinkStore {
       )
       .run();
     return attempt;
+  }
+
+  async enqueueConnectorSyncJob(
+    userId: EntityId,
+    input: ConnectorSyncJobInput,
+    now: string
+  ): Promise<ConnectorSyncJob> {
+    const account = await this.getConnectorAccount(userId, input.accountId);
+    if (!account) throw new StoreError("not_found", "Connector account not found");
+    const existing = await this.db
+      .prepare(
+        `SELECT * FROM connector_sync_jobs
+         WHERE user_id = ? AND account_id = ? AND trigger = ? AND status IN ('queued', 'running')
+         ORDER BY priority DESC, created_at ASC
+         LIMIT 1`
+      )
+      .bind(userId, input.accountId, input.trigger)
+      .first<ConnectorSyncJobRow>();
+    if (existing) return this.connectorSyncJobFromRow(existing);
+    const job: ConnectorSyncJob = {
+      id: crypto.randomUUID(),
+      userId,
+      accountId: input.accountId,
+      connectorKey: account.connectorKey,
+      trigger: input.trigger,
+      status: "queued",
+      priority: input.priority ?? 0,
+      attempts: 0,
+      maxAttempts: input.maxAttempts ?? 3,
+      runAfter: input.runAfter ?? now,
+      lockedAt: null,
+      lockedBy: null,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null
+    };
+    await this.db
+      .prepare(
+        `INSERT INTO connector_sync_jobs
+           (id, user_id, account_id, connector_key, trigger, status, priority, attempts,
+            max_attempts, run_after, locked_at, locked_by, last_error_code, last_error_message,
+            created_at, updated_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(
+        job.id,
+        job.userId,
+        job.accountId,
+        job.connectorKey,
+        job.trigger,
+        job.status,
+        job.priority,
+        job.attempts,
+        job.maxAttempts,
+        job.runAfter,
+        job.lockedAt,
+        job.lockedBy,
+        job.lastErrorCode,
+        await this.encryptNullableText(job.lastErrorMessage),
+        job.createdAt,
+        job.updatedAt,
+        job.completedAt
+      )
+      .run();
+    await this.updateConnectorAccount(
+      userId,
+      account.id,
+      account.version,
+      { nextSyncAt: job.runAfter, errorCode: null, errorMessage: null },
+      now
+    );
+    return job;
+  }
+
+  async claimConnectorSyncJobs(
+    now: string,
+    limit: number,
+    workerId: string
+  ): Promise<ConnectorSyncJob[]> {
+    const staleBefore = new Date(Date.parse(now) - CONNECTOR_SYNC_JOB_STALE_MS).toISOString();
+    await this.db
+      .prepare(
+        `UPDATE connector_sync_jobs
+         SET status = 'queued', locked_at = NULL, locked_by = NULL,
+             last_error_code = 'sync_job_timeout',
+             last_error_message = ?,
+             updated_at = ?
+         WHERE status = 'running' AND locked_at IS NOT NULL AND locked_at <= ?
+           AND attempts < max_attempts`
+      )
+      .bind(
+        await this.encryptNullableText("Connector sync job lease expired before completion"),
+        now,
+        staleBefore
+      )
+      .run();
+    await this.db
+      .prepare(
+        `UPDATE connector_sync_jobs
+         SET status = 'failed', locked_at = NULL, locked_by = NULL,
+             last_error_code = 'sync_job_timeout',
+             last_error_message = ?,
+             updated_at = ?, completed_at = ?
+         WHERE status = 'running' AND locked_at IS NOT NULL AND locked_at <= ?
+           AND attempts >= max_attempts`
+      )
+      .bind(
+        await this.encryptNullableText("Connector sync job lease expired before completion"),
+        now,
+        now,
+        staleBefore
+      )
+      .run();
+    const boundedLimit = Math.min(Math.max(Math.floor(limit), 1), 25);
+    const rows = await this.all<ConnectorSyncJobRow>(
+      `SELECT * FROM connector_sync_jobs
+       WHERE status = 'queued' AND run_after <= ?
+       ORDER BY priority DESC, run_after ASC, created_at ASC
+       LIMIT ?`,
+      [now, boundedLimit]
+    );
+    const claimed: ConnectorSyncJob[] = [];
+    for (const row of rows) {
+      const result = await this.db
+        .prepare(
+          `UPDATE connector_sync_jobs
+           SET status = 'running', attempts = attempts + 1, locked_at = ?, locked_by = ?,
+               updated_at = ?
+           WHERE id = ? AND status = 'queued'`
+        )
+        .bind(now, workerId, now, row.id)
+        .run();
+      if (result.success === false) continue;
+      if (result.meta?.changes !== undefined && result.meta.changes < 1) continue;
+      const saved = await this.db
+        .prepare(`SELECT * FROM connector_sync_jobs WHERE id = ?`)
+        .bind(row.id)
+        .first<ConnectorSyncJobRow>();
+      if (saved) claimed.push(await this.connectorSyncJobFromRow(saved));
+    }
+    return claimed;
+  }
+
+  async completeConnectorSyncJob(
+    jobId: EntityId,
+    status: Extract<ConnectorSyncJob["status"], "succeeded" | "failed" | "skipped">,
+    now: string,
+    error?: { code: string; message: string } | null
+  ): Promise<ConnectorSyncJob | null> {
+    await this.db
+      .prepare(
+        `UPDATE connector_sync_jobs
+         SET status = ?, locked_at = NULL, locked_by = NULL, last_error_code = ?,
+             last_error_message = ?, updated_at = ?, completed_at = ?
+         WHERE id = ?`
+      )
+      .bind(
+        status,
+        error?.code ?? null,
+        await this.encryptNullableText(error?.message ?? null),
+        now,
+        now,
+        jobId
+      )
+      .run();
+    const row = await this.db
+      .prepare(`SELECT * FROM connector_sync_jobs WHERE id = ?`)
+      .bind(jobId)
+      .first<ConnectorSyncJobRow>();
+    return row ? this.connectorSyncJobFromRow(row) : null;
   }
 
   async listConnectorSyncAttempts(
@@ -1814,14 +2116,20 @@ export class D1DentLinkStore implements DentLinkStore {
     return next;
   }
 
-  async listNotifications(userId: EntityId): Promise<{ notifications: Notification[] }> {
+  async listNotifications(
+    userId: EntityId,
+    options: { limit?: number | null } = {}
+  ): Promise<{ notifications: Notification[]; limit: number | null; totalReturned: number }> {
+    const limit = normalizeListLimit(options.limit);
     const rows = await this.all<NotificationRow>(
       `SELECT * FROM notifications
        WHERE user_id = ? AND status != 'deleted'
-       ORDER BY pinned DESC, rank DESC, global_order ASC, updated_at ASC`,
-      [userId]
+       ORDER BY pinned DESC, rank DESC, global_order ASC, updated_at ASC
+       ${limit ? "LIMIT ?" : ""}`,
+      limit ? [userId, limit] : [userId]
     );
-    return { notifications: await Promise.all(rows.map((row) => this.notificationFromRow(row))) };
+    const notifications = await Promise.all(rows.map((row) => this.notificationFromRow(row)));
+    return { notifications, limit, totalReturned: notifications.length };
   }
 
   async createNotification(
@@ -2334,6 +2642,7 @@ export class D1DentLinkStore implements DentLinkStore {
           title: input.title,
           body: input.body ?? input.summary ?? "",
           priority: input.priority ?? endpoint.defaultPriority,
+          pinned: input.pinned || endpoint.slug.startsWith("watch-voice-notes"),
           dueAt: input.dueAt ?? null,
           sourceUrl: input.sourceUrl ?? null
         },
@@ -2699,6 +3008,26 @@ export class D1DentLinkStore implements DentLinkStore {
     };
   }
 
+  private async clientFreshnessFromRow(row: ClientFreshnessRow): Promise<ClientFreshness> {
+    return {
+      id: row.id,
+      userId: row.user_id,
+      clientId: row.client_id,
+      clientType: row.client_type,
+      label: await this.decryptText(row.label),
+      buildId: row.build_id,
+      platform: row.platform,
+      lastReadAt: row.last_read_at,
+      lastReadRevision: row.last_read_revision,
+      lastReadStatus: row.last_read_status,
+      lastErrorCode: row.last_error_code,
+      lastErrorMessage: await this.decryptNullableText(row.last_error_message),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      version: row.version
+    };
+  }
+
   private async connectorSyncAttemptFromRow(
     row: ConnectorSyncAttemptRow
   ): Promise<ConnectorSyncAttempt> {
@@ -2717,6 +3046,28 @@ export class D1DentLinkStore implements DentLinkStore {
       errorMessage: await this.decryptNullableText(row.error_message),
       summary: await this.decryptJsonOrNull<ConnectorSyncAttempt["summary"]>(row.summary_json),
       details: (await this.decryptJsonOrNull<Record<string, unknown>>(row.details_json)) ?? {}
+    };
+  }
+
+  private async connectorSyncJobFromRow(row: ConnectorSyncJobRow): Promise<ConnectorSyncJob> {
+    return {
+      id: row.id,
+      userId: row.user_id,
+      accountId: row.account_id,
+      connectorKey: row.connector_key,
+      trigger: row.trigger,
+      status: row.status,
+      priority: row.priority,
+      attempts: row.attempts,
+      maxAttempts: row.max_attempts,
+      runAfter: row.run_after,
+      lockedAt: row.locked_at,
+      lockedBy: row.locked_by,
+      lastErrorCode: row.last_error_code,
+      lastErrorMessage: await this.decryptNullableText(row.last_error_message),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      completedAt: row.completed_at
     };
   }
 
@@ -3336,6 +3687,13 @@ function compareConnectorAccounts(left: ConnectorAccount, right: ConnectorAccoun
   return left.displayName.localeCompare(right.displayName);
 }
 
+function defaultClientLabel(clientType: ClientFreshness["clientType"]): string {
+  if (clientType === "desktop") return "Desktop app";
+  if (clientType === "mobile") return "Mobile app";
+  if (clientType === "widget") return "Android widget";
+  return "Browser";
+}
+
 function decryptedNoteMatchesSearch(note: Note, search: string): boolean {
   const normalized = search.trim().toLowerCase();
   if (!normalized) return true;
@@ -3463,6 +3821,14 @@ function isMetadataOnlyNotificationPatch(patch: NotificationPatch): boolean {
     patch.ai === undefined
   );
 }
+
+function normalizeListLimit(value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  if (!Number.isFinite(value)) return null;
+  return Math.min(Math.max(Math.floor(value), 1), 500);
+}
+
+const CONNECTOR_SYNC_JOB_STALE_MS = 70 * 1000;
 
 function parseCompactSyncPayload(row: SyncRow): CompactSyncPayload {
   try {

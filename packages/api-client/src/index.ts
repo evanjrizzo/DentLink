@@ -18,6 +18,8 @@ import type {
   CalendarIcsImportResult,
   CalendarSourceFilter,
   AssistantChatResponse,
+  ClientFreshness,
+  ClientFreshnessInput,
   ConflictResponse,
   ConnectorAccount,
   ConnectorAccountInput,
@@ -27,6 +29,7 @@ import type {
   ConnectorSourceRecordInput,
   ConnectorSyncAllResult,
   CurrentSession,
+  DentLinkStatus,
   EmailAiSettings,
   EmailAiReprocessResult,
   EntityId,
@@ -143,6 +146,17 @@ export class DentLinkApiClient {
 
   async currentSession(): Promise<CurrentSession> {
     return this.request<CurrentSession>("/v1/auth/session");
+  }
+
+  async status(): Promise<DentLinkStatus> {
+    return this.request<DentLinkStatus>("/v1/status");
+  }
+
+  async recordClientHeartbeat(input: ClientFreshnessInput): Promise<ClientFreshness> {
+    return this.request<ClientFreshness>("/v1/client-heartbeat", {
+      method: "POST",
+      body: input
+    });
   }
 
   async logout(): Promise<void> {
@@ -314,6 +328,12 @@ export class DentLinkApiClient {
     return this.request<ConnectorSyncAllResult>("/v1/connectors/sync-all", { method: "POST" });
   }
 
+  async queueConnectorSync(accountId: EntityId): Promise<ConnectorSyncAllResult> {
+    return this.request<ConnectorSyncAllResult>(`/v1/connectors/accounts/${accountId}/sync`, {
+      method: "POST"
+    });
+  }
+
   async syncGmailAccount(accountId: EntityId): Promise<GmailSyncResult> {
     return this.request<GmailSyncResult>(`/v1/connectors/gmail/${accountId}/sync`, {
       method: "POST"
@@ -457,11 +477,12 @@ export class DentLinkApiClient {
   }
 
   async listNotifications(
-    options: { includeSuppressed?: boolean; search?: string } = {}
+    options: { includeSuppressed?: boolean; search?: string; limit?: number } = {}
   ): Promise<NotificationsList> {
     const params = new URLSearchParams();
     if (options.includeSuppressed) params.set("includeSuppressed", "true");
     if (options.search) params.set("search", options.search);
+    if (options.limit) params.set("limit", String(options.limit));
     const suffix = params.size > 0 ? `?${params.toString()}` : "";
     return this.request<NotificationsList>(`/v1/notifications${suffix}`);
   }

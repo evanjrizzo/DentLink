@@ -25,7 +25,9 @@ const GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly
 const GOOGLE_CALENDAR_API_BASE_URL = "https://www.googleapis.com/calendar/v3";
 const INITIAL_SYNC_PAST_DAYS = 30;
 const INITIAL_SYNC_FUTURE_MONTHS = 12;
-const EVENTS_PAGE_SIZE = 50;
+const EVENTS_PAGE_SIZE = 25;
+const EVENTS_PAGES_PER_SYNC = 1;
+const PAGE_CURSOR_PREFIX = "gcal_page:";
 
 export type GoogleCalendarRuntimeEnv = GoogleRuntimeEnv & {
   GOOGLE_CALENDAR_REDIRECT_URI?: string;
@@ -33,13 +35,18 @@ export type GoogleCalendarRuntimeEnv = GoogleRuntimeEnv & {
 };
 
 export type GoogleCalendarApiClient = {
-  exchangeCode(code: string, redirectUri: string): Promise<GoogleTokenResponse>;
-  refreshAccessToken(refreshToken: string): Promise<GoogleTokenResponse>;
-  listCalendars(accessToken: string): Promise<GoogleCalendarList>;
+  exchangeCode(
+    code: string,
+    redirectUri: string,
+    signal?: AbortSignal
+  ): Promise<GoogleTokenResponse>;
+  refreshAccessToken(refreshToken: string, signal?: AbortSignal): Promise<GoogleTokenResponse>;
+  listCalendars(accessToken: string, signal?: AbortSignal): Promise<GoogleCalendarList>;
   listEvents(
     accessToken: string,
     calendarId: string,
-    options: GoogleCalendarListEventsOptions
+    options: GoogleCalendarListEventsOptions,
+    signal?: AbortSignal
   ): Promise<GoogleCalendarEventsPage>;
 };
 
@@ -65,6 +72,13 @@ export type GoogleCalendarEventsPage = {
   items: GoogleCalendarProviderEvent[];
   nextPageToken?: string;
   nextSyncToken?: string;
+};
+
+type GoogleCalendarPageCursor = {
+  pageToken: string;
+  syncToken: string | null;
+  timeMin: string;
+  timeMax: string;
 };
 
 export type GoogleCalendarProviderEvent = {
@@ -233,8 +247,10 @@ export async function syncGoogleCalendarAccount(
   userId: EntityId,
   accountId: EntityId,
   env: GoogleCalendarRuntimeEnv,
-  now: string
+  now: string,
+  signal?: AbortSignal
 ): Promise<GoogleCalendarSyncResult> {
+  throwIfAborted(signal);
   const account = await requireGoogleCalendarAccount(store, userId, accountId);
   const syncing = await store.updateConnectorAccount(
     userId,
@@ -246,6 +262,7 @@ export async function syncGoogleCalendarAccount(
   if (!syncing) throw new StoreError("not_found", "Google Calendar account not found");
 
   try {
+    throwIfAborted(signal);
     const credential = await store.getConnectorCredential(
       userId,
       account.id,
@@ -255,19 +272,23 @@ export async function syncGoogleCalendarAccount(
       throw new StoreError("missing_credentials", "Google Calendar must be reconnected");
     const refreshToken = await decryptSecret(credential.encryptedValue, env);
     const calendar = googleCalendarClient(env);
-    const token = await calendar.refreshAccessToken(refreshToken);
+    throwIfAborted(signal);
+    const token = await calendar.refreshAccessToken(refreshToken, signal);
     const calendarId = calendarIdForAccount(syncing);
     const calendarSummary = calendarSummaryForAccount(syncing);
+    throwIfAborted(signal);
     const events = await eventsForSync(
       calendar,
       token.accessToken,
       calendarId,
       syncing.syncCursor,
-      now
+      now,
+      signal
     );
     let processed = 0;
     let upsertedEvents = 0;
     for (const providerEvent of events.events) {
+      throwIfAborted(signal);
       await ingestGoogleCalendarEvent(
         store,
         userId,
@@ -290,7 +311,7 @@ export async function syncGoogleCalendarAccount(
         status: "connected",
         healthStatus: "healthy",
         syncStatus: "idle",
-        syncCursor: events.nextSyncToken ?? latest.syncCursor,
+        syncCursor: events.nextCursor ?? latest.syncCursor,
         lastSyncAt: now,
         lastHealthAt: now,
         errorCode: null,
@@ -311,7 +332,7 @@ export async function syncGoogleCalendarAccount(
           { syncCursor: null, syncStatus: "idle", errorCode: null, errorMessage: null },
           now
         );
-        return syncGoogleCalendarAccount(store, userId, accountId, env, now);
+        return syncGoogleCalendarAccount(store, userId, accountId, env, now, signal);
       }
     }
     const latest = await store.getConnectorAccount(userId, account.id);
@@ -335,35 +356,82 @@ export async function syncGoogleCalendarAccount(
   }
 }
 
+export async function syncConnectedGoogleCalendarAccounts(
+  store: DentLinkStore,
+  env: GoogleCalendarRuntimeEnv,
+  now: string
+): Promise<{ attempted: number; succeeded: number; failed: number; skipped: number }> {
+  const accounts = await store.listConnectorAccountsByKey(GOOGLE_CALENDAR_CONNECTOR_KEY);
+  let attempted = 0;
+  let succeeded = 0;
+  let failed = 0;
+  let skipped = 0;
+  for (const account of accounts) {
+    if (account.status !== "connected" || account.syncStatus === "syncing") {
+      skipped += 1;
+      continue;
+    }
+    attempted += 1;
+    try {
+      await syncGoogleCalendarAccount(store, account.userId, account.id, env, now);
+      succeeded += 1;
+    } catch (error) {
+      failed += 1;
+      console.error(
+        JSON.stringify({
+          level: "error",
+          event: "google_calendar_scheduled_sync_failed",
+          accountId: account.id,
+          message: safeErrorMessage(error)
+        })
+      );
+    }
+  }
+  return { attempted, succeeded, failed, skipped };
+}
+
 export function createGoogleCalendarClient(
   clientId: string,
   clientSecret: string,
   fetchImpl: typeof fetch = fetch
 ): GoogleCalendarApiClient {
   return {
-    async exchangeCode(code, redirectUri) {
-      return tokenRequest(fetchImpl, {
-        client_id: clientId,
-        client_secret: clientSecret,
-        code,
-        redirect_uri: redirectUri,
-        grant_type: "authorization_code"
-      });
+    async exchangeCode(code, redirectUri, signal) {
+      return tokenRequest(
+        fetchImpl,
+        {
+          client_id: clientId,
+          client_secret: clientSecret,
+          code,
+          redirect_uri: redirectUri,
+          grant_type: "authorization_code"
+        },
+        signal
+      );
     },
-    async refreshAccessToken(refreshToken) {
-      return tokenRequest(fetchImpl, {
-        client_id: clientId,
-        client_secret: clientSecret,
-        refresh_token: refreshToken,
-        grant_type: "refresh_token"
-      });
+    async refreshAccessToken(refreshToken, signal) {
+      return tokenRequest(
+        fetchImpl,
+        {
+          client_id: clientId,
+          client_secret: clientSecret,
+          refresh_token: refreshToken,
+          grant_type: "refresh_token"
+        },
+        signal
+      );
     },
-    async listCalendars(accessToken) {
+    async listCalendars(accessToken, signal) {
       const url = new URL(`${GOOGLE_CALENDAR_API_BASE_URL}/users/me/calendarList`);
       url.searchParams.set("minAccessRole", "reader");
-      return (await googleCalendarRequest(fetchImpl, accessToken, url)) as GoogleCalendarList;
+      return (await googleCalendarRequest(
+        fetchImpl,
+        accessToken,
+        url,
+        signal
+      )) as GoogleCalendarList;
     },
-    async listEvents(accessToken, calendarId, options) {
+    async listEvents(accessToken, calendarId, options, signal) {
       const url = new URL(
         `${GOOGLE_CALENDAR_API_BASE_URL}/calendars/${encodeURIComponent(calendarId)}/events`
       );
@@ -378,7 +446,12 @@ export function createGoogleCalendarClient(
         if (options.timeMax) url.searchParams.set("timeMax", options.timeMax);
       }
       if (options.pageToken) url.searchParams.set("pageToken", options.pageToken);
-      return (await googleCalendarRequest(fetchImpl, accessToken, url)) as GoogleCalendarEventsPage;
+      return (await googleCalendarRequest(
+        fetchImpl,
+        accessToken,
+        url,
+        signal
+      )) as GoogleCalendarEventsPage;
     }
   };
 }
@@ -425,28 +498,90 @@ async function requireGoogleCalendarAccount(
   return account;
 }
 
+export function hasPendingGoogleCalendarPageCursor(account: ConnectorAccount): boolean {
+  return (
+    typeof account.syncCursor === "string" && account.syncCursor.startsWith(PAGE_CURSOR_PREFIX)
+  );
+}
+
 async function eventsForSync(
   calendar: GoogleCalendarApiClient,
   accessToken: string,
   calendarId: string,
   syncToken: string | null,
-  now: string
-): Promise<{ events: GoogleCalendarProviderEvent[]; nextSyncToken: string | null }> {
+  now: string,
+  signal?: AbortSignal
+): Promise<{ events: GoogleCalendarProviderEvent[]; nextCursor: string | null }> {
   const events: GoogleCalendarProviderEvent[] = [];
-  let pageToken: string | undefined;
+  const pageCursor = parseGoogleCalendarPageCursor(syncToken);
+  let pageToken: string | undefined = pageCursor?.pageToken;
+  const syncTokenForRequest = pageCursor ? pageCursor.syncToken : syncToken;
+  const timeMin = pageCursor?.timeMin ?? initialTimeMin(now);
+  const timeMax = pageCursor?.timeMax ?? initialTimeMax(now);
   let nextSyncToken: string | null = null;
+  let pages = 0;
   do {
-    const page = await calendar.listEvents(accessToken, calendarId, {
-      pageToken,
-      syncToken,
-      timeMin: initialTimeMin(now),
-      timeMax: initialTimeMax(now)
-    });
+    throwIfAborted(signal);
+    const page = await calendar.listEvents(
+      accessToken,
+      calendarId,
+      {
+        pageToken,
+        syncToken: syncTokenForRequest,
+        timeMin,
+        timeMax
+      },
+      signal
+    );
+    throwIfAborted(signal);
     events.push(...(page.items ?? []));
     nextSyncToken = page.nextSyncToken ?? nextSyncToken;
     pageToken = page.nextPageToken;
-  } while (pageToken);
-  return { events, nextSyncToken };
+    pages += 1;
+  } while (pageToken && pages < EVENTS_PAGES_PER_SYNC);
+  return {
+    events,
+    nextCursor: pageToken
+      ? formatGoogleCalendarPageCursor({
+          pageToken,
+          syncToken: syncTokenForRequest,
+          timeMin,
+          timeMax
+        })
+      : nextSyncToken
+  };
+}
+
+function parseGoogleCalendarPageCursor(cursor: string | null): GoogleCalendarPageCursor | null {
+  if (!cursor?.startsWith(PAGE_CURSOR_PREFIX)) return null;
+  try {
+    const parsed = JSON.parse(decodeURIComponent(cursor.slice(PAGE_CURSOR_PREFIX.length))) as {
+      pageToken?: unknown;
+      syncToken?: unknown;
+      timeMin?: unknown;
+      timeMax?: unknown;
+    };
+    if (
+      typeof parsed.pageToken !== "string" ||
+      (parsed.syncToken !== null && typeof parsed.syncToken !== "string") ||
+      typeof parsed.timeMin !== "string" ||
+      typeof parsed.timeMax !== "string"
+    ) {
+      return null;
+    }
+    return {
+      pageToken: parsed.pageToken,
+      syncToken: parsed.syncToken,
+      timeMin: parsed.timeMin,
+      timeMax: parsed.timeMax
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formatGoogleCalendarPageCursor(cursor: GoogleCalendarPageCursor): string {
+  return `${PAGE_CURSOR_PREFIX}${encodeURIComponent(JSON.stringify(cursor))}`;
 }
 
 async function ingestGoogleCalendarEvent(
@@ -526,12 +661,14 @@ function normalizedCalendarPayload(
 async function googleCalendarRequest(
   fetchImpl: typeof fetch,
   accessToken: string,
-  pathOrUrl: string | URL
+  pathOrUrl: string | URL,
+  signal?: AbortSignal
 ): Promise<unknown> {
   const url =
     typeof pathOrUrl === "string" ? `${GOOGLE_CALENDAR_API_BASE_URL}${pathOrUrl}` : pathOrUrl;
   const response = await fetchImpl(url, {
-    headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" }
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+    signal
   });
   const json = await response.json().catch(() => null);
   if (response.status === 410) {
@@ -617,7 +754,12 @@ function isInvalidSyncToken(error: unknown): boolean {
 function googleCalendarErrorCode(error: unknown): string {
   if (error instanceof GoogleConfigError) return "google_calendar_config_error";
   if (error instanceof StoreError) return error.code;
+  if (error instanceof DOMException && error.name === "AbortError") return "sync_job_aborted";
   return "google_calendar_sync_error";
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new StoreError("sync_job_aborted", "Google Calendar sync was aborted");
 }
 
 function safeErrorMessage(error: unknown): string {

@@ -20,6 +20,7 @@
     "verify:web:preview": "DENTLINK_PREVIEW_API_BASE_URL=https://dentlink-api-preview.evanjrizzo.workers.dev DENTLINK_PREVIEW_PAGES_PROJECT=dentlink-web-preview node scripts/web-preview.mjs verify",
     "deploy:web:preview": "DENTLINK_PREVIEW_API_BASE_URL=https://dentlink-api-preview.evanjrizzo.workers.dev DENTLINK_PREVIEW_PAGES_PROJECT=dentlink-web-preview node scripts/web-preview.mjs deploy",
     "smoke:api": "node scripts/smoke-api.mjs",
+    "smoke:connector-health": "node scripts/connector-health-smoke.mjs",
     "test:browser": "playwright test",
     "format": "prettier --write \"**/*.{css,html,json,yaml,yml,js,mjs,ts,tsx}\"",
     "format:check": "prettier --check \"**/*.{css,html,json,yaml,yml,js,mjs,ts,tsx}\"",

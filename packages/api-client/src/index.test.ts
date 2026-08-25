@@ -78,6 +78,116 @@ describe("@dentlink/api-client", () => {
     await expect(client.syncAllConnectors()).resolves.toMatchObject({ status: "success" });
   });
 
+  it("queues a single connector sync", async () => {
+    const client = new DentLinkApiClient({
+      fetchImpl: async (url, init) => {
+        expect(url).toBe("/v1/connectors/accounts/account_1/sync");
+        expect(init?.method).toBe("POST");
+        return new Response(
+          JSON.stringify({
+            startedAt: "2026-08-06T18:00:00.000Z",
+            completedAt: "2026-08-06T18:00:00.000Z",
+            status: "success",
+            connectors: [
+              {
+                accountId: "account_1",
+                provider: "gmail",
+                status: "queued",
+                engine: "gmail_api",
+                jobId: "job_1",
+                created: 0,
+                updated: 0,
+                duplicate: 0,
+                failed: 0,
+                message: "Connector sync queued for background processing"
+              }
+            ]
+          }),
+          { status: 202, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    });
+
+    await expect(client.queueConnectorSync("account_1")).resolves.toMatchObject({
+      connectors: [expect.objectContaining({ status: "queued", jobId: "job_1" })]
+    });
+  });
+
+  it("loads DentLink status and records client heartbeats", async () => {
+    const seen: Array<{ url: string; method: string; body: string | null }> = [];
+    const client = new DentLinkApiClient({
+      token: "session-token",
+      fetchImpl: async (url, init) => {
+        seen.push({
+          url: String(url),
+          method: init?.method ?? "GET",
+          body: typeof init?.body === "string" ? init.body : null
+        });
+        if (url === "/v1/client-heartbeat") {
+          return new Response(
+            JSON.stringify({
+              id: "client_freshness_1",
+              userId: "user_1",
+              clientId: "web-test",
+              clientType: "web",
+              label: "Browser",
+              buildId: "web-build",
+              platform: "Firefox",
+              lastReadAt: "2026-07-14T20:05:00.000Z",
+              lastReadRevision: "7",
+              lastReadStatus: "current",
+              lastErrorCode: null,
+              lastErrorMessage: null,
+              createdAt: "2026-07-14T20:05:00.000Z",
+              updatedAt: "2026-07-14T20:05:00.000Z",
+              version: 1
+            }),
+            { headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            serverTime: "2026-07-14T20:05:00.000Z",
+            backendRevision: "7",
+            buildId: "api-build",
+            clientReads: [],
+            connectors: []
+          }),
+          { headers: { "Content-Type": "application/json" } }
+        );
+      }
+    });
+
+    await expect(client.status()).resolves.toMatchObject({ backendRevision: "7" });
+    await expect(
+      client.recordClientHeartbeat({
+        clientId: "web-test",
+        clientType: "web",
+        label: "Browser",
+        buildId: "web-build",
+        platform: "Firefox",
+        lastReadRevision: "7",
+        lastReadStatus: "current"
+      })
+    ).resolves.toMatchObject({ clientId: "web-test", lastReadRevision: "7" });
+    expect(seen).toEqual([
+      { url: "/v1/status", method: "GET", body: null },
+      {
+        url: "/v1/client-heartbeat",
+        method: "POST",
+        body: JSON.stringify({
+          clientId: "web-test",
+          clientType: "web",
+          label: "Browser",
+          buildId: "web-build",
+          platform: "Firefox",
+          lastReadRevision: "7",
+          lastReadStatus: "current"
+        })
+      }
+    ]);
+  });
+
   it("loads email AI settings without exposing provider secrets", async () => {
     const client = new DentLinkApiClient({
       fetchImpl: async (url) => {

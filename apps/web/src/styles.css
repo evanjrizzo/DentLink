@@ -12,6 +12,7 @@
   --success: #15803d;
   --warning: #b45309;
   --error: #b42318;
+  --info: #2563eb;
   --importance-low: #94a3b8;
   --importance-medium: #2563eb;
   --importance-high: #b42318;
@@ -726,6 +727,18 @@ textarea::placeholder {
   background: color-mix(in srgb, var(--error) 12%, var(--surface-bg));
   color: var(--error);
   font-size: 18px;
+}
+
+.home-notification-row > button span.importance-pill.compact-importance-pill {
+  background: color-mix(in srgb, var(--info) 12%, var(--surface-bg));
+  color: var(--info);
+  font-weight: 800;
+}
+
+.home-notification-row > button span.action-required.compact-action-required {
+  background: color-mix(in srgb, var(--error) 12%, var(--surface-bg));
+  color: var(--error);
+  font-weight: 800;
 }
 
 .home-priority-dismiss {
@@ -4329,6 +4342,50 @@ textarea {
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 1;
+}
+
+.dentlink-desktop-client
+  .home-notification-row
+  > button
+  .importance-pill.compact-importance-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: max-content;
+  min-width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--info) 12%, var(--surface-bg));
+  color: var(--info);
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1;
+  padding: 5px 10px;
+  overflow: visible;
+  -webkit-box-orient: initial;
+  -webkit-line-clamp: initial;
+}
+
+.dentlink-desktop-client
+  .home-notification-row
+  > button
+  .action-required.compact-action-required {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: max-content;
+  min-width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--error) 12%, var(--surface-bg));
+  color: var(--error);
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1;
+  padding: 5px 10px;
+  overflow: visible;
+  -webkit-box-orient: initial;
+  -webkit-line-clamp: initial;
 }
 
 .dentlink-desktop-client .today-band .home-event-row small,

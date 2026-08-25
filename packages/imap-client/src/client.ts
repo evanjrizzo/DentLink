@@ -24,6 +24,7 @@ export type GmailImapPollOptions = {
   maxMessages?: number;
   newerThanUid?: string | null;
   expectedUidValidity?: string | null;
+  signal?: AbortSignal;
 };
 
 export type GmailImapMessage = {
@@ -45,8 +46,11 @@ export async function pollGmailImap(
   client: ImapProtocolClient,
   options: GmailImapPollOptions
 ): Promise<GmailImapPollResult> {
+  throwIfAborted(options.signal);
   await client.command("CAPABILITY");
+  throwIfAborted(options.signal);
   await client.authenticateXoauth2(xoauth2InitialResponse(options.user, options.accessToken));
+  throwIfAborted(options.signal);
   const select = await client.command("SELECT INBOX");
   const uidValidity = select.response.match(/\[UIDVALIDITY\s+(\d+)\]/i)?.[1] ?? null;
   const since = recentSinceDate(options.now, options.recentWindowDays ?? 2);
@@ -54,12 +58,15 @@ export async function pollGmailImap(
     options.expectedUidValidity && options.expectedUidValidity === uidValidity
       ? options.newerThanUid
       : null;
+  throwIfAborted(options.signal);
   const search = await client.command(uidSearchCommand(since, newerThanUid));
   const discoveredUids = searchUids(search.response);
   const fetchUids = boundedOldest(discoveredUids, options.maxMessages ?? 25);
   const messages: GmailImapMessage[] = [];
   for (const uid of fetchUids) {
+    throwIfAborted(options.signal);
     const header = await client.command(headerFetchCommand(uid));
+    throwIfAborted(options.signal);
     const mime = await client.command(mimeFetchCommand(uid));
     const identifiers = gmailIdentifiersFromFetch(header.response, uidValidity);
     const parsed = parseMime(extractFirstLiteral(mime.response));
@@ -77,4 +84,8 @@ export async function pollGmailImap(
     discoveredUids,
     messages
   };
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Error("IMAP poll aborted");
 }

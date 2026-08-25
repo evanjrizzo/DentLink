@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { hashPassword, hashSessionToken } from "./auth";
 import { D1DentLinkStore, type D1DatabaseLike } from "./d1-storage";
-import type { GoogleCalendarApiClient } from "./google-calendar";
+import { createGoogleCalendarClient, type GoogleCalendarApiClient } from "./google-calendar";
 import {
   createGoogleGmailClient,
   syncGmailAccount,
@@ -22,7 +22,9 @@ import type {
   ApiErrorBody,
   AssistantChatResponse,
   AuthSession,
+  ClientFreshness,
   ConnectorAccount,
+  DentLinkStatus,
   ConnectorSourceRecord,
   ConnectorSyncAllResult,
   ConflictResponse,
@@ -118,6 +120,14 @@ const encryptedUserEmailsSchemaPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../migrations/0019_encrypted_user_emails.sql"
 );
+const clientFreshnessSchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0020_client_freshness.sql"
+);
+const connectorSyncJobsSchemaPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../migrations/0021_connector_sync_jobs.sql"
+);
 
 type StoreFixture = {
   name: string;
@@ -164,7 +174,9 @@ const fixtures: StoreFixture[] = [
         systemAlertStateSchemaPath,
         userEncryptedArchiveSchemaPath,
         verifiedNotificationArchiveRetentionSchemaPath,
-        encryptedUserEmailsSchemaPath
+        encryptedUserEmailsSchemaPath,
+        clientFreshnessSchemaPath,
+        connectorSyncJobsSchemaPath
       ]);
       return {
         db,
@@ -214,7 +226,19 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
             maxPayloadBytes: number;
             retentionTargetRows: number;
           };
+          connectorRuntime?: never;
           tables: Array<{ name: string; rows: number }>;
+        };
+        connectorRuntime?: {
+          status: "ok" | "degraded";
+          queue: {
+            staleQueuedJobs: number;
+            staleRunningJobs: number;
+          };
+          accounts: {
+            unhealthyConfiguredAccounts: number;
+            staleConnectedAccounts: number;
+          };
         };
       };
     };
@@ -237,11 +261,194 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
             tables: expect.arrayContaining([
               expect.objectContaining({ name: "sync_changes", rows: expect.any(Number) })
             ])
+          }),
+          connectorRuntime: expect.objectContaining({
+            status: "ok",
+            queue: expect.objectContaining({
+              staleQueuedJobs: 0,
+              staleRunningJobs: 0
+            }),
+            accounts: expect.objectContaining({
+              unhealthyConfiguredAccounts: 0,
+              staleConnectedAccounts: 0
+            })
           })
         })
       );
     }
     expect(JSON.stringify(body)).not.toMatch(/token|secret|password/i);
+  });
+
+  it("reports stale connector runtime health for external monitors", async () => {
+    const { store, db } = createStore();
+    if (!db) return;
+    const owner = await register(store, "runtime-health@example.com");
+    const account = await store.createConnectorAccount(
+      owner.user.id,
+      {
+        connectorKey: "gmail",
+        displayName: "Gmail",
+        settings: { gmailEmail: "runtime-health@example.com" },
+        credentialRef: "runtime-health-credential",
+        credentialStatus: "configured"
+      },
+      "2026-08-19T16:00:00.000Z"
+    );
+    await store.updateConnectorAccount(
+      owner.user.id,
+      account.id,
+      account.version,
+      {
+        status: "connected",
+        healthStatus: "degraded",
+        syncStatus: "idle",
+        lastSyncAt: "2026-08-19T16:00:00.000Z",
+        lastHealthAt: "2026-08-19T16:05:00.000Z"
+      },
+      "2026-08-19T16:05:00.000Z"
+    );
+    await store.enqueueConnectorSyncJob(
+      owner.user.id,
+      {
+        accountId: account.id,
+        trigger: "scheduled",
+        runAfter: "2026-08-19T16:10:00.000Z"
+      },
+      "2026-08-19T16:10:00.000Z"
+    );
+
+    const response = await handleApiRequest(new Request("https://api.dentlink.test/v1/health"), {
+      store,
+      DB: db,
+      DENTLINK_ENV: "test",
+      DENTLINK_CONNECTOR_QUEUE_STALE_ALERT_MS: "1",
+      DENTLINK_CONNECTOR_SYNC_STALE_ALERT_MS: "1"
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      database: {
+        connectorRuntime: {
+          status: "ok" | "degraded";
+          queue: { staleQueuedJobs: number };
+          accounts: {
+            unhealthyConfiguredAccounts: number;
+            staleConnectedAccounts: number;
+            providers: Array<{
+              provider: string;
+              unhealthyConfiguredAccounts: number;
+              staleConnectedAccounts: number;
+            }>;
+          };
+        };
+      };
+    };
+    expect(body.database.connectorRuntime).toMatchObject({
+      status: "degraded",
+      queue: { staleQueuedJobs: 1 },
+      accounts: {
+        unhealthyConfiguredAccounts: 1,
+        staleConnectedAccounts: 1,
+        providers: [
+          expect.objectContaining({
+            provider: "gmail",
+            unhealthyConfiguredAccounts: 1,
+            staleConnectedAccounts: 1
+          })
+        ]
+      }
+    });
+    expect(JSON.stringify(body)).not.toMatch(/runtime-health@example.com|token|secret|password/i);
+  });
+
+  it("records client read freshness and reports connector freshness in status", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "freshness@example.com");
+    const recentSyncAt = new Date().toISOString();
+    const account = await store.createConnectorAccount(
+      owner.user.id,
+      {
+        connectorKey: "google-calendar",
+        displayName: "Google Calendar",
+        settings: { googleEmail: "freshness@example.com" },
+        credentialRef: "calendar-credential",
+        credentialStatus: "configured"
+      },
+      "2026-07-14T20:00:00.000Z"
+    );
+    await store.updateConnectorAccount(
+      owner.user.id,
+      account.id,
+      account.version,
+      {
+        status: "connected",
+        healthStatus: "healthy",
+        syncStatus: "idle",
+        lastSyncAt: recentSyncAt,
+        lastHealthAt: recentSyncAt,
+        nextSyncAt: null
+      },
+      "2026-07-14T20:04:30.000Z"
+    );
+
+    const heartbeat = await requestJson<ClientFreshness>(
+      store,
+      "POST",
+      "/v1/client-heartbeat",
+      {
+        clientId: "web-test",
+        clientType: "web",
+        label: "Browser",
+        buildId: "web-build",
+        platform: "Firefox",
+        lastReadRevision: "7",
+        lastReadStatus: "current"
+      },
+      owner.session.token,
+      200,
+      { DENTLINK_BUILD_ID: "api-build" }
+    );
+    expect(heartbeat).toMatchObject({
+      userId: owner.user.id,
+      clientId: "web-test",
+      clientType: "web",
+      label: "Browser",
+      buildId: "web-build",
+      platform: "Firefox",
+      lastReadRevision: "7",
+      lastReadStatus: "current"
+    });
+    expect(Date.parse(heartbeat.lastReadAt)).toBeGreaterThan(0);
+
+    const status = await requestJson<DentLinkStatus>(
+      store,
+      "GET",
+      "/v1/status",
+      undefined,
+      owner.session.token,
+      200,
+      { DENTLINK_BUILD_ID: "api-build" }
+    );
+    expect(status).toMatchObject({
+      buildId: "api-build",
+      clientReads: [
+        expect.objectContaining({
+          clientId: "web-test",
+          clientType: "web",
+          lastReadRevision: "7"
+        })
+      ],
+      connectors: [
+        expect.objectContaining({
+          accountId: account.id,
+          provider: "google-calendar",
+          freshnessStatus: "fresh",
+          lastSuccessfulSyncAt: recentSyncAt,
+          lastAttemptAt: recentSyncAt
+        })
+      ]
+    });
+    expect(Date.parse(status.serverTime)).toBeGreaterThan(0);
+    expect(status.backendRevision).toMatch(/^\d+$/);
   });
 
   it("handles CORS preflight for configured origins", async () => {
@@ -1574,7 +1781,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       gmailActualNotifications: 1,
       gmailMissingMessageDifference: 1,
       gmailLastImapUidValidity: "999",
-      gmailLastImapUid: "11",
+      gmailLastImapUid: "10",
       gmailLastComparisonApiDiscovered: 1,
       gmailLastComparisonImapDiscovered: 2,
       gmailLastComparisonMismatch: true
@@ -2905,6 +3112,223 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     });
   });
 
+  it("runs scheduled Google Calendar sync for connected accounts", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "calendar-scheduled@example.com");
+    const env = googleCalendarTestEnv(fakeGoogleCalendarClient());
+    const start = await requestJson<{ authorizationUrl: string }>(
+      store,
+      "POST",
+      "/v1/connectors/google-calendar/start",
+      undefined,
+      owner.session.token,
+      201,
+      env
+    );
+    const authorizationUrl = new URL(start.authorizationUrl);
+    const callback = await handleApiRequest(
+      new Request(
+        `https://api.dentlink.test/v1/connectors/google-calendar/callback?code=valid-code&state=${authorizationUrl.searchParams.get(
+          "state"
+        )}`,
+        { headers: { Accept: "application/json" } }
+      ),
+      { store, ...env }
+    );
+    const linked = (await callback.json()) as {
+      account: ConnectorAccount;
+      initialSync: { account: ConnectorAccount };
+    };
+    expect(linked.initialSync.account.syncCursor).toBe("calendar-sync-1");
+
+    const pending: Array<Promise<unknown>> = [];
+    apiDefaultForTest.scheduled(
+      { scheduledTime: Date.parse("2026-07-14T20:10:00.000Z"), cron: "*/5 * * * *" },
+      { store, ...env },
+      { waitUntil: (promise) => pending.push(promise) }
+    );
+    await Promise.all(pending);
+
+    const account = await store.getConnectorAccount(owner.user.id, linked.account.id);
+    expect(account).toMatchObject({
+      connectorKey: "google-calendar",
+      status: "connected",
+      healthStatus: "healthy",
+      syncStatus: "idle",
+      syncCursor: "calendar-sync-2",
+      lastSyncAt: "2026-07-14T20:10:00.000Z"
+    });
+  });
+
+  it("recovers stale running connector sync jobs before claiming due work", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "stale-sync-job@example.com");
+    const account = await store.createConnectorAccount(
+      owner.user.id,
+      {
+        connectorKey: "gmail",
+        displayName: "Gmail",
+        settings: { gmailEmail: "stale-sync-job@example.com" },
+        credentialRef: "credential-stale-job",
+        credentialStatus: "configured"
+      },
+      "2026-08-06T19:00:00.000Z"
+    );
+    const retryable = await store.enqueueConnectorSyncJob(
+      owner.user.id,
+      { accountId: account.id, trigger: "scheduled", runAfter: "2026-08-06T19:00:00.000Z" },
+      "2026-08-06T19:00:00.000Z"
+    );
+    await store.claimConnectorSyncJobs("2026-08-06T19:00:01.000Z", 1, "worker:dead");
+
+    const claimed = await store.claimConnectorSyncJobs(
+      "2026-08-06T19:20:30.000Z",
+      1,
+      "worker:recovery"
+    );
+    expect(claimed).toEqual([
+      expect.objectContaining({
+        id: retryable.id,
+        status: "running",
+        attempts: 2,
+        lockedBy: "worker:recovery",
+        lastErrorCode: "sync_job_timeout"
+      })
+    ]);
+
+    const exhausted = await store.enqueueConnectorSyncJob(
+      owner.user.id,
+      {
+        accountId: account.id,
+        trigger: "manual",
+        runAfter: "2026-08-06T19:00:00.000Z",
+        maxAttempts: 1
+      },
+      "2026-08-06T19:00:00.000Z"
+    );
+    await store.claimConnectorSyncJobs("2026-08-06T19:00:01.000Z", 1, "worker:dead");
+    const secondClaim = await store.claimConnectorSyncJobs(
+      "2026-08-06T19:20:30.000Z",
+      10,
+      "worker:recovery"
+    );
+    expect(secondClaim.some((job) => job.id === exhausted.id)).toBe(false);
+    await expect(
+      store.completeConnectorSyncJob(exhausted.id, "failed", "2026-08-06T19:21:00.000Z")
+    ).resolves.toMatchObject({
+      id: exhausted.id,
+      status: "failed"
+    });
+  });
+
+  it("drains connector sync jobs one at a time within a scheduled invocation", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "single-sync-job-claim@example.com");
+    const accounts: ConnectorAccount[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      accounts.push(
+        await store.createConnectorAccount(
+          owner.user.id,
+          {
+            connectorKey: "generic-email",
+            displayName: `Generic ${index}`,
+            settings: {},
+            credentialRef: null,
+            credentialStatus: "not_configured"
+          },
+          "2026-08-06T19:00:00.000Z"
+        )
+      );
+    }
+    await Promise.all(
+      accounts.map((account) =>
+        store.enqueueConnectorSyncJob(
+          owner.user.id,
+          {
+            accountId: account.id,
+            trigger: "manual",
+            priority: 100,
+            runAfter: "2026-08-06T19:00:00.000Z"
+          },
+          "2026-08-06T19:00:00.000Z"
+        )
+      )
+    );
+
+    const pending: Array<Promise<unknown>> = [];
+    apiDefaultForTest.scheduled(
+      { scheduledTime: Date.parse("2026-08-06T19:00:12.000Z"), cron: "*/5 * * * *" },
+      { store },
+      { waitUntil: (promise) => pending.push(promise) }
+    );
+    await Promise.all(pending);
+
+    const remaining = await store.claimConnectorSyncJobs(
+      "2026-08-06T19:00:30.000Z",
+      10,
+      "worker:remaining"
+    );
+    expect(remaining.map((job) => job.id).sort()).toEqual([]);
+  });
+
+  it("retries failed connector sync jobs with bounded backoff", async () => {
+    const { store } = createStore();
+    const owner = await register(store, "retry-sync-job@example.com");
+    const account = await store.createConnectorAccount(
+      owner.user.id,
+      {
+        connectorKey: "google-calendar",
+        displayName: "Google Calendar",
+        settings: { googleEmail: "retry-sync-job@example.com" },
+        credentialRef: null,
+        credentialStatus: "configured"
+      },
+      "2026-08-06T19:00:00.000Z"
+    );
+    await store.enqueueConnectorSyncJob(
+      owner.user.id,
+      {
+        accountId: account.id,
+        trigger: "manual",
+        priority: 100,
+        runAfter: "2026-08-06T19:00:00.000Z"
+      },
+      "2026-08-06T19:00:00.000Z"
+    );
+
+    const pending: Array<Promise<unknown>> = [];
+    apiDefaultForTest.scheduled(
+      { scheduledTime: Date.parse("2026-08-06T19:00:12.000Z"), cron: "*/5 * * * *" },
+      { store },
+      { waitUntil: (promise) => pending.push(promise) }
+    );
+    await Promise.all(pending);
+
+    const tooEarly = await store.claimConnectorSyncJobs(
+      "2026-08-06T19:00:30.000Z",
+      10,
+      "worker:too-early"
+    );
+    expect(tooEarly).toEqual([]);
+
+    const retried = await store.claimConnectorSyncJobs(
+      "2026-08-06T19:00:42.000Z",
+      10,
+      "worker:retry"
+    );
+    expect(retried).toEqual([
+      expect.objectContaining({
+        accountId: account.id,
+        connectorKey: "google-calendar",
+        trigger: "manual",
+        status: "running",
+        attempts: 1,
+        maxAttempts: 2,
+        runAfter: "2026-08-06T19:00:42.000Z"
+      })
+    ]);
+  });
+
   it("retries stale Gmail IMAP sync locks while skipping fresh in-progress syncs", async () => {
     const { store } = createStore();
     const owner = await register(store, "gmail-stale-imap@example.com");
@@ -3124,15 +3548,17 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       "google-calendar"
     ]);
     expect(result.connectors.find((connector) => connector.provider === "gmail")).toMatchObject({
-      status: "success",
+      status: "queued",
       engine: "gmail_api",
-      created: 1,
+      jobId: expect.any(String),
+      created: 0,
       failed: 0
     });
     expect(
       result.connectors.find((connector) => connector.provider === "google-calendar")
     ).toMatchObject({
-      status: "success",
+      status: "queued",
+      jobId: expect.any(String),
       failed: 0
     });
     const streamedNotification = await requestJson<Notification>(
@@ -3179,7 +3605,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     expect(text).toContain("calendar_updated");
   });
 
-  it("returns Gmail IMAP Refresh All progress without doing IMAP work inline", async () => {
+  it("queues Gmail IMAP Refresh All without doing IMAP work inline", async () => {
     const { store } = createStore();
     const owner = await register(store, "sync-all-imap@example.com");
     let polled = false;
@@ -3210,11 +3636,12 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     expect(result.connectors).toEqual([
       expect.objectContaining({
         provider: "gmail",
-        status: "skipped",
+        status: "queued",
         engine: "gmail_imap",
         created: 0,
         failed: 0,
-        progress: expect.objectContaining({ hasMore: true, remaining: 1 })
+        jobId: expect.any(String),
+        message: expect.stringContaining("queued")
       })
     ]);
   });
@@ -3252,14 +3679,15 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     expect(result.connectors).toEqual([
       expect.objectContaining({
         provider: "gmail",
-        status: "success",
-        created: 1,
+        status: "queued",
+        created: 0,
+        jobId: expect.any(String),
         failed: 0
       })
     ]);
   });
 
-  it("returns partial Refresh All results when one connector fails", async () => {
+  it("queues supported Refresh All connectors and skips unsupported connectors", async () => {
     const { store } = createStore();
     const owner = await register(store, "sync-all-partial@example.com");
     const gmail = await store.createConnectorAccount(
@@ -3306,16 +3734,16 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       undefined,
       owner.session.token
     );
-    expect(result.status).toBe("partial");
+    expect(result.status).toBe("success");
     expect(result.connectors).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ provider: "gmail", status: "failed", failed: 1 }),
+        expect.objectContaining({ provider: "gmail", status: "queued", jobId: expect.any(String) }),
         expect.objectContaining({ provider: "generic-email", status: "skipped" })
       ])
     );
   });
 
-  it("returns failed Refresh All connector results instead of hanging on slow connectors", async () => {
+  it("queues Refresh All connector work instead of hanging on slow connectors", async () => {
     const { store } = createStore();
     const owner = await register(store, "sync-all-timeout@example.com");
     const account = await connectGmailForTest(store, owner, gmailTestEnv(hangingGmailClient()));
@@ -3333,13 +3761,14 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       }
     );
 
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("success");
     expect(result.connectors).toEqual([
       expect.objectContaining({
         provider: "gmail",
-        status: "failed",
-        failed: 1,
-        message: expect.stringContaining("timed out")
+        status: "queued",
+        failed: 0,
+        jobId: expect.any(String),
+        message: expect.stringContaining("queued")
       })
     ]);
     await expect(store.getConnectorAccount(owner.user.id, account.id)).resolves.toMatchObject({
@@ -4098,6 +4527,35 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
         message: item.expectedMessage
       });
     }
+  });
+
+  it("passes abort signals through Google Calendar token and event requests", async () => {
+    const controller = new AbortController();
+    const seenSignals: Array<AbortSignal | null | undefined> = [];
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      seenSignals.push(init?.signal);
+      const url = new URL(input.toString());
+      if (url.origin === "https://oauth2.googleapis.com") {
+        return new Response(JSON.stringify({ access_token: "calendar-access-token" }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      expect(url.href).toContain("https://www.googleapis.com/calendar/v3/calendars/primary/events");
+      return new Response(JSON.stringify({ items: [], nextSyncToken: "calendar-sync-token" }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    };
+    const client = createGoogleCalendarClient("client-id", "client-secret", fetchImpl);
+
+    await client.refreshAccessToken("calendar-refresh-token", controller.signal);
+    await client.listEvents(
+      "calendar-access-token",
+      "primary",
+      { syncToken: "calendar-sync-token" },
+      controller.signal
+    );
+
+    expect(seenSignals).toEqual([controller.signal, controller.signal]);
   });
 
   it("links Google Calendar, syncs agenda events, supports dismissal, and isolates users", async () => {
@@ -5127,6 +5585,67 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     expect(JSON.stringify(sent[0])).not.toMatch(/token|secret|password/i);
   });
 
+  it("sends connector runtime alerts when configured connectors are stale or degraded", async () => {
+    const fixture = createStore();
+    if (!fixture.db) return;
+    const owner = await register(fixture.store, "connector-runtime-alert@example.com");
+    const account = await fixture.store.createConnectorAccount(
+      owner.user.id,
+      {
+        connectorKey: "google-calendar",
+        displayName: "Google Calendar",
+        settings: { googleEmail: "connector-runtime-alert@example.com" },
+        credentialRef: "calendar-runtime-alert-credential",
+        credentialStatus: "configured"
+      },
+      "2026-08-19T15:00:00.000Z"
+    );
+    await fixture.store.updateConnectorAccount(
+      owner.user.id,
+      account.id,
+      account.version,
+      {
+        status: "error",
+        healthStatus: "error",
+        syncStatus: "error",
+        lastSyncAt: "2026-08-19T15:00:00.000Z",
+        lastHealthAt: "2026-08-19T15:05:00.000Z",
+        errorCode: "google_token_error",
+        errorMessage: "Token refresh failed"
+      },
+      "2026-08-19T15:05:00.000Z"
+    );
+
+    const sent: unknown[] = [];
+    const env: ApiEnv = {
+      store: fixture.store,
+      DB: fixture.db,
+      DENTLINK_ENV: "test",
+      DENTLINK_ALERT_EMAIL_FROM: "alerts@dentlabs.net",
+      DENTLINK_SYNC_CHANGES_ROW_ALERT_THRESHOLD: "999999",
+      DENTLINK_CONNECTOR_SYNC_STALE_ALERT_MS: "1",
+      ALERT_EMAIL: {
+        async send(input) {
+          sent.push(input);
+        }
+      }
+    };
+    const pending: Array<Promise<unknown>> = [];
+    apiDefaultForTest.scheduled(
+      { scheduledTime: Date.parse("2026-08-19T16:00:00.000Z"), cron: "*/5 * * * *" },
+      env,
+      { waitUntil: (promise) => pending.push(promise) }
+    );
+    await Promise.all(pending);
+
+    expect(sent).toHaveLength(1);
+    expect(JSON.stringify(sent[0])).toContain("connector runtime");
+    expect(JSON.stringify(sent[0])).toContain("google-calendar");
+    expect(JSON.stringify(sent[0])).not.toMatch(
+      /connector-runtime-alert@example.com|Token refresh failed|token|secret|password/i
+    );
+  });
+
   it("stores encrypted archive objects and key wrappers by authenticated user only", async () => {
     const fixture = createStore();
     if (!fixture.db) return;
@@ -5652,11 +6171,36 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       store,
       "tasks",
       noteWebhook.secret,
-      { title: "Prepare estimate", body: "Use webhook body", kind: "task" },
+      { title: "Prepare estimate", body: "Use webhook body", kind: "task", pinned: true },
       202
     );
     expect(deliveredNote.note?.title).toBe("Prepare estimate");
     expect(deliveredNote.note?.priority).toBe("high");
+    expect(deliveredNote.note?.pinned).toBe(true);
+
+    const watchWebhook = await requestJson<{
+      webhook: WebhookEndpoint & { ingestUrl: string };
+      secret: string;
+    }>(
+      store,
+      "POST",
+      "/v1/webhooks",
+      {
+        name: "Watch Voice Notes",
+        slug: "watch-voice-notes-test",
+        destination: "note"
+      },
+      owner.session.token,
+      201
+    );
+    const deliveredWatchNote = await deliverWebhook(
+      store,
+      "watch-voice-notes-test",
+      watchWebhook.secret,
+      { title: "Watch note", kind: "task" },
+      202
+    );
+    expect(deliveredWatchNote.note?.pinned).toBe(true);
 
     for (let index = 0; index < 59; index += 1) {
       await deliverWebhook(

@@ -4,6 +4,12 @@ compatibility_date = "2026-07-14"
 workers_dev = true
 preview_urls = true
 
+[observability]
+enabled = true
+
+[observability.logs]
+head_sampling_rate = 1
+
 [vars]
 DENTLINK_ENV = "local"
 ALLOWED_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,http://localhost:8787,http://127.0.0.1:8787"
@@ -35,6 +41,12 @@ crons = ["*/5 * * * *"]
 name = "dentlink-api-preview"
 workers_dev = true
 preview_urls = true
+
+[env.preview.observability]
+enabled = true
+
+[env.preview.observability.logs]
+head_sampling_rate = 1
 
 [env.preview.vars]
 DENTLINK_ENV = "preview"

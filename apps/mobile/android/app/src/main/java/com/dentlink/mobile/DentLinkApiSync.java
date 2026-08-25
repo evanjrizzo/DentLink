@@ -1,6 +1,7 @@
 package com.dentlink.mobile;
 
 import android.content.Context;
+import android.util.Base64;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -20,6 +21,10 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import javax.crypto.Mac;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
+import javax.crypto.spec.SecretKeySpec;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -36,11 +41,15 @@ final class DentLinkApiSync {
 
     static String loginAndSync(Context context, String apiBase, String email, String password)
             throws IOException, JSONException {
-        JSONObject request = new JSONObject();
-        request.put("email", email);
-        request.put("password", password);
-
-        JSONObject response = requestJson(apiBase, "/v1/auth/login", "POST", null, request);
+        JSONObject challengeRequest = new JSONObject();
+        challengeRequest.put("email", email);
+        JSONObject challenge =
+                requestJson(apiBase, "/v1/auth/login-challenge", "POST", null, challengeRequest);
+        JSONObject loginRequest = new JSONObject();
+        loginRequest.put("email", challenge.getString("email"));
+        loginRequest.put("challenge", challenge.getString("challenge"));
+        loginRequest.put("response", passwordChallengeResponse(password, challenge));
+        JSONObject response = requestJson(apiBase, "/v1/auth/login", "POST", null, loginRequest);
         String token = response.getJSONObject("session").getString("token");
         DentLinkWidgetStore.saveSession(context, apiBase, token);
         refreshWidgetCache(context);
@@ -86,6 +95,25 @@ final class DentLinkApiSync {
                 widgetCalendar(calendar.optJSONArray("events")),
                 widgetNotes(notes.optJSONArray("notes")),
                 widgetEmails(notifications.optJSONArray("notifications")));
+        try {
+            recordWidgetHeartbeat(context, apiBase, token);
+        } catch (IOException | JSONException heartbeatError) {
+            // Data refresh already succeeded; heartbeat failure should only affect freshness display.
+        }
+    }
+
+    private static void recordWidgetHeartbeat(Context context, String apiBase, String token)
+            throws IOException, JSONException {
+        JSONObject status = requestJson(apiBase, "/v1/status", "GET", token, null);
+        JSONObject heartbeat = new JSONObject();
+        heartbeat.put("clientId", DentLinkWidgetStore.widgetClientId(context));
+        heartbeat.put("clientType", "widget");
+        heartbeat.put("label", "Android widget");
+        heartbeat.put("buildId", "android-widget");
+        heartbeat.put("platform", "Android " + android.os.Build.VERSION.RELEASE);
+        heartbeat.put("lastReadRevision", status.optString("backendRevision", "0"));
+        heartbeat.put("lastReadStatus", "current");
+        requestJson(apiBase, "/v1/client-heartbeat", "POST", token, heartbeat);
     }
 
     static void createNote(Context context, String title) throws IOException, JSONException {
@@ -295,6 +323,24 @@ final class DentLinkApiSync {
         String dueAt = note.optString("dueAt", "");
         if (dueAt.length() >= 10) return "Due " + dueAt.substring(5, 10);
         return "Due";
+    }
+
+    private static String passwordChallengeResponse(String password, JSONObject challenge)
+            throws IOException {
+        try {
+            byte[] salt = Base64.decode(challenge.getString("salt"), Base64.DEFAULT);
+            int iterations = challenge.getInt("iterations");
+            PBEKeySpec spec = new PBEKeySpec(password.toCharArray(), salt, iterations, 256);
+            byte[] derived =
+                    SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded();
+            Mac hmac = Mac.getInstance("HmacSHA256");
+            hmac.init(new SecretKeySpec(derived, "HmacSHA256"));
+            byte[] signature =
+                    hmac.doFinal(challenge.getString("challenge").getBytes(StandardCharsets.UTF_8));
+            return Base64.encodeToString(signature, Base64.URL_SAFE | Base64.NO_PADDING | Base64.NO_WRAP);
+        } catch (Exception error) {
+            throw new IOException("Could not prepare DentLink login challenge", error);
+        }
     }
 
     private static JSONObject requestJson(

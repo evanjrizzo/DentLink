@@ -11,6 +11,17 @@ import {
   importDeviceArchiveTransferCode,
   loadDeviceArchiveKey
 } from "./archive";
+import {
+  applyLocalSyncChanges,
+  clearLocalSyncCache,
+  emptyLocalSyncCacheSnapshot,
+  loadLocalSyncCache,
+  localSyncCacheEnabled,
+  localSyncCacheSupported,
+  saveLocalSyncCache,
+  type LocalCalendarQuery,
+  type LocalSyncCacheSnapshot
+} from "./local-sync-cache";
 import type {
   AssistantArchivedNotificationContext,
   AssistantChatSource,
@@ -22,6 +33,7 @@ import type {
   ConnectorAccount,
   ConnectorSyncAllResult,
   DentLinkChangeEvent,
+  DentLinkStatus,
   EmailAiReprocessResult,
   EmailAiSettings,
   EntityId,
@@ -36,6 +48,7 @@ import type {
   NoteInput,
   NotePatch,
   NotesList,
+  SyncResponse,
   UserPreferences,
   WebhookDestination,
   WebhookEndpoint
@@ -46,6 +59,7 @@ const initialList: NotesList = { notes: [], folders: [], tags: [] };
 const SESSION_STORAGE_KEY = "dentlink.auth.session.v1";
 const DEBUG_MODE_STORAGE_KEY = "dentlink.ui.debugMode.v1";
 const APPEARANCE_STORAGE_KEY = "dentlink.appearance.v1";
+const CLIENT_ID_STORAGE_KEY = "dentlink.client.id.v1";
 type View = "home" | "notifications" | "agenda" | "notes" | "settings";
 type AssistantMessage = {
   id: string;
@@ -243,6 +257,10 @@ const ARCHIVE_MAX_WRITES = positiveIntegerEnv(import.meta.env.VITE_DENTLINK_ARCH
 const ARCHIVE_WRITE_USER_IDS = safeUserIdSet(import.meta.env.VITE_DENTLINK_ARCHIVE_WRITE_USER_IDS);
 const ARCHIVE_RECOVERY_STORAGE_KEY = "dentlink.archive.recoverySecret.v1";
 const UI_REFRESH_INTERVAL_MS = 60_000;
+const CLIENT_BUILD_ID = import.meta.env.VITE_DENTLINK_CLIENT_BUILD_ID ?? "web-preview";
+const LOCAL_SYNC_CACHE_ENABLED = localSyncCacheEnabled(
+  import.meta.env.VITE_DENTLINK_LOCAL_SYNC_CACHE_ENABLED
+);
 const REFRESH_ALL_GMAIL_BATCH_LIMIT = 8;
 const DEFAULT_IMPORTANCE_INSTRUCTION =
   "Prioritize messages that need my action, affect scheduling, billing, safety, family, healthcare, work commitments, travel, or account security. Lower the score for routine marketing, receipts without action, newsletters, automated confirmations, and FYI-only updates.";
@@ -296,6 +314,7 @@ export function DentLinkNotesApp(): ReactElement {
   const [archiveEnrollmentStatus, setArchiveEnrollmentStatus] = useState<string | null>(null);
   const [archiveEnrollmentSaving, setArchiveEnrollmentSaving] = useState(false);
   const [preferences, setPreferences] = useState<UserPreferences | null>(null);
+  const [dentLinkStatus, setDentLinkStatus] = useState<DentLinkStatus | null>(null);
   const [aiReprocessResult, setAiReprocessResult] = useState<EmailAiReprocessResult | null>(null);
   const [aiReprocessRunning, setAiReprocessRunning] = useState(false);
   const [gmailEngineSaveStates, setGmailEngineSaveStates] = useState<
@@ -328,16 +347,23 @@ export function DentLinkNotesApp(): ReactElement {
   const connectorsRequest = useRef(0);
   const refreshPromise = useRef<Promise<void> | null>(null);
   const connectorSyncPromise = useRef<Promise<ConnectorSyncAllResult | null> | null>(null);
+  const heartbeatPromise = useRef<Promise<void> | null>(null);
   const refreshAllRunning = useRef(false);
   const archiveWriterRunning = useRef(false);
   const lastArchiveWriterSignature = useRef("");
   const eventsAbort = useRef<AbortController | null>(null);
   const syncCursor = useRef("0");
+  const localSyncCacheRef = useRef<LocalSyncCacheSnapshot | null>(null);
+  const localSyncHydratedRef = useRef(false);
   const noteMutations = useRef(new Map<EntityId, QueuedNoteMutation>());
   const noteMutationSequence = useRef(0);
   const notesListRef = useRef(notesList);
 
   const effectiveTimezone = preferences?.timezone.selected ?? detectedTimezone();
+  const visibleNotes = useMemo(
+    () => filterVisibleNotes(notesList.notes, search, folderId, tagIds),
+    [notesList.notes, search, folderId, tagIds]
+  );
   const calendarEventsWithNotes = useMemo(
     () => [
       ...calendarEvents,
@@ -522,12 +548,9 @@ export function DentLinkNotesApp(): ReactElement {
     document.title = auth ? `${pageTitle(view, settingsTab)} - DentLink` : "DentLink";
   }, [auth, view, settingsTab]);
 
-  async function loadNotes(nextSearch = search, nextTagIds = tagIds): Promise<void> {
+  async function loadNotes(_nextSearch = search, _nextTagIds = tagIds): Promise<void> {
     const requestId = (notesRequest.current += 1);
-    const response = await client.listNotes({
-      search: nextSearch || undefined,
-      tagIds: nextTagIds
-    });
+    const response = await client.listNotes();
     if (requestId === notesRequest.current) setNotesList(response);
   }
 
@@ -558,6 +581,17 @@ export function DentLinkNotesApp(): ReactElement {
     if (requestId === calendarRequest.current) setCalendarEvents(response.events);
   }
 
+  function currentCalendarQuery(): LocalCalendarQuery {
+    const range = calendarRange(calendarMode, calendarDate);
+    return {
+      mode: calendarMode,
+      date: calendarDate,
+      source: calendarSource,
+      timeMin: range.timeMin,
+      timeMax: range.timeMax
+    };
+  }
+
   async function loadWebhooks(): Promise<void> {
     const requestId = (webhooksRequest.current += 1);
     const response = await client.listWebhooks();
@@ -584,6 +618,141 @@ export function DentLinkNotesApp(): ReactElement {
     const detected = detectedTimezone();
     const next = await client.getPreferences(detected).catch(() => null);
     if (next) setPreferences(next);
+  }
+
+  async function loadDentLinkStatus(): Promise<DentLinkStatus | null> {
+    const next = await client.status().catch(() => null);
+    if (next) setDentLinkStatus(next);
+    return next;
+  }
+
+  function applySnapshotToState(snapshot: LocalSyncCacheSnapshot): void {
+    localSyncCacheRef.current = snapshot;
+    syncCursor.current = String(Math.max(Number(syncCursor.current), Number(snapshot.cursor) || 0));
+    setNotesList(snapshot.notesList);
+    setNotifications(snapshot.notifications);
+    if (sameCalendarQuery(snapshot.calendarQuery, currentCalendarQuery())) {
+      setCalendarEvents(snapshot.calendarEvents);
+    }
+    setWebhooks(snapshot.webhooks);
+    setConnectorAccounts(snapshot.connectorAccounts);
+  }
+
+  async function persistSnapshot(snapshot: LocalSyncCacheSnapshot): Promise<void> {
+    localSyncCacheRef.current = snapshot;
+    await saveLocalSyncCache(snapshot).catch(() => undefined);
+  }
+
+  async function hydrateLocalSyncCache(): Promise<LocalSyncCacheSnapshot | null> {
+    if (!auth || !LOCAL_SYNC_CACHE_ENABLED || !localSyncCacheSupported()) return null;
+    if (localSyncHydratedRef.current) return localSyncCacheRef.current;
+    localSyncHydratedRef.current = true;
+    const snapshot = await loadLocalSyncCache(auth.user.id).catch(() => null);
+    if (snapshot) applySnapshotToState(snapshot);
+    return snapshot;
+  }
+
+  async function bootstrapLocalSyncCache(): Promise<LocalSyncCacheSnapshot> {
+    if (!auth) throw new Error("DentLink session is not available.");
+    const status = await loadDentLinkStatus();
+    const cursor = status?.backendRevision ?? "0";
+    const calendarQuery = currentCalendarQuery();
+    const [
+      notesResponse,
+      notificationsResponse,
+      calendarResponse,
+      webhooksResponse,
+      connectorsResponse,
+      preferencesResponse,
+      aiSettings
+    ] = await Promise.all([
+      client.listNotes(),
+      client.listNotifications({ includeSuppressed: true }),
+      client.listCalendarEvents({
+        timeMin: calendarQuery.timeMin,
+        timeMax: calendarQuery.timeMax,
+        source: calendarQuery.source
+      }),
+      client.listWebhooks(),
+      client.listConnectorAccounts(),
+      client.getPreferences(detectedTimezone()).catch(() => null),
+      client.getEmailAiSettings().catch(() => null)
+    ]);
+    if (preferencesResponse) setPreferences(preferencesResponse);
+    if (aiSettings) setEmailAiSettings(aiSettings);
+    await loadGmailDiagnosticsForAccounts(connectorsResponse.accounts);
+    await loadGmailRulesForAccounts(connectorsResponse.accounts);
+    const snapshot: LocalSyncCacheSnapshot = {
+      ...emptyLocalSyncCacheSnapshot(auth.user.id, cursor, new Date().toISOString()),
+      notesList: notesResponse,
+      notifications: notificationsResponse.notifications,
+      calendarEvents: calendarResponse.events,
+      calendarQuery,
+      webhooks: webhooksResponse.webhooks,
+      connectorAccounts: connectorsResponse.accounts
+    };
+    applySnapshotToState(snapshot);
+    await persistSnapshot(snapshot);
+    return snapshot;
+  }
+
+  async function refreshFromLocalSyncCache(): Promise<void> {
+    if (!auth) return;
+    let snapshot = (await hydrateLocalSyncCache()) ?? localSyncCacheRef.current;
+    if (!snapshot || !sameCalendarQuery(snapshot.calendarQuery, currentCalendarQuery())) {
+      snapshot = await bootstrapLocalSyncCache();
+    }
+    let response: SyncResponse;
+    try {
+      response = await client.sync(snapshot.cursor);
+    } catch (caught) {
+      if (caught instanceof DentLinkApiError && caught.code === "invalid_cursor") {
+        await clearLocalSyncCache(auth.user.id).catch(() => undefined);
+        localSyncCacheRef.current = null;
+        localSyncHydratedRef.current = false;
+        await bootstrapLocalSyncCache();
+        return;
+      }
+      throw caught;
+    }
+    const next = applyLocalSyncChanges(
+      snapshot,
+      response.changes,
+      response.cursor,
+      new Date().toISOString()
+    );
+    applySnapshotToState(next);
+    await persistSnapshot(next);
+    await Promise.allSettled([
+      loadDentLinkStatus(),
+      loadGmailDiagnosticsForAccounts(next.connectorAccounts),
+      loadGmailRulesForAccounts(next.connectorAccounts),
+      loadPreferences(),
+      client.getEmailAiSettings().then(setEmailAiSettings)
+    ]);
+  }
+
+  async function recordBackendRead(status?: DentLinkStatus | null): Promise<void> {
+    if (heartbeatPromise.current) return heartbeatPromise.current;
+    const work = (async () => {
+      const current = status ?? (await loadDentLinkStatus());
+      await client
+        .recordClientHeartbeat({
+          clientId: dentLinkClientId(),
+          clientType: dentLinkClientType(),
+          label: dentLinkClientLabel(),
+          buildId: CLIENT_BUILD_ID,
+          platform: dentLinkClientPlatform(),
+          lastReadRevision: current?.backendRevision ?? syncCursor.current,
+          lastReadStatus: "current"
+        })
+        .then(() => loadDentLinkStatus())
+        .catch(() => undefined);
+    })().finally(() => {
+      heartbeatPromise.current = null;
+    });
+    heartbeatPromise.current = work;
+    return work;
   }
 
   async function loadGmailDiagnosticsForAccounts(accounts: ConnectorAccount[]): Promise<void> {
@@ -633,14 +802,9 @@ export function DentLinkNotesApp(): ReactElement {
     const work = (async () => {
       try {
         if (reason === "poll") await syncConnectedServicesSilently();
-        await Promise.all([
-          loadConnectors(),
-          loadNotifications(),
-          loadCalendarEvents(),
-          loadNotes(),
-          loadWebhooks(),
-          loadPreferences()
-        ]);
+        if (LOCAL_SYNC_CACHE_ENABLED) await refreshFromLocalSyncCache();
+        else await refreshDentLinkDataFromLists();
+        await recordBackendRead();
         if (reason !== "poll" && reason !== "push") setError(null);
       } catch (caught) {
         const message = refreshMessageFor(caught);
@@ -651,6 +815,32 @@ export function DentLinkNotesApp(): ReactElement {
     })();
     refreshPromise.current = work;
     return work;
+  }
+
+  async function refreshDentLinkDataFromLists(): Promise<void> {
+    const resourceLoads = [
+      { label: "connections", load: loadConnectors },
+      { label: "notifications", load: loadNotifications },
+      { label: "calendar", load: loadCalendarEvents },
+      { label: "notes", load: loadNotes },
+      { label: "webhooks", load: loadWebhooks },
+      { label: "settings", load: loadPreferences }
+    ];
+    const resourceResults = await Promise.allSettled(resourceLoads.map((resource) => resource.load()));
+    const failedLoadLabels = resourceResults.flatMap((result, index) =>
+      result.status === "rejected" ? [resourceLoads[index]?.label ?? "unknown"] : []
+    );
+    const failedLoads = resourceResults.filter((result) => result.status === "rejected");
+    if (failedLoads.length === resourceLoads.length) {
+      throw failedLoads[0]?.reason ?? new Error("DentLink data could not be loaded.");
+    }
+    if (failedLoads.length > 0) {
+      setRefreshState((current) => ({
+        ...current,
+        error: partialReloadMessage(failedLoadLabels),
+        lastAttemptAt: new Date().toISOString()
+      }));
+    }
   }
 
   function scheduleNextPoll(): void {
@@ -680,10 +870,12 @@ export function DentLinkNotesApp(): ReactElement {
       result = await continueGmailRefreshBatches(result);
       setRefreshState((current) => ({ ...current, message: "Updating Notifications...", result }));
       await refreshStepDelay();
-      await loadNotifications();
+      if (LOCAL_SYNC_CACHE_ENABLED) await refreshFromLocalSyncCache().catch(() => undefined);
+      else await loadNotifications().catch(() => undefined);
       setRefreshState((current) => ({ ...current, message: "Updating Calendar...", result }));
       await refreshStepDelay();
-      await Promise.all([loadConnectors(), loadCalendarEvents(), loadNotes(), loadWebhooks()]);
+      if (LOCAL_SYNC_CACHE_ENABLED) await refreshFromLocalSyncCache().catch(() => undefined);
+      else await Promise.allSettled([loadConnectors(), loadCalendarEvents(), loadNotes(), loadWebhooks()]);
       setRefreshState({
         running: false,
         message: refreshAllSummary(result),
@@ -717,15 +909,23 @@ export function DentLinkNotesApp(): ReactElement {
     if (connectorSyncPromise.current) return connectorSyncPromise.current;
     const work = client
       .syncAllConnectors()
-      .then((result) => {
-        setRefreshState((current) => ({ ...current, result, error: null }));
-        return result;
-      })
-      .catch((caught: unknown) => {
-        void caught;
+      .then(async (result) => {
+        const continued = await continueGmailRefreshBatches(result);
         setRefreshState((current) => ({
           ...current,
-          error: current.error,
+          result: continued,
+          message: automaticSyncMessage(continued),
+          error: null,
+          lastAttemptAt: new Date().toISOString()
+        }));
+        return continued;
+      })
+      .catch((caught: unknown) => {
+        const message = refreshMessageFor(caught);
+        setRefreshState((current) => ({
+          ...current,
+          error: message,
+          message: null,
           lastAttemptAt: new Date().toISOString()
         }));
         return null;
@@ -1121,8 +1321,8 @@ export function DentLinkNotesApp(): ReactElement {
       )
     );
     try {
-      await client.updateNotification(notification.id, notification.version, patch);
-      await loadNotifications();
+      const updated = await client.updateNotification(notification.id, notification.version, patch);
+      await applyNotificationLocally(updated);
     } catch (caught) {
       if (caught instanceof DentLinkApiError && caught.code === "version_mismatch") {
         try {
@@ -1132,8 +1332,8 @@ export function DentLinkNotesApp(): ReactElement {
             setNotifications(latest.notifications);
             return;
           }
-          await client.updateNotification(current.id, current.version, patch);
-          await loadNotifications();
+          const updated = await client.updateNotification(current.id, current.version, patch);
+          await applyNotificationLocally(updated);
           return;
         } catch (retryError) {
           setNotifications(previous);
@@ -1146,10 +1346,23 @@ export function DentLinkNotesApp(): ReactElement {
     }
   }
 
+  async function applyNotificationLocally(notification: Notification): Promise<void> {
+    setNotifications((current) => mergeNotificationList(current, notification));
+    const snapshot = localSyncCacheRef.current;
+    if (!snapshot) return;
+    const next = {
+      ...snapshot,
+      notifications: mergeNotificationList(snapshot.notifications, notification),
+      updatedAt: new Date().toISOString()
+    };
+    localSyncCacheRef.current = next;
+    await saveLocalSyncCache(next).catch(() => undefined);
+  }
+
   async function createNotification(input: NotificationInput): Promise<void> {
     try {
-      await client.createNotification(input);
-      await loadNotifications();
+      const notification = await client.createNotification(input);
+      await applyNotificationLocally(notification);
     } catch (caught) {
       handleFailure(caught);
     }
@@ -1316,33 +1529,12 @@ export function DentLinkNotesApp(): ReactElement {
   async function syncGmail(account: ConnectorAccount): Promise<void> {
     try {
       setError(null);
-      setGmailSyncStage(account.id, "Connecting...", true);
+      setGmailSyncStage(account.id, "Queueing sync...", true);
       await nextFrame();
-      setGmailSyncStage(account.id, "Searching...", true);
-      let result = await client.syncGmailAccount(account.id);
-      for (
-        let batch = 1;
-        result.progress?.hasMore === true && batch < REFRESH_ALL_GMAIL_BATCH_LIMIT;
-        batch += 1
-      ) {
-        setGmailSyncStage(
-          account.id,
-          `Fetching... ${gmailProgressLabel(result.progress.remaining)}`,
-          true
-        );
-        await nextFrame();
-        result = await client.syncGmailAccount(account.id);
-      }
-      setGmailSyncStage(account.id, "Fetching...", true);
-      await nextFrame();
-      setGmailSyncStage(account.id, "Applying rules...", true);
-      await nextFrame();
-      setGmailSyncStage(account.id, "Creating notifications...", true);
-      const diagnostics = await client.getGmailDiagnostics(account.id);
-      setGmailDiagnostics((current) => ({ ...current, [account.id]: diagnostics }));
-      await refreshConnectorNotificationState();
-      setGmailSyncStage(account.id, "Finished.", false);
-      if (result.createdNotifications > 0) setView("notifications");
+      await client.queueConnectorSync(account.id);
+      await refreshAfterQueuedSync();
+      setGmailSyncStage(account.id, "Queued for background sync.", false);
+      setError(null);
     } catch (caught) {
       const message = gmailSyncMessageFor(caught, gmailActiveEngine(account));
       setGmailSyncStates((current) => ({
@@ -1352,6 +1544,14 @@ export function DentLinkNotesApp(): ReactElement {
       setError(message);
       await loadConnectors().catch(() => undefined);
     }
+  }
+
+  async function refreshAfterQueuedSync(): Promise<void> {
+    if (LOCAL_SYNC_CACHE_ENABLED) {
+      await refreshFromLocalSyncCache();
+      return;
+    }
+    await Promise.allSettled([loadConnectors(), loadDentLinkStatus()]);
   }
 
   function setGmailSyncStage(accountId: EntityId, stage: GmailSyncStage, running: boolean): void {
@@ -1488,9 +1688,9 @@ export function DentLinkNotesApp(): ReactElement {
   async function syncGoogleCalendar(account: ConnectorAccount): Promise<void> {
     try {
       setError(null);
-      const result = await client.syncGoogleCalendarAccount(account.id);
-      await Promise.all([loadConnectors(), loadCalendarEvents()]);
-      if (result.upsertedEvents > 0) setView("agenda");
+      await client.queueConnectorSync(account.id);
+      await refreshAfterQueuedSync();
+      setError(null);
     } catch (caught) {
       handleFailure(caught);
       await loadConnectors().catch(() => undefined);
@@ -1671,6 +1871,9 @@ export function DentLinkNotesApp(): ReactElement {
       clearStoredSession();
       eventsAbort.current?.abort();
       eventsAbort.current = null;
+      if (auth) await clearLocalSyncCache(auth.user.id).catch(() => undefined);
+      localSyncCacheRef.current = null;
+      localSyncHydratedRef.current = false;
       syncCursor.current = "0";
       setAuth(null);
       setNotesList(initialList);
@@ -1887,7 +2090,7 @@ export function DentLinkNotesApp(): ReactElement {
         <HomeView
           notifications={notifications}
           calendarEvents={calendarEventsWithNotes}
-          notes={notesList.notes}
+          notes={visibleNotes}
           sourceColors={appearance.sourceColors}
           webhooks={webhooks}
           messages={assistantMessages}
@@ -2018,6 +2221,7 @@ export function DentLinkNotesApp(): ReactElement {
           aiReprocessResult={aiReprocessResult}
           aiReprocessRunning={aiReprocessRunning}
           onReprocessEmailAi={reprocessEmailAi}
+          dentLinkStatus={dentLinkStatus}
           accounts={connectorAccounts}
           webhooks={webhooks}
           webhookDraft={webhookDraft}
@@ -2067,6 +2271,29 @@ function optimisticNote(note: Note, patch: NotePatch, tags: NotesList["tags"]): 
     version: note.version + 1
   };
 }
+
+function filterVisibleNotes(
+  notes: Note[],
+  search: string,
+  folderId: EntityId | null,
+  tagIds: EntityId[]
+): Note[] {
+  const normalizedSearch = search.trim().toLowerCase();
+  return notes.filter((note) => {
+    if (folderId && note.folderId !== folderId) return false;
+    if (tagIds.length > 0) {
+      const noteTagIds = new Set(note.tags.map((tag) => tag.id));
+      if (!tagIds.every((tagId) => noteTagIds.has(tagId))) return false;
+    }
+    if (!normalizedSearch) return true;
+    return [note.title, note.body, note.priority, note.kind, ...note.tags.map((tag) => tag.name)]
+      .join(" ")
+      .toLowerCase()
+      .includes(normalizedSearch);
+  });
+}
+
+export const filterVisibleNotesForTest = filterVisibleNotes;
 
 function HomeView(props: {
   notifications: Notification[];
@@ -2488,6 +2715,9 @@ function PageHeader(props: {
       <div className="page-header-status">
         <span className={`refresh-indicator ${props.refreshState.live}`}>
           Auto sync: {props.refreshState.live}
+          {props.refreshState.lastAttemptAt
+            ? ` · last ${new Date(props.refreshState.lastAttemptAt).toLocaleTimeString()}`
+            : ""}
           {props.refreshState.nextPollAt
             ? ` · next ${new Date(props.refreshState.nextPollAt).toLocaleTimeString()}`
             : ""}
@@ -5186,6 +5416,24 @@ function dateKeyInTimezone(date: Date, timeZone: string): string {
   return `${year}-${month}-${day}`;
 }
 
+export function sameCalendarQueryForTest(
+  left: LocalCalendarQuery | null,
+  right: LocalCalendarQuery | null
+): boolean {
+  return sameCalendarQuery(left, right);
+}
+
+function sameCalendarQuery(left: LocalCalendarQuery | null, right: LocalCalendarQuery | null): boolean {
+  if (!left || !right) return false;
+  return (
+    left.mode === right.mode &&
+    left.date === right.date &&
+    left.source === right.source &&
+    left.timeMin === right.timeMin &&
+    left.timeMax === right.timeMax
+  );
+}
+
 function detectedTimezone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
@@ -5292,10 +5540,41 @@ function refreshAllSummary(result: ConnectorSyncAllResult): string {
     (total, connector) => total + (connector.progress?.remaining ?? 0),
     0
   );
+  const queued = result.connectors.filter((connector) => connector.status === "queued").length;
   if (remaining > 0) return `Refresh paused with ${gmailProgressLabel(remaining)}.`;
+  if (queued > 0) return `Queued ${queued} connector sync${queued === 1 ? "" : "s"}.`;
   if (result.status === "success") return "Refresh All finished.";
   if (result.status === "partial") return "Refresh completed with warnings.";
   return "Refresh All failed.";
+}
+
+export function automaticSyncMessage(result: ConnectorSyncAllResult): string | null {
+  const remaining = result.connectors.reduce(
+    (total, connector) => total + (connector.progress?.remaining ?? 0),
+    0
+  );
+  const queued = result.connectors.filter((connector) => connector.status === "queued").length;
+  if (remaining > 0) return `Auto sync paused with ${gmailProgressLabel(remaining)}.`;
+  if (queued > 0) return `Queued ${queued} background sync${queued === 1 ? "" : "s"}.`;
+  if (result.status === "partial") return "Auto sync completed with warnings.";
+  if (result.status === "failed") return "Auto sync failed.";
+  return null;
+}
+
+export function partialReloadMessageForTest(failedLabels: string[]): string {
+  return partialReloadMessage(failedLabels);
+}
+
+function partialReloadMessage(failedLabels: string[]): string {
+  if (failedLabels.length === 0) return "Some DentLink data did not reload.";
+  return `Some DentLink data did not reload: ${formatInlineList(failedLabels)}.`;
+}
+
+function formatInlineList(values: string[]): string {
+  const uniqueValues = Array.from(new Set(values));
+  if (uniqueValues.length === 1) return uniqueValues[0] ?? "";
+  if (uniqueValues.length === 2) return `${uniqueValues[0]} and ${uniqueValues[1]}`;
+  return `${uniqueValues.slice(0, -1).join(", ")}, and ${uniqueValues.at(-1)}`;
 }
 
 function refreshConnectorResultLines(result: ConnectorSyncAllResult): Array<{ key: string; text: string }> {
@@ -5470,6 +5749,15 @@ function sortNotifications(
   });
 }
 
+function mergeNotificationList(
+  notifications: Notification[],
+  notification: Notification
+): Notification[] {
+  const withoutExisting = notifications.filter((item) => item.id !== notification.id);
+  if (notification.status === "deleted") return withoutExisting;
+  return sortNotifications([...withoutExisting, notification], "recommended");
+}
+
 function sortNotificationHistory(notifications: Notification[]): Notification[] {
   return [...notifications].sort((left, right) => {
     const rightTime = notificationHistoryTimestamp(right);
@@ -5577,7 +5865,9 @@ function relativeTime(value: string): string {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return value;
   const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
-  if (seconds < 60) return "Just now";
+  if (seconds < 60) {
+    return new Date(timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
   const minutes = Math.round(seconds / 60);
   if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
   const hours = Math.round(minutes / 60);
@@ -5655,6 +5945,7 @@ function SettingsView(props: {
   aiReprocessResult: EmailAiReprocessResult | null;
   aiReprocessRunning: boolean;
   onReprocessEmailAi: (accountId?: EntityId | null) => Promise<void>;
+  dentLinkStatus: DentLinkStatus | null;
   accounts: ConnectorAccount[];
   webhooks: Array<WebhookEndpoint & { ingestUrl: string }>;
   webhookDraft: { name: string; slug: string; destination: WebhookDestination };
@@ -5777,6 +6068,7 @@ function SettingsView(props: {
       {props.selectedTab === "connections" ? (
         <ConnectorsView
           accounts={props.accounts}
+          dentLinkStatus={props.dentLinkStatus}
           webhooks={props.webhooks}
           webhookDraft={props.webhookDraft}
           lastWebhookSecret={props.lastWebhookSecret}
@@ -7395,6 +7687,7 @@ function aiUnavailableLabel(reason: string | null | undefined): string {
 
 function ConnectorsView(props: {
   accounts: ConnectorAccount[];
+  dentLinkStatus: DentLinkStatus | null;
   webhooks: Array<WebhookEndpoint & { ingestUrl: string }>;
   webhookDraft: { name: string; slug: string; destination: WebhookDestination };
   lastWebhookSecret: string | null;
@@ -7437,6 +7730,7 @@ function ConnectorsView(props: {
   );
   return (
     <section className="connections-settings">
+      <BackendFreshnessPanel status={props.dentLinkStatus} />
       <div className="connection-actions">
         {props.debugMode ? (
           <button onClick={() => void props.onRefreshConnectors()}>Refresh</button>
@@ -7454,6 +7748,7 @@ function ConnectorsView(props: {
             <GmailConnectorCard
               key={account.id}
               account={account}
+              freshness={connectorFreshnessFor(props.dentLinkStatus, account.id)}
               diagnostics={props.gmailDiagnostics[account.id]}
               rules={props.gmailRules[account.id] ?? []}
               syncState={props.gmailSyncStates[account.id]}
@@ -7479,6 +7774,9 @@ function ConnectorsView(props: {
               <article key={account.id} className="notification-card">
                 <strong>{account.displayName}</strong>
                 <span>Status: {account.status}</span>
+                <ConnectorFreshnessLine
+                  freshness={connectorFreshnessFor(props.dentLinkStatus, account.id)}
+                />
                 {props.debugMode ? <span>Health: {account.healthStatus}</span> : null}
                 {props.debugMode ? <span>Sync: {account.syncStatus}</span> : null}
                 <span>
@@ -7532,8 +7830,83 @@ function ConnectorsView(props: {
   );
 }
 
+function BackendFreshnessPanel(props: { status: DentLinkStatus | null }): ReactElement {
+  const status = props.status;
+  return (
+    <section className="subsettings-panel" aria-label="Backend freshness">
+      <h3>Freshness</h3>
+      <div className="gmail-diagnostics-grid">
+        <span>Backend revision: {status?.backendRevision ?? "Unknown"}</span>
+        <span>Server checked: {status ? relativeTime(status.serverTime) : "Not checked yet"}</span>
+        <span>API build: {status?.buildId ?? "Unknown"}</span>
+      </div>
+      <div className="diagnostics-table-wrap">
+        <table className="diagnostics-table">
+          <thead>
+            <tr>
+              <th>Client</th>
+              <th>Backend read</th>
+              <th>Revision</th>
+              <th>Build</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(status?.clientReads ?? []).length === 0 ? (
+              <tr>
+                <td colSpan={4}>No client read heartbeats recorded yet.</td>
+              </tr>
+            ) : (
+              status?.clientReads.map((client) => (
+                <tr key={client.id}>
+                  <td>
+                    {client.label} · {client.clientType}
+                    {client.platform ? ` · ${client.platform}` : ""}
+                  </td>
+                  <td>
+                    {relativeTime(client.lastReadAt)} · {client.lastReadStatus}
+                  </td>
+                  <td>{client.lastReadRevision}</td>
+                  <td>{client.buildId ?? "Unknown"}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function ConnectorFreshnessLine(props: {
+  freshness: DentLinkStatus["connectors"][number] | null;
+}): ReactElement {
+  const freshness = props.freshness;
+  if (!freshness) return <span>Connector freshness: Not checked yet</span>;
+  return (
+    <span>
+      Connector freshness: {freshness.freshnessStatus} · provider sync{" "}
+      {freshness.lastSuccessfulSyncAt ? relativeTime(freshness.lastSuccessfulSyncAt) : "never"}
+    </span>
+  );
+}
+
+function connectorFreshnessFor(
+  status: DentLinkStatus | null,
+  accountId: EntityId
+): DentLinkStatus["connectors"][number] | null {
+  return status?.connectors.find((connector) => connector.accountId === accountId) ?? null;
+}
+
+export function connectorFreshnessForTest(
+  status: DentLinkStatus | null,
+  accountId: EntityId
+): DentLinkStatus["connectors"][number] | null {
+  return connectorFreshnessFor(status, accountId);
+}
+
 function GmailConnectorCard(props: {
   account: ConnectorAccount;
+  freshness: DentLinkStatus["connectors"][number] | null;
   diagnostics: GmailDiagnostics | undefined;
   rules: GmailRule[];
   syncState: GmailSyncUiState | undefined;
@@ -7579,6 +7952,7 @@ function GmailConnectorCard(props: {
         <span>Requested Engine: {gmailEngineLabel(selectedEngine)}</span>
         <span>Active Engine: {gmailEngineLabel(activeEngine)}</span>
         <span>Connection Status: {props.account.status}</span>
+        <ConnectorFreshnessLine freshness={props.freshness} />
         {props.debugMode ? <span>Health: {props.account.healthStatus}</span> : null}
         {props.debugMode ? <span>Sync: {props.account.syncStatus}</span> : null}
         <span>Reconnect Required: {reconnectRequired ? "Yes" : "No"}</span>
@@ -8693,6 +9067,35 @@ function clearStoredSession(): void {
 function isDesktopClient(): boolean {
   if (typeof window === "undefined") return false;
   return new URLSearchParams(window.location.search).get("dentlinkDesktop") === "1";
+}
+
+function dentLinkClientType(): "web" | "desktop" | "mobile" {
+  if (isDesktopClient()) return "desktop";
+  if (isAndroidAppClient()) return "mobile";
+  return "web";
+}
+
+function dentLinkClientId(): string {
+  if (typeof window === "undefined") return "web:ssr";
+  const clientType = dentLinkClientType();
+  const key = `${CLIENT_ID_STORAGE_KEY}.${clientType}`;
+  const existing = window.localStorage.getItem(key);
+  if (existing) return existing;
+  const next = `${clientType}:${crypto.randomUUID()}`;
+  window.localStorage.setItem(key, next);
+  return next;
+}
+
+function dentLinkClientLabel(): string {
+  const clientType = dentLinkClientType();
+  if (clientType === "desktop") return "Desktop app";
+  if (clientType === "mobile") return "Mobile app";
+  return "Browser";
+}
+
+function dentLinkClientPlatform(): string {
+  if (typeof navigator === "undefined") return "unknown";
+  return navigator.userAgent.slice(0, 120);
 }
 
 function isAndroidAppClient(): boolean {

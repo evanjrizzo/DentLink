@@ -96,6 +96,13 @@ Implemented in the Worker-style API handler:
 - `GET /v1/auth/session`: return the authenticated user/session from the bearer token without
   echoing the raw token.
 - `POST /v1/auth/logout`: revoke the current session token.
+- `GET /v1/status`: return authenticated, user-scoped operational freshness for clients and
+  connectors. The response includes server time, backend sync revision, API build ID, recent
+  client-read heartbeats, and connector freshness derived from account sync/health state.
+- `POST /v1/client-heartbeat`: upsert the authenticated user's stable client read freshness record.
+  Clients send `clientId`, `clientType` (`web`, `desktop`, `mobile`, or `widget`), label, optional
+  build/platform metadata, the backend revision they just read, and read status. The server owns
+  user scope and timestamps.
 - `GET /v1/notes`: list authenticated user's notes, folders, and tags. Supports `search`,
   `folderId`, and repeated `tagId` query parameters.
 - `POST /v1/notes`: create a task or reference note.
@@ -121,7 +128,9 @@ Implemented in the Worker-style API handler:
 - `GET /v1/archive/objects/:id`: return the authenticated user's encrypted envelope. Cross-user
   object IDs return `404`.
 - `GET /v1/sync`: return cursor-based changes for the authenticated user. Empty cursor means `0`;
-  invalid cursor values return `invalid_cursor`.
+  invalid cursor values return `invalid_cursor`. Browser clients use this as the normal refresh
+  path after local cache bootstrap; list endpoints remain available for initial cache population,
+  scoped calendar range loading, and repair after an invalid or missing local cursor.
 - `GET /v1/events`: authenticated Server-Sent Events stream for DentLink-owned change metadata.
   Events include only safe hints such as change type, source, account ID, and revision; clients
   refresh normal API resources after receiving an event.
@@ -235,9 +244,12 @@ implement those connectors through the framework.
 - `GET /v1/connectors/catalog`: list safe connector definitions, auth type, capabilities, and
   settings schema. Requires authentication.
 - `GET /v1/connectors/accounts`: list the authenticated user's non-deleted connector accounts.
-- `POST /v1/connectors/sync-all`: run manual sync for connected supported connector accounts,
-  continue after per-connector failures, and return an aggregate `success`, `partial`, or `failed`
-  result with safe per-connector counts. Gmail and Google Calendar are currently supported.
+- `POST /v1/connectors/sync-all`: queue manual background sync jobs for connected supported
+  connector accounts and return an aggregate `success`, `partial`, or `failed` result with safe
+  per-connector queued/skipped/failed entries. Gmail and Google Calendar are currently supported.
+- `POST /v1/connectors/accounts/:id/sync`: queue one supported connector account for background
+  sync and return the same aggregate connector result shape with one connector entry. The request
+  returns after enqueueing; provider polling runs from backend cron job draining.
 - `POST /v1/connectors/accounts`: create a connector account metadata record for a catalog key.
 - `PATCH /v1/connectors/accounts/:id`: update account metadata with `expectedVersion`.
 - `DELETE /v1/connectors/accounts/:id`: soft-delete an account with `expectedVersion`.

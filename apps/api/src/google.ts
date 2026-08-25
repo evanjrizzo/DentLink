@@ -84,13 +84,15 @@ export function googleOAuthConfig(
 
 export async function tokenRequest(
   fetchImpl: typeof fetch,
-  fields: Record<string, string>
+  fields: Record<string, string>,
+  signal?: AbortSignal
 ): Promise<GoogleTokenResponse> {
   const body = new URLSearchParams(fields);
   const response = await fetchImpl(GOOGLE_OAUTH_TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body
+    body,
+    signal
   });
   const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
   if (!response.ok || !json) {
@@ -110,11 +112,12 @@ export async function tokenRequest(
 
 export async function tokenInfoRequest(
   fetchImpl: typeof fetch,
-  accessToken: string
+  accessToken: string,
+  signal?: AbortSignal
 ): Promise<GoogleTokenInfo> {
   const url = new URL(GOOGLE_OAUTH_TOKEN_INFO_URL);
   url.searchParams.set("access_token", accessToken);
-  const response = await fetchImpl(url);
+  const response = await fetchImpl(url, { signal });
   const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
   if (!response.ok || !json) {
     throw new StoreError("google_token_info_error", "Google token scope verification failed");

@@ -20,7 +20,6 @@ import {
   gmailConnectorDefinition,
   reprocessSameDayEmailAi,
   startGmailOAuth,
-  syncConnectedGmailAccounts,
   syncGmailAccount,
   updateEmailAiSettings,
   updateGmailEngine,
@@ -33,6 +32,7 @@ import {
   completeGoogleCalendarOAuth,
   disconnectGoogleCalendarAccount,
   googleCalendarConnectorDefinition,
+  hasPendingGoogleCalendarPageCursor,
   startGoogleCalendarOAuth,
   syncGoogleCalendarAccount,
   type GoogleCalendarApiClient,
@@ -70,9 +70,13 @@ import {
 import type { ConnectorDefinition } from "@dentlink/connector-sdk";
 import type {
   AuthSession,
+  ClientFreshnessInput,
   ConnectorAccount,
+  ConnectorFreshness,
   ConnectorSyncAllResult,
+  ConnectorSyncJob,
   DentLinkChangeEvent,
+  DentLinkStatus,
   GmailRule,
   NoteConflict,
   SyncChange,
@@ -113,6 +117,8 @@ export type ApiEnv = GmailRuntimeEnv &
     DENTLINK_SYNC_CHANGES_ROW_ALERT_THRESHOLD?: string;
     DENTLINK_SYNC_CHANGES_AVG_PAYLOAD_ALERT_BYTES?: string;
     DENTLINK_SYNC_CHANGES_MAX_PAYLOAD_ALERT_BYTES?: string;
+    DENTLINK_CONNECTOR_QUEUE_STALE_ALERT_MS?: string;
+    DENTLINK_CONNECTOR_SYNC_STALE_ALERT_MS?: string;
     DENTLINK_ARCHIVE_MAX_TOTAL_BYTES?: string;
     DENTLINK_ARCHIVE_NOTIFICATION_RETENTION_ENABLED?: string;
     DENTLINK_ARCHIVE_NOTIFICATION_RETENTION_DAYS?: string;
@@ -138,11 +144,21 @@ const DEFAULT_STORAGE_ALERT_COOLDOWN_HOURS = 6;
 const DEFAULT_SYNC_CHANGES_ROW_ALERT_THRESHOLD = 12000;
 const DEFAULT_SYNC_CHANGES_AVG_PAYLOAD_ALERT_BYTES = 500;
 const DEFAULT_SYNC_CHANGES_MAX_PAYLOAD_ALERT_BYTES = 2000;
+const DEFAULT_CONNECTOR_QUEUE_STALE_ALERT_MS = 10 * 60 * 1000;
+const DEFAULT_CONNECTOR_SYNC_STALE_ALERT_MS = 30 * 60 * 1000;
 const DEFAULT_ARCHIVE_MAX_TOTAL_BYTES = 9_000_000_000;
 const DEFAULT_ARCHIVE_NOTIFICATION_RETENTION_DAYS = 30;
 const DEFAULT_ARCHIVE_NOTIFICATION_RETENTION_BATCH_SIZE = 25;
 const MAX_ARCHIVE_NOTIFICATION_RETENTION_BATCH_SIZE = 100;
 const DEFAULT_SYNC_ALL_CONNECTOR_TIMEOUT_MS = 25_000;
+const CONNECTOR_FRESHNESS_STALE_MS = 15 * 60 * 1000;
+// Claim only the job this invocation is about to run. If a provider call stalls hard enough for
+// the Worker to be killed, pre-claimed later jobs otherwise sit "running" until stale recovery.
+const CONNECTOR_SYNC_JOB_BATCH_SIZE = 1;
+const CONNECTOR_SYNC_JOB_MAX_PER_INVOCATION = 6;
+const CONNECTOR_SYNC_JOB_EXECUTION_TIMEOUT_MS = 45_000;
+const CONNECTOR_SYNC_JOB_RETRY_BASE_DELAY_MS = 30_000;
+const CONNECTOR_SYNC_JOB_RETRY_MAX_DELAY_MS = 5 * 60 * 1000;
 const DEFAULT_CONTENT_ENCRYPTION_BACKFILL_BATCH_SIZE = 50;
 const MAX_CONTENT_ENCRYPTION_BACKFILL_BATCH_SIZE = 200;
 const AUTH_CHALLENGE_TTL_MS = 5 * 60 * 1000;
@@ -368,6 +384,19 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
     }
     if (!auth) return error("unauthorized", "Authentication required", 401);
 
+    if (method === "GET" && path === "/v1/status") {
+      return json(await dentLinkStatus(store, auth.user.id, env, now));
+    }
+    if (method === "POST" && path === "/v1/client-heartbeat") {
+      return json(
+        await store.upsertClientFreshness(
+          auth.user.id,
+          parseClientFreshnessInput(await readJson(request)),
+          now
+        )
+      );
+    }
+
     if (method === "GET" && path === "/v1/notes") {
       return json(
         await store.listNotes(auth.user.id, {
@@ -476,7 +505,7 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
       return json(await startGoogleCalendarOAuth(store, auth.user.id, env, url, now), 201);
     }
     if (method === "POST" && path === "/v1/connectors/sync-all") {
-      return json(await syncAllConnectors(store, auth.user.id, env, now));
+      return json(await syncAllConnectors(store, auth.user.id, now));
     }
     if (method === "GET" && path === "/v1/connectors/accounts") {
       return json(await store.listConnectorAccounts(auth.user.id));
@@ -499,6 +528,18 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
       return json(await store.createConnectorAccount(auth.user.id, input, now), 201);
     }
     const connectorAccountMatch = path.match(/^\/v1\/connectors\/accounts\/([^/]+)$/);
+    const connectorAccountSyncMatch = path.match(/^\/v1\/connectors\/accounts\/([^/]+)\/sync$/);
+    if (connectorAccountSyncMatch && method === "POST") {
+      return json(
+        await enqueueConnectorAccountSync(
+          store,
+          auth.user.id,
+          connectorAccountSyncMatch[1] ?? "",
+          now
+        ),
+        202
+      );
+    }
     if (connectorAccountMatch && method === "PATCH") {
       const body = parseConnectorAccountPatch(await readJson(request));
       const account = await store.updateConnectorAccount(
@@ -739,25 +780,30 @@ async function handleApiRoute(request: Request, env: ApiEnv = {}): Promise<Respo
       );
     }
     if (method === "GET" && path === "/v1/notifications") {
-      const listed = await store.listNotifications(auth.user.id);
+      const listed = await store.listNotifications(auth.user.id, {
+        limit: parseListLimit(url.searchParams.get("limit"))
+      });
       const includeSuppressed = url.searchParams.get("includeSuppressed") === "true";
       const search = (url.searchParams.get("search") ?? "").trim().toLowerCase();
-      return json({
-        notifications: listed.notifications.filter((notification) => {
-          if (!includeSuppressed && notification.status === "suppressed") return false;
-          if (!search) return true;
-          return JSON.stringify({
-            title: notification.title,
-            summary: notification.summary,
-            body: notification.body,
-            sender: notification.email?.senderDisplayName,
-            senderAddress: notification.email?.senderAddress,
-            subject: notification.email?.subject,
-            category: notification.ai?.category
-          })
-            .toLowerCase()
-            .includes(search);
+      const notifications = listed.notifications.filter((notification) => {
+        if (!includeSuppressed && notification.status === "suppressed") return false;
+        if (!search) return true;
+        return JSON.stringify({
+          title: notification.title,
+          summary: notification.summary,
+          body: notification.body,
+          sender: notification.email?.senderDisplayName,
+          senderAddress: notification.email?.senderAddress,
+          subject: notification.email?.subject,
+          category: notification.ai?.category
         })
+          .toLowerCase()
+          .includes(search);
+      });
+      return json({
+        notifications,
+        limit: listed.limit,
+        totalReturned: notifications.length
       });
     }
     if (method === "GET" && path === "/v1/ai/settings") {
@@ -948,24 +994,28 @@ export default {
     return handleApiRequest(request, env);
   },
   scheduled(
-    _controller: { scheduledTime: number; cron: string },
+    controller: { scheduledTime: number; cron: string },
     env: ApiEnv,
     ctx: { waitUntil(promise: Promise<unknown>): void }
   ): void {
     const store =
       env.store ??
       (env.DB ? new D1DentLinkStore(env.DB, contentEncryptionOptions(env)) : defaultStore);
+    const now = new Date(controller.scheduledTime).toISOString();
     ctx.waitUntil(
       Promise.all([
-        syncConnectedGmailAccounts(store, env, new Date().toISOString()).catch(async (caught) => {
-          await sendOperationalAlert(
-            env,
-            "scheduled-gmail-sync-failed",
-            "DentLink scheduled Gmail sync failed",
-            safeAlertText("Scheduled Gmail sync failed.", caught)
-          );
-          throw caught;
-        }),
+        enqueueScheduledConnectorSyncJobs(store, now)
+          .then(() => drainConnectorSyncJobs(store, env, now))
+          .then(() => sendConnectorRuntimeAlertIfNeeded(env, now))
+          .catch(async (caught) => {
+            await sendOperationalAlert(
+              env,
+              "scheduled-connector-sync-failed",
+              "DentLink scheduled connector sync failed",
+              safeAlertText("Scheduled connector sync failed.", caught)
+            );
+            throw caught;
+          }),
         runD1StorageMaintenance(env).then(() => sendStorageHealthAlertIfNeeded(env))
       ])
     );
@@ -1969,6 +2019,54 @@ function stringValue(value: unknown, field: string): string {
   return value;
 }
 
+function parseClientFreshnessInput(value: unknown): ClientFreshnessInput {
+  const input = objectValue(value, "client_heartbeat");
+  const clientType = input.clientType;
+  if (
+    clientType !== "web" &&
+    clientType !== "desktop" &&
+    clientType !== "mobile" &&
+    clientType !== "widget"
+  ) {
+    throw new ValidationError("invalid_client_type", "Client type is invalid");
+  }
+  return {
+    clientId: boundedString(input.clientId, "client_id", 128),
+    clientType,
+    label: optionalBoundedString(input.label, "label", 80),
+    buildId: optionalBoundedString(input.buildId, "build_id", 120),
+    platform: optionalBoundedString(input.platform, "platform", 120),
+    lastReadRevision:
+      optionalBoundedString(input.lastReadRevision, "last_read_revision", 40) ?? "0",
+    lastReadStatus:
+      input.lastReadStatus === "degraded" || input.lastReadStatus === "current"
+        ? input.lastReadStatus
+        : "current",
+    lastErrorCode: optionalBoundedString(input.lastErrorCode, "last_error_code", 80),
+    lastErrorMessage: optionalBoundedString(input.lastErrorMessage, "last_error_message", 240)
+  };
+}
+
+function boundedString(value: unknown, field: string, maxLength: number): string {
+  const raw = stringValue(value, field).trim();
+  if (!raw || raw.length > maxLength) {
+    throw new ValidationError(`invalid_${field}`, `${field} is invalid`);
+  }
+  return raw;
+}
+
+function optionalBoundedString(value: unknown, field: string, maxLength: number): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string")
+    throw new ValidationError(`invalid_${field}`, `${field} is invalid`);
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > maxLength) {
+    throw new ValidationError(`invalid_${field}`, `${field} is invalid`);
+  }
+  return trimmed;
+}
+
 function boundedToken(value: string, field: string, maxLength: number): string {
   if (!/^[A-Za-z0-9._-]+$/.test(value) || value.length === 0 || value.length > maxLength) {
     throw new ValidationError(`invalid_${field}`, `${field} is invalid`);
@@ -1994,7 +2092,11 @@ async function verifyAuthChallengeLogin(
   now: string
 ): Promise<boolean> {
   const payload = await verifyAuthChallengeToken(env, input.challenge);
-  if (!payload || payload.email !== input.email || Date.parse(payload.expiresAt) < Date.parse(now)) {
+  if (
+    !payload ||
+    payload.email !== input.email ||
+    Date.parse(payload.expiresAt) < Date.parse(now)
+  ) {
     return false;
   }
   if (!passwordHash) return false;
@@ -2076,7 +2178,6 @@ function bufferSource(bytes: Uint8Array): ArrayBuffer {
 async function syncAllConnectors(
   store: DentLinkStore,
   userId: string,
-  env: ApiEnv,
   now: string
 ): Promise<ConnectorSyncAllResult> {
   const startedAt = now;
@@ -2084,70 +2185,35 @@ async function syncAllConnectors(
   const accounts = (await store.listConnectorAccounts(userId)).accounts.filter(
     (account) => account.status === "connected" || recoverableGmailAccount(account)
   );
-  const connectorTimeoutMs = envInteger(
-    env.DENTLINK_SYNC_ALL_CONNECTOR_TIMEOUT_MS,
-    DEFAULT_SYNC_ALL_CONNECTOR_TIMEOUT_MS
-  );
   for (const account of accounts) {
-    if (account.connectorKey === "gmail") {
-      if (account.settings.gmailIngestionEngine === "gmail_imap") {
-        results.push(pendingGmailImapSyncAllConnector(account));
-        continue;
-      }
+    if (account.connectorKey === "gmail" || account.connectorKey === "google-calendar") {
       try {
-        const result = await withConnectorTimeout(
-          syncGmailAccount(store, userId, account.id, env, new Date().toISOString(), "refresh_all"),
-          connectorTimeoutMs,
-          account
+        const job = await store.enqueueConnectorSyncJob(
+          userId,
+          { accountId: account.id, trigger: "refresh_all", priority: 100, runAfter: now },
+          now
         );
         results.push({
           accountId: account.id,
           provider: account.connectorKey,
-          status: "success",
+          status: job.status === "running" ? "skipped" : "queued",
           engine:
-            result.account.settings.gmailLastSyncEngine === "gmail_imap"
-              ? "gmail_imap"
-              : "gmail_api",
-          created: result.summary.created,
-          updated: result.summary.updated,
-          duplicate: result.summary.duplicate,
-          failed: result.summary.failed,
-          progress: result.progress,
-          message: null
-        });
-      } catch (caught) {
-        if (caught instanceof StoreError && caught.code === "sync_in_progress") {
-          results.push(skippedSyncAllConnector(account, caught.message));
-          continue;
-        }
-        if (caught instanceof StoreError && caught.code === "sync_timeout") {
-          await markTimedOutConnectorIdle(store, userId, account, caught, new Date().toISOString());
-        }
-        results.push(failedSyncAllConnector(account, caught));
-      }
-      continue;
-    }
-    if (account.connectorKey === "google-calendar") {
-      try {
-        const result = await withConnectorTimeout(
-          syncGoogleCalendarAccount(store, userId, account.id, env, new Date().toISOString()),
-          connectorTimeoutMs,
-          account
-        );
-        results.push({
-          accountId: account.id,
-          provider: account.connectorKey,
-          status: "success",
-          created: result.upsertedEvents,
+            account.connectorKey === "gmail"
+              ? account.settings.gmailIngestionEngine === "gmail_imap"
+                ? "gmail_imap"
+                : "gmail_api"
+              : undefined,
+          jobId: job.id,
+          created: 0,
           updated: 0,
-          duplicate: Math.max(0, result.processed - result.upsertedEvents),
+          duplicate: 0,
           failed: 0,
-          message: null
+          message:
+            job.status === "running"
+              ? "Connector sync is already running in the background"
+              : "Connector sync queued for background processing"
         });
       } catch (caught) {
-        if (caught instanceof StoreError && caught.code === "sync_timeout") {
-          await markTimedOutConnectorIdle(store, userId, account, caught, new Date().toISOString());
-        }
         results.push(failedSyncAllConnector(account, caught));
       }
       continue;
@@ -2166,10 +2232,338 @@ async function syncAllConnectors(
   const failures = results.filter((result) => result.status === "failed").length;
   return {
     startedAt,
-    completedAt: new Date().toISOString(),
+    completedAt: now,
     status: failures === 0 ? "success" : failures === results.length ? "failed" : "partial",
     connectors: results
   };
+}
+
+async function enqueueConnectorAccountSync(
+  store: DentLinkStore,
+  userId: string,
+  accountId: string,
+  now: string
+): Promise<ConnectorSyncAllResult> {
+  const account = await store.getConnectorAccount(userId, accountId);
+  if (!account || account.status === "deleted") {
+    throw new StoreError("not_found", "Connector account not found");
+  }
+  if (account.connectorKey !== "gmail" && account.connectorKey !== "google-calendar") {
+    throw new StoreError("unsupported_connector", "Connector does not support manual sync yet");
+  }
+  const job = await store.enqueueConnectorSyncJob(
+    userId,
+    { accountId: account.id, trigger: "manual", priority: 100, runAfter: now },
+    now
+  );
+  return {
+    startedAt: now,
+    completedAt: now,
+    status: "success",
+    connectors: [
+      {
+        accountId: account.id,
+        provider: account.connectorKey,
+        status: job.status === "running" ? "skipped" : "queued",
+        engine:
+          account.connectorKey === "gmail"
+            ? account.settings.gmailIngestionEngine === "gmail_imap"
+              ? "gmail_imap"
+              : "gmail_api"
+            : undefined,
+        jobId: job.id,
+        created: 0,
+        updated: 0,
+        duplicate: 0,
+        failed: 0,
+        message:
+          job.status === "running"
+            ? "Connector sync is already running in the background"
+            : "Connector sync queued for background processing"
+      }
+    ]
+  };
+}
+
+async function enqueueScheduledConnectorSyncJobs(
+  store: DentLinkStore,
+  now: string
+): Promise<{ queued: number; skipped: number }> {
+  const gmailAccounts = await store.listConnectorAccountsByKey("gmail");
+  const calendarAccounts = await store.listConnectorAccountsByKey("google-calendar");
+  let queued = 0;
+  let skipped = 0;
+  for (const account of [...gmailAccounts, ...calendarAccounts]) {
+    if (!scheduledSyncEligible(account)) {
+      skipped += 1;
+      continue;
+    }
+    await store.enqueueConnectorSyncJob(
+      account.userId,
+      { accountId: account.id, trigger: "scheduled", priority: 10, runAfter: now },
+      now
+    );
+    queued += 1;
+  }
+  return { queued, skipped };
+}
+
+function scheduledSyncEligible(account: ConnectorAccount): boolean {
+  if (account.connectorKey === "gmail")
+    return account.status === "connected" || recoverableGmailAccount(account);
+  if (account.connectorKey === "google-calendar") {
+    return account.status === "connected" && account.credentialStatus === "configured";
+  }
+  return false;
+}
+
+async function drainConnectorSyncJobs(
+  store: DentLinkStore,
+  env: ApiEnv,
+  now: string
+): Promise<{ claimed: number; succeeded: number; failed: number; skipped: number }> {
+  const workerId = `worker:${crypto.randomUUID()}`;
+  let claimed = 0;
+  let succeeded = 0;
+  let failed = 0;
+  let skipped = 0;
+  while (claimed < CONNECTOR_SYNC_JOB_MAX_PER_INVOCATION) {
+    const [job] = await store.claimConnectorSyncJobs(now, CONNECTOR_SYNC_JOB_BATCH_SIZE, workerId);
+    if (!job) break;
+    claimed += 1;
+    const completedAt = now;
+    try {
+      await runConnectorSyncJobWithTimeout(store, env, job, completedAt);
+      await store.completeConnectorSyncJob(job.id, "succeeded", completedAt);
+      await clearConnectorSyncQueueMarker(store, job, completedAt);
+      await enqueueConnectorSyncContinuationIfNeeded(store, job, completedAt);
+      succeeded += 1;
+    } catch (caught) {
+      const status =
+        caught instanceof StoreError && caught.code === "sync_in_progress" ? "skipped" : "failed";
+      if (caught instanceof StoreError && caught.code === "sync_job_timeout") {
+        await markConnectorAccountSyncTimedOut(store, job, completedAt, caught.message);
+      }
+      await store.completeConnectorSyncJob(job.id, status, completedAt, {
+        code: caught instanceof StoreError ? caught.code : "sync_failed",
+        message: safeConnectorSyncMessage(job.connectorKey, caught)
+      });
+      if (status === "failed") {
+        await retryConnectorSyncJobIfPossible(store, job, completedAt, caught);
+      }
+      if (status === "skipped") skipped += 1;
+      else failed += 1;
+      console.error(
+        JSON.stringify({
+          level: status === "skipped" ? "info" : "error",
+          event: "connector_sync_job_completed",
+          jobId: job.id,
+          accountId: job.accountId,
+          connectorKey: job.connectorKey,
+          status,
+          message: safeConnectorSyncMessage(job.connectorKey, caught)
+        })
+      );
+    }
+  }
+  return { claimed, succeeded, failed, skipped };
+}
+
+async function enqueueConnectorSyncContinuationIfNeeded(
+  store: DentLinkStore,
+  job: ConnectorSyncJob,
+  now: string
+): Promise<void> {
+  if (job.connectorKey !== "google-calendar") return;
+  const account = await store.getConnectorAccount(job.userId, job.accountId);
+  if (!account || account.status === "deleted" || !hasPendingGoogleCalendarPageCursor(account)) {
+    return;
+  }
+  const nextRunAfter = new Date(Date.parse(now) + 1000).toISOString();
+  await store.enqueueConnectorSyncJob(
+    job.userId,
+    {
+      accountId: job.accountId,
+      trigger: job.trigger,
+      priority: job.priority,
+      runAfter: nextRunAfter
+    },
+    now
+  );
+}
+
+async function retryConnectorSyncJobIfPossible(
+  store: DentLinkStore,
+  job: ConnectorSyncJob,
+  now: string,
+  caught: unknown
+): Promise<void> {
+  const remainingAttempts = job.maxAttempts - job.attempts;
+  if (remainingAttempts <= 0) return;
+  if (caught instanceof StoreError && caught.code === "unsupported_connector") return;
+  const delayMs = Math.min(
+    CONNECTOR_SYNC_JOB_RETRY_MAX_DELAY_MS,
+    CONNECTOR_SYNC_JOB_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, job.attempts - 1)
+  );
+  await store.enqueueConnectorSyncJob(
+    job.userId,
+    {
+      accountId: job.accountId,
+      trigger: job.trigger,
+      priority: job.priority,
+      runAfter: new Date(Date.parse(now) + delayMs).toISOString(),
+      maxAttempts: remainingAttempts
+    },
+    now
+  );
+}
+
+async function runConnectorSyncJobWithTimeout(
+  store: DentLinkStore,
+  env: ApiEnv,
+  job: ConnectorSyncJob,
+  now: string
+): Promise<void> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const controller = new AbortController();
+  try {
+    await Promise.race([
+      runConnectorSyncJob(store, env, job, now, controller.signal),
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          controller.abort();
+          reject(
+            new StoreError(
+              "sync_job_timeout",
+              `Connector sync job exceeded ${CONNECTOR_SYNC_JOB_EXECUTION_TIMEOUT_MS}ms execution timeout`
+            )
+          );
+        }, CONNECTOR_SYNC_JOB_EXECUTION_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+async function runConnectorSyncJob(
+  store: DentLinkStore,
+  env: ApiEnv,
+  job: ConnectorSyncJob,
+  now: string,
+  signal: AbortSignal
+): Promise<void> {
+  throwIfAborted(signal);
+  if (job.connectorKey === "gmail") {
+    await syncGmailAccount(store, job.userId, job.accountId, env, now, job.trigger, signal);
+    throwIfAborted(signal);
+    return;
+  }
+  if (job.connectorKey === "google-calendar") {
+    await syncGoogleCalendarAccount(store, job.userId, job.accountId, env, now, signal);
+    throwIfAborted(signal);
+    return;
+  }
+  throw new StoreError("unsupported_connector", "Connector does not support background sync");
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw new StoreError("sync_job_aborted", "Connector sync job was aborted");
+}
+
+async function markConnectorAccountSyncTimedOut(
+  store: DentLinkStore,
+  job: ConnectorSyncJob,
+  now: string,
+  message: string
+): Promise<void> {
+  const account = await store.getConnectorAccount(job.userId, job.accountId);
+  if (!account || account.status === "deleted") return;
+  await store.updateConnectorAccount(
+    job.userId,
+    account.id,
+    account.version,
+    {
+      status: account.status === "error" ? "error" : "connected",
+      healthStatus: "degraded",
+      syncStatus: "idle",
+      lastHealthAt: now,
+      errorCode: "sync_job_timeout",
+      errorMessage: message
+    },
+    now
+  );
+}
+
+async function clearConnectorSyncQueueMarker(
+  store: DentLinkStore,
+  job: ConnectorSyncJob,
+  now: string
+): Promise<void> {
+  const account = await store.getConnectorAccount(job.userId, job.accountId);
+  if (!account || account.status === "deleted" || account.nextSyncAt !== job.runAfter) return;
+  await store.updateConnectorAccount(
+    job.userId,
+    account.id,
+    account.version,
+    { nextSyncAt: null },
+    now
+  );
+}
+
+async function dentLinkStatus(
+  store: DentLinkStore,
+  userId: string,
+  env: ApiEnv,
+  now: string
+): Promise<DentLinkStatus> {
+  const [backendRevision, clientReads, connectorList] = await Promise.all([
+    store.currentSyncCursor(userId),
+    store.listClientFreshness(userId),
+    store.listConnectorAccounts(userId)
+  ]);
+  return {
+    serverTime: now,
+    backendRevision,
+    buildId: env.DENTLINK_BUILD_ID ?? "local",
+    clientReads,
+    connectors: connectorList.accounts.map((account) => connectorFreshness(account, now))
+  };
+}
+
+function connectorFreshness(account: ConnectorAccount, now: string): ConnectorFreshness {
+  return {
+    accountId: account.id,
+    provider: account.connectorKey,
+    displayName: account.displayName,
+    syncStatus: account.syncStatus,
+    healthStatus: account.healthStatus,
+    accountStatus: account.status,
+    credentialStatus: account.credentialStatus,
+    freshnessStatus: connectorFreshnessStatus(account, now),
+    lastSuccessfulSyncAt: account.lastSyncAt,
+    lastAttemptAt: account.lastHealthAt ?? account.lastSyncAt,
+    lastHealthAt: account.lastHealthAt,
+    nextAttemptAt: account.nextSyncAt,
+    lastErrorCode: account.errorCode,
+    lastErrorMessage: account.errorMessage
+  };
+}
+
+function connectorFreshnessStatus(
+  account: ConnectorAccount,
+  now: string
+): ConnectorFreshness["freshnessStatus"] {
+  if (account.credentialStatus === "not_configured" || account.status === "error") {
+    return "reconnect_required";
+  }
+  if (account.syncStatus === "syncing") return "syncing";
+  if (account.healthStatus === "error" || account.syncStatus === "error") return "failed";
+  if (account.nextSyncAt && Date.parse(account.nextSyncAt) <= Date.parse(now)) return "queued";
+  if (!account.lastSyncAt) return account.status === "connected" ? "stale" : "unknown";
+  const ageMs = Date.parse(now) - Date.parse(account.lastSyncAt);
+  if (!Number.isFinite(ageMs)) return "unknown";
+  return ageMs <= CONNECTOR_FRESHNESS_STALE_MS ? "fresh" : "stale";
 }
 
 async function withConnectorTimeout<T>(
@@ -2485,6 +2879,15 @@ function parseEmailAiSettingsPatch(value: unknown): { enabled: boolean } {
     throw new ValidationError("invalid_ai_settings", "AI enabled must be a boolean");
   }
   return { enabled };
+}
+
+function parseListLimit(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new ValidationError("invalid_limit", "List limit must be a positive integer");
+  }
+  return Math.min(parsed, 500);
 }
 
 function parseAiReprocessBody(value: unknown): { timezone: string; accountId?: string | null } {
@@ -2845,11 +3248,17 @@ async function databaseHealth(env: ApiEnv): Promise<{
   reachable: boolean;
   adapter: "d1" | "memory";
   storage?: DatabaseStorageHealth;
+  connectorRuntime?: ConnectorRuntimeHealth;
 }> {
   if (!env.DB) return { reachable: true, adapter: "memory" };
   try {
     await env.DB.prepare("SELECT 1 AS ok").first();
-    return { reachable: true, adapter: "d1", storage: await databaseStorageHealth(env.DB, env) };
+    return {
+      reachable: true,
+      adapter: "d1",
+      storage: await databaseStorageHealth(env.DB, env),
+      connectorRuntime: await connectorRuntimeHealth(env.DB, env, new Date().toISOString())
+    };
   } catch {
     return { reachable: false, adapter: "d1" };
   }
@@ -2869,6 +3278,32 @@ type DatabaseStorageHealth = {
     maxTotalBytes: number;
   };
   tables: Array<{ name: string; rows: number }>;
+};
+
+type ConnectorRuntimeHealth = {
+  generatedAt: string;
+  status: "ok" | "degraded";
+  thresholds: {
+    queueStaleMs: number;
+    syncStaleMs: number;
+  };
+  queue: {
+    staleQueuedJobs: number;
+    staleRunningJobs: number;
+    oldestQueuedRunAfter: string | null;
+    oldestRunningLockedAt: string | null;
+  };
+  accounts: {
+    unhealthyConfiguredAccounts: number;
+    staleConnectedAccounts: number;
+    providers: Array<{
+      provider: string;
+      unhealthyConfiguredAccounts: number;
+      staleConnectedAccounts: number;
+      oldestSuccessfulSyncAt: string | null;
+      latestAttemptAt: string | null;
+    }>;
+  };
 };
 
 const STORAGE_HEALTH_TABLES = [
@@ -2952,6 +3387,115 @@ async function archiveStorageHealth(
   };
 }
 
+async function connectorRuntimeHealth(
+  db: D1DatabaseLike,
+  env: ApiEnv,
+  now: string
+): Promise<ConnectorRuntimeHealth | undefined> {
+  if (
+    !(await tableExists(db, "connector_sync_jobs")) ||
+    !(await tableExists(db, "connector_accounts"))
+  ) {
+    return undefined;
+  }
+  const queueStaleMs = envInteger(
+    env.DENTLINK_CONNECTOR_QUEUE_STALE_ALERT_MS,
+    DEFAULT_CONNECTOR_QUEUE_STALE_ALERT_MS
+  );
+  const syncStaleMs = envInteger(
+    env.DENTLINK_CONNECTOR_SYNC_STALE_ALERT_MS,
+    DEFAULT_CONNECTOR_SYNC_STALE_ALERT_MS
+  );
+  const queueStaleBefore = new Date(Date.parse(now) - queueStaleMs).toISOString();
+  const syncStaleBefore = new Date(Date.parse(now) - syncStaleMs).toISOString();
+  const queue = await db
+    .prepare(
+      `SELECT
+         SUM(CASE WHEN status = 'queued' AND run_after <= ? THEN 1 ELSE 0 END) AS stale_queued_jobs,
+         SUM(CASE WHEN status = 'running' AND locked_at IS NOT NULL AND locked_at <= ? THEN 1 ELSE 0 END) AS stale_running_jobs,
+         MIN(CASE WHEN status = 'queued' AND run_after <= ? THEN run_after ELSE NULL END) AS oldest_queued_run_after,
+         MIN(CASE WHEN status = 'running' AND locked_at IS NOT NULL AND locked_at <= ? THEN locked_at ELSE NULL END) AS oldest_running_locked_at
+       FROM connector_sync_jobs
+       WHERE status IN ('queued', 'running')`
+    )
+    .bind(queueStaleBefore, queueStaleBefore, queueStaleBefore, queueStaleBefore)
+    .first<{
+      stale_queued_jobs: number | null;
+      stale_running_jobs: number | null;
+      oldest_queued_run_after: string | null;
+      oldest_running_locked_at: string | null;
+    }>();
+  const providerRows = await db
+    .prepare(
+      `SELECT
+         connector_key AS provider,
+         SUM(
+           CASE WHEN credential_status = 'configured'
+                  AND (health_status IN ('degraded', 'error') OR sync_status = 'error')
+                THEN 1 ELSE 0 END
+         ) AS unhealthy_configured_accounts,
+         SUM(
+           CASE WHEN status = 'connected'
+                  AND credential_status = 'configured'
+                  AND (last_sync_at IS NULL OR last_sync_at <= ?)
+                THEN 1 ELSE 0 END
+         ) AS stale_connected_accounts,
+         MIN(CASE WHEN status = 'connected' AND credential_status = 'configured' THEN last_sync_at ELSE NULL END) AS oldest_successful_sync_at,
+         MAX(COALESCE(last_health_at, last_sync_at)) AS latest_attempt_at
+       FROM connector_accounts
+       WHERE status != 'deleted'
+         AND connector_key IN ('gmail', 'google-calendar')
+       GROUP BY connector_key
+       ORDER BY connector_key`
+    )
+    .bind(syncStaleBefore)
+    .all<{
+      provider: string;
+      unhealthy_configured_accounts: number | null;
+      stale_connected_accounts: number | null;
+      oldest_successful_sync_at: string | null;
+      latest_attempt_at: string | null;
+    }>();
+  const providers = (providerRows.results ?? []).map((row) => ({
+    provider: row.provider,
+    unhealthyConfiguredAccounts: row.unhealthy_configured_accounts ?? 0,
+    staleConnectedAccounts: row.stale_connected_accounts ?? 0,
+    oldestSuccessfulSyncAt: row.oldest_successful_sync_at,
+    latestAttemptAt: row.latest_attempt_at
+  }));
+  const staleQueuedJobs = queue?.stale_queued_jobs ?? 0;
+  const staleRunningJobs = queue?.stale_running_jobs ?? 0;
+  const unhealthyConfiguredAccounts = providers.reduce(
+    (total, provider) => total + provider.unhealthyConfiguredAccounts,
+    0
+  );
+  const staleConnectedAccounts = providers.reduce(
+    (total, provider) => total + provider.staleConnectedAccounts,
+    0
+  );
+  const degraded =
+    staleQueuedJobs > 0 ||
+    staleRunningJobs > 0 ||
+    unhealthyConfiguredAccounts > 0 ||
+    staleConnectedAccounts > 0;
+  return {
+    generatedAt: now,
+    status: degraded ? "degraded" : "ok",
+    thresholds: { queueStaleMs, syncStaleMs },
+    queue: {
+      staleQueuedJobs,
+      staleRunningJobs,
+      oldestQueuedRunAfter: queue?.oldest_queued_run_after ?? null,
+      oldestRunningLockedAt: queue?.oldest_running_locked_at ?? null
+    },
+    accounts: {
+      unhealthyConfiguredAccounts,
+      staleConnectedAccounts,
+      providers
+    }
+  };
+}
+
 async function tableExists(db: D1DatabaseLike, name: string): Promise<boolean> {
   const row = await db
     .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`)
@@ -2977,6 +3521,29 @@ async function sendStorageHealthAlertIfNeeded(env: ApiEnv): Promise<void> {
       `sync_changes rows: ${health.syncChanges.rows}`,
       `sync_changes avg payload bytes: ${health.syncChanges.avgPayloadBytes}`,
       `sync_changes max payload bytes: ${health.syncChanges.maxPayloadBytes}`
+    ].join("\n")
+  );
+}
+
+async function sendConnectorRuntimeAlertIfNeeded(env: ApiEnv, now: string): Promise<void> {
+  if (!env.DB) return;
+  const health = await connectorRuntimeHealth(env.DB, env, now);
+  if (!health) return;
+  const issues = connectorRuntimeHealthIssues(health);
+  if (issues.length === 0) return;
+  await sendOperationalAlert(
+    env,
+    "connector-runtime-health",
+    `DentLink ${env.DENTLINK_ENV ?? "local"} connector runtime issue`,
+    [
+      `DentLink ${env.DENTLINK_ENV ?? "local"} connector runtime health is degraded.`,
+      "",
+      ...issues.map((issue) => `- ${issue}`),
+      "",
+      `queue stale threshold ms: ${health.thresholds.queueStaleMs}`,
+      `sync stale threshold ms: ${health.thresholds.syncStaleMs}`,
+      `oldest queued run_after: ${health.queue.oldestQueuedRunAfter ?? "none"}`,
+      `oldest running locked_at: ${health.queue.oldestRunningLockedAt ?? "none"}`
     ].join("\n")
   );
 }
@@ -3014,6 +3581,39 @@ function storageHealthIssues(health: DatabaseStorageHealth, env: ApiEnv): string
   ) {
     issues.push(
       `archive indexed bytes ${health.archiveObjects.indexedBytes} exceed 90% of cap ${health.archiveObjects.maxTotalBytes}`
+    );
+  }
+  return issues;
+}
+
+function connectorRuntimeHealthIssues(health: ConnectorRuntimeHealth): string[] {
+  const issues = [];
+  if (health.queue.staleQueuedJobs > 0) {
+    issues.push(
+      `${health.queue.staleQueuedJobs} connector sync job(s) are queued past the stale threshold`
+    );
+  }
+  if (health.queue.staleRunningJobs > 0) {
+    issues.push(
+      `${health.queue.staleRunningJobs} connector sync job(s) are running past the stale threshold`
+    );
+  }
+  if (health.accounts.unhealthyConfiguredAccounts > 0) {
+    issues.push(
+      `${health.accounts.unhealthyConfiguredAccounts} configured connector account(s) are degraded or failed`
+    );
+  }
+  if (health.accounts.staleConnectedAccounts > 0) {
+    issues.push(
+      `${health.accounts.staleConnectedAccounts} connected connector account(s) have stale successful sync timestamps`
+    );
+  }
+  for (const provider of health.accounts.providers) {
+    if (provider.unhealthyConfiguredAccounts === 0 && provider.staleConnectedAccounts === 0) {
+      continue;
+    }
+    issues.push(
+      `${provider.provider}: ${provider.unhealthyConfiguredAccounts} unhealthy configured, ${provider.staleConnectedAccounts} stale connected`
     );
   }
   return issues;

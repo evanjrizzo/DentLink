@@ -34,6 +34,10 @@ Account-level preferences currently use `user_preferences` for timezone and AI i
 configuration. Appearance presets, density, source colors, and animation preferences are local
 per-device browser settings.
 
+Client read freshness is durable user-scoped operational metadata, not user content. Each client
+keeps a stable local `clientId` and reports the latest backend sync revision it successfully read.
+Connector freshness remains derived from connector account sync/health timestamps and status.
+
 Provider IDs are external identities, not DentLink primary keys.
 
 Editable records use versions. Every user-owned record must include or derive user scope.
@@ -110,6 +114,18 @@ as the in-memory adapter.
 
 Milestone 1 sync cursors are numeric change-log positions. Clients should treat them as opaque and
 send back only the cursor returned by the API.
+
+`migrations/0020_client_freshness.sql` adds `client_freshness`, a user-scoped table keyed by
+`(user_id, client_id)` for browser, desktop, mobile, and widget read heartbeats. Rows store client
+type, label, optional build/platform metadata, last backend revision read, read status, optional
+error metadata, timestamps, and version. It lets Settings -> Connections show backend-read
+freshness per client separately from provider connector freshness.
+
+`migrations/0021_connector_sync_jobs.sql` adds `connector_sync_jobs`, a durable user/account-scoped
+background queue for Gmail and Google Calendar sync. Rows store connector key, trigger, queued or
+running status, priority, run-after time, lease metadata, attempt counts, safe error metadata, and
+completion time. Manual Refresh All, per-account Sync Now, and scheduled cron use this table so
+provider sync can continue independently from client requests.
 
 Versioned D1 note mutations use SQL affected-row checks with `id`, `user_id`, and `version`
 conditions. Failed checks create persisted conflict records instead of performing unconditional

@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.UUID;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -23,6 +24,7 @@ final class DentLinkWidgetStore {
     private static final String KEY_REFRESH_REQUESTED = "refresh_requested_at";
     private static final String KEY_LAST_SYNC = "last_sync_at";
     private static final String KEY_LAST_ERROR = "last_error";
+    private static final String KEY_WIDGET_CLIENT_ID = "widget_client_id";
     private static final String KEY_SEEN_CALENDAR = "seen_calendar_ids";
     private static final String KEY_SEEN_NOTES = "seen_notes_ids";
     private static final String KEY_SEEN_EMAILS = "seen_emails_ids";
@@ -127,6 +129,15 @@ final class DentLinkWidgetStore {
 
     static String sessionToken(Context context) {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_SESSION_TOKEN, "");
+    }
+
+    static String widgetClientId(Context context) {
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        String existing = prefs.getString(KEY_WIDGET_CLIENT_ID, "");
+        if (existing != null && !existing.isEmpty()) return existing;
+        String next = "widget:" + UUID.randomUUID();
+        prefs.edit().putString(KEY_WIDGET_CLIENT_ID, next).commit();
+        return next;
     }
 
     static void saveWidgetItems(

@@ -455,6 +455,8 @@ export type WebhookIngestInput = NotificationInput & {
 
 export type NotificationsList = {
   notifications: Notification[];
+  limit: number | null;
+  totalReturned: number;
 };
 
 export type CalendarEvent = {
@@ -744,6 +746,36 @@ export type ConnectorSyncAttempt = {
   details: Record<string, unknown>;
 };
 
+export type ConnectorSyncJobStatus = "queued" | "running" | "succeeded" | "failed" | "skipped";
+
+export type ConnectorSyncJob = {
+  id: EntityId;
+  userId: EntityId;
+  accountId: EntityId;
+  connectorKey: string;
+  trigger: Extract<ConnectorSyncAttemptTrigger, "manual" | "scheduled" | "refresh_all">;
+  status: ConnectorSyncJobStatus;
+  priority: number;
+  attempts: number;
+  maxAttempts: number;
+  runAfter: IsoDateTime;
+  lockedAt: IsoDateTime | null;
+  lockedBy: string | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  completedAt: IsoDateTime | null;
+};
+
+export type ConnectorSyncJobInput = {
+  accountId: EntityId;
+  trigger: ConnectorSyncJob["trigger"];
+  priority?: number;
+  runAfter?: IsoDateTime;
+  maxAttempts?: number;
+};
+
 export type GmailDiagnosticMessage = {
   messageId: EntityId;
   outcome: Extract<
@@ -860,8 +892,9 @@ export type ConnectorSyncAllResult = {
   connectors: Array<{
     accountId: EntityId;
     provider: string;
-    status: "success" | "failed" | "skipped";
+    status: "success" | "failed" | "skipped" | "queued";
     engine?: "gmail_api" | "gmail_imap";
+    jobId?: EntityId;
     created: number;
     updated: number;
     duplicate: number;
@@ -886,6 +919,74 @@ export type DentLinkChangeEvent = {
 
 export type ConnectorAccountsList = {
   accounts: ConnectorAccount[];
+};
+
+export type ClientType = "web" | "desktop" | "mobile" | "widget";
+
+export type ClientFreshnessStatus = "current" | "degraded";
+
+export type ClientFreshness = {
+  id: EntityId;
+  userId: EntityId;
+  clientId: string;
+  clientType: ClientType;
+  label: string;
+  buildId: string | null;
+  platform: string | null;
+  lastReadAt: IsoDateTime;
+  lastReadRevision: SyncCursor;
+  lastReadStatus: ClientFreshnessStatus;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  version: number;
+};
+
+export type ClientFreshnessInput = {
+  clientId: string;
+  clientType: ClientType;
+  label?: string | null;
+  buildId?: string | null;
+  platform?: string | null;
+  lastReadRevision?: SyncCursor | null;
+  lastReadStatus?: ClientFreshnessStatus;
+  lastErrorCode?: string | null;
+  lastErrorMessage?: string | null;
+};
+
+export type ConnectorFreshnessStatus =
+  | "fresh"
+  | "syncing"
+  | "queued"
+  | "stale"
+  | "failed"
+  | "reconnect_required"
+  | "unknown";
+
+export type ConnectorFreshness = {
+  accountId: EntityId;
+  provider: string;
+  displayName: string;
+  syncStatus: ConnectorSyncStatus;
+  healthStatus: ConnectorHealthStatus;
+  accountStatus: ConnectorAccountStatus;
+  credentialStatus: ConnectorAccount["credentialStatus"];
+  freshnessStatus: ConnectorFreshnessStatus;
+  lastSuccessfulSyncAt: IsoDateTime | null;
+  lastAttemptAt: IsoDateTime | null;
+  lastHealthAt: IsoDateTime | null;
+  nextAttemptAt: IsoDateTime | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+};
+
+export type DentLinkStatus = {
+  serverTime: IsoDateTime;
+  backendRevision: SyncCursor;
+  buildId: string;
+  clientReads: ClientFreshness[];
+  connectors: ConnectorFreshness[];
 };
 
 export type SyncCursor = string;

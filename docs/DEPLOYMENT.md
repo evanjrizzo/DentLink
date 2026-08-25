@@ -174,6 +174,16 @@ send_email = [
 ]
 ```
 
+Connector ingestion has two layers of runtime protection:
+
+- Every scheduled run checks aggregate connector runtime health and sends a `connector-runtime-health`
+  operational alert when configured Gmail/Calendar accounts are degraded or stale, or connector sync
+  jobs have been queued/running past their stale thresholds.
+- `/v1/health` exposes `database.connectorRuntime` with aggregate queue/account counts only. It does
+  not include user email addresses, message content, tokens, or decrypted connector errors. Use
+  `pnpm smoke:connector-health` against preview or production from an external scheduler so a missing
+  Worker cron trigger is detected even if the Worker's own scheduled handler is not firing.
+
 The encrypted archive endpoints require a Cloudflare R2 binding named `ARCHIVE_BUCKET`. R2 must be
 enabled for the Cloudflare account before binding a bucket in deployed environments. Without this
 binding, normal app routes continue to work and archive object routes return `archive_unavailable`.

@@ -114,20 +114,26 @@ export type GmailEngineUpdateInput = {
 };
 
 export type GmailApiClient = {
-  exchangeCode(code: string, redirectUri: string): Promise<GmailTokenResponse>;
-  refreshAccessToken(refreshToken: string): Promise<GmailTokenResponse>;
-  getAccessTokenScopes(accessToken: string): Promise<string[]>;
-  getProfile(accessToken: string): Promise<GmailProfile>;
+  exchangeCode(
+    code: string,
+    redirectUri: string,
+    signal?: AbortSignal
+  ): Promise<GmailTokenResponse>;
+  refreshAccessToken(refreshToken: string, signal?: AbortSignal): Promise<GmailTokenResponse>;
+  getAccessTokenScopes(accessToken: string, signal?: AbortSignal): Promise<string[]>;
+  getProfile(accessToken: string, signal?: AbortSignal): Promise<GmailProfile>;
   listMessages(
     accessToken: string,
-    options?: string | GmailListMessagesOptions
+    options?: string | GmailListMessagesOptions,
+    signal?: AbortSignal
   ): Promise<GmailMessageList>;
   listHistory(
     accessToken: string,
     startHistoryId: string,
-    pageToken?: string
+    pageToken?: string,
+    signal?: AbortSignal
   ): Promise<GmailHistoryList>;
-  getMessage(accessToken: string, messageId: string): Promise<GmailMessage>;
+  getMessage(accessToken: string, messageId: string, signal?: AbortSignal): Promise<GmailMessage>;
 };
 
 export type GmailTokenResponse = GoogleTokenResponse;
@@ -427,8 +433,10 @@ export async function syncGmailAccount(
   accountId: EntityId,
   env: GmailRuntimeEnv,
   now: string,
-  trigger: ConnectorSyncAttemptTrigger = "manual"
+  trigger: ConnectorSyncAttemptTrigger = "manual",
+  signal?: AbortSignal
 ): Promise<GmailSyncResult> {
+  throwIfAborted(signal);
   const account = await requireGmailAccount(store, userId, accountId);
   const startedAtIso = now;
   const startedAt = Date.now();
@@ -477,7 +485,8 @@ export async function syncGmailAccount(
     if (!credential) throw new StoreError("missing_credentials", "Gmail must be reconnected");
     const refreshToken = await decryptSecret(credential.encryptedValue, env);
     const gmail = gmailClient(env);
-    const token = await refreshGmailAccessToken(gmail, refreshToken);
+    const token = await refreshGmailAccessToken(gmail, refreshToken, signal);
+    throwIfAborted(signal);
     if (gmailIngestionEngine(syncing.settings) === "gmail_imap") {
       return syncGmailImapAccount(
         store,
@@ -488,10 +497,11 @@ export async function syncGmailAccount(
         startedAtIso,
         startedAt,
         now,
-        trigger
+        trigger,
+        signal
       );
     }
-    const messages = await messagesForSync(gmail, token.accessToken, syncing.syncCursor);
+    const messages = await messagesForSync(gmail, token.accessToken, syncing.syncCursor, signal);
     const result = await processGmailMessageIds(
       store,
       userId,
@@ -500,7 +510,8 @@ export async function syncGmailAccount(
       token.accessToken,
       messages.messageIds,
       env,
-      now
+      now,
+      signal
     );
     const latest = await store.getConnectorAccount(userId, account.id);
     if (!latest) throw new StoreError("not_found", "Gmail account not found");
@@ -1088,6 +1099,34 @@ async function withTimeout<T>(
   }
 }
 
+function linkedTimeoutSignal(
+  parent: AbortSignal | undefined,
+  timeoutMs: number
+): { signal: AbortSignal; timedOut: boolean; clear(): void } {
+  const controller = new AbortController();
+  let timedOut = false;
+  const abortFromParent = () => controller.abort();
+  parent?.addEventListener("abort", abortFromParent, { once: true });
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    get timedOut() {
+      return timedOut;
+    },
+    clear() {
+      clearTimeout(timeoutId);
+      parent?.removeEventListener("abort", abortFromParent);
+    }
+  };
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new StoreError("sync_job_aborted", "Gmail sync was aborted");
+}
+
 export { GoogleConfigError as GmailConfigError };
 
 export function createGoogleGmailClient(
@@ -1096,37 +1135,46 @@ export function createGoogleGmailClient(
   fetchImpl: typeof fetch = fetch
 ): GmailApiClient {
   return {
-    async exchangeCode(code, redirectUri) {
-      return tokenRequest(fetchImpl, {
-        client_id: clientId,
-        client_secret: clientSecret,
-        code,
-        redirect_uri: redirectUri,
-        grant_type: "authorization_code"
-      });
+    async exchangeCode(code, redirectUri, signal) {
+      return tokenRequest(
+        fetchImpl,
+        {
+          client_id: clientId,
+          client_secret: clientSecret,
+          code,
+          redirect_uri: redirectUri,
+          grant_type: "authorization_code"
+        },
+        signal
+      );
     },
-    async refreshAccessToken(refreshToken) {
-      return tokenRequest(fetchImpl, {
-        client_id: clientId,
-        client_secret: clientSecret,
-        refresh_token: refreshToken,
-        grant_type: "refresh_token"
-      });
+    async refreshAccessToken(refreshToken, signal) {
+      return tokenRequest(
+        fetchImpl,
+        {
+          client_id: clientId,
+          client_secret: clientSecret,
+          refresh_token: refreshToken,
+          grant_type: "refresh_token"
+        },
+        signal
+      );
     },
-    async getAccessTokenScopes(accessToken) {
-      const info = await tokenInfoRequest(fetchImpl, accessToken);
+    async getAccessTokenScopes(accessToken, signal) {
+      const info = await tokenInfoRequest(fetchImpl, accessToken, signal);
       return normalizeScopes(info.scope ?? "");
     },
-    async getProfile(accessToken) {
+    async getProfile(accessToken, signal) {
       const response = await gmailRequest(
         fetchImpl,
         accessToken,
         "gmail_profile_get",
-        "/users/me/profile"
+        "/users/me/profile",
+        signal
       );
       return response as GmailProfile;
     },
-    async listMessages(accessToken, options) {
+    async listMessages(accessToken, options, signal) {
       const parsedOptions = typeof options === "string" ? { pageToken: options } : (options ?? {});
       const url = new URL(`${GMAIL_API_BASE_URL}/users/me/messages`);
       url.searchParams.set(
@@ -1140,10 +1188,11 @@ export function createGoogleGmailClient(
         fetchImpl,
         accessToken,
         "gmail_messages_list",
-        url
+        url,
+        signal
       )) as GmailMessageList;
     },
-    async listHistory(accessToken, startHistoryId, pageToken) {
+    async listHistory(accessToken, startHistoryId, pageToken, signal) {
       const url = new URL(`${GMAIL_API_BASE_URL}/users/me/history`);
       url.searchParams.set("startHistoryId", startHistoryId);
       url.searchParams.set("maxResults", String(HISTORY_PAGE_SIZE));
@@ -1153,15 +1202,22 @@ export function createGoogleGmailClient(
         fetchImpl,
         accessToken,
         "gmail_history_list",
-        url
+        url,
+        signal
       )) as GmailHistoryList;
     },
-    async getMessage(accessToken, messageId) {
+    async getMessage(accessToken, messageId, signal) {
       const url = new URL(
         `${GMAIL_API_BASE_URL}/users/me/messages/${encodeURIComponent(messageId)}`
       );
       url.searchParams.set("format", "full");
-      return (await gmailRequest(fetchImpl, accessToken, "gmail_message_get", url)) as GmailMessage;
+      return (await gmailRequest(
+        fetchImpl,
+        accessToken,
+        "gmail_message_get",
+        url,
+        signal
+      )) as GmailMessage;
     }
   };
 }
@@ -1218,8 +1274,10 @@ async function syncGmailImapAccount(
   startedAtIso: string,
   startedAtMs: number,
   now: string,
-  trigger: ConnectorSyncAttemptTrigger
+  trigger: ConnectorSyncAttemptTrigger,
+  signal?: AbortSignal
 ): Promise<GmailSyncResult> {
+  throwIfAborted(signal);
   if (knownGmailScopesMissImap(account.settings)) {
     throw new StoreError("gmail_permission_denied", GMAIL_IMAP_RECONNECT_MESSAGE);
   }
@@ -1229,19 +1287,29 @@ async function syncGmailImapAccount(
     throw new StoreError("gmail_profile_missing", "Gmail account email is missing");
   const imap = gmailImapClient(env);
   const newerThanUid = gmailImapNewerThanUid(account.settings);
-  const poll = await withTimeout(
-    imap.poll({
+  const pollSignal = linkedTimeoutSignal(signal, GMAIL_IMAP_POLL_TIMEOUT_MS);
+  const poll = await imap
+    .poll({
       user: emailAddress,
       accessToken,
       now,
       recentWindowDays: GMAIL_IMAP_RECENT_WINDOW_DAYS,
       maxMessages: gmailImapMaxMessages(trigger),
       newerThanUid,
-      expectedUidValidity: gmailImapUidValidity(account.settings)
-    }),
-    GMAIL_IMAP_POLL_TIMEOUT_MS,
-    new StoreError("gmail_imap_timeout", "Gmail IMAP sync timed out. Try again.")
-  );
+      expectedUidValidity: gmailImapUidValidity(account.settings),
+      signal: pollSignal.signal
+    })
+    .catch((caught: unknown) => {
+      if (pollSignal.timedOut) {
+        throw new StoreError("gmail_imap_timeout", "Gmail IMAP sync timed out. Try again.");
+      }
+      if (pollSignal.signal.aborted) {
+        throw new StoreError("sync_job_aborted", "Gmail IMAP sync was aborted");
+      }
+      throw caught;
+    })
+    .finally(() => pollSignal.clear());
+  throwIfAborted(signal);
   const result = await processGmailImapMessages(store, userId, account, poll.messages, env, now);
   const latest = await store.getConnectorAccount(userId, account.id);
   if (!latest) throw new StoreError("not_found", "Gmail account not found");
@@ -1353,14 +1421,17 @@ function gmailImapProgress(poll: GmailImapPollResult): GmailSyncResult["progress
 async function messagesForSync(
   gmail: GmailApiClient,
   accessToken: string,
-  historyId: string | null
+  historyId: string | null,
+  signal?: AbortSignal
 ): Promise<{ messageIds: string[]; historyId: string | null }> {
   const ids = new Set<string>();
   let pageToken: string | undefined;
   let latestHistoryId: string | null = null;
   if (historyId) {
     do {
-      const page = await gmail.listHistory(accessToken, historyId, pageToken);
+      throwIfAborted(signal);
+      const page = await gmail.listHistory(accessToken, historyId, pageToken, signal);
+      throwIfAborted(signal);
       for (const event of page.history ?? []) {
         latestHistoryId = maxHistoryId(latestHistoryId, event.id);
         for (const item of event.messagesAdded ?? []) ids.add(item.message.id);
@@ -1371,7 +1442,9 @@ async function messagesForSync(
     } while (pageToken);
   } else {
     do {
-      const page = await gmail.listMessages(accessToken, pageToken);
+      throwIfAborted(signal);
+      const page = await gmail.listMessages(accessToken, pageToken, signal);
+      throwIfAborted(signal);
       for (const message of page.messages ?? []) ids.add(message.id);
       pageToken = page.nextPageToken;
     } while (pageToken);
@@ -1405,7 +1478,8 @@ async function processGmailMessageIds(
   accessToken: string,
   messageIds: string[],
   env: GmailRuntimeEnv,
-  now: string
+  now: string,
+  signal?: AbortSignal
 ): Promise<{
   createdNotifications: number;
   nextCursor: string | null;
@@ -1415,6 +1489,7 @@ async function processGmailMessageIds(
   let nextCursor = account.syncCursor;
   const outcomes: GmailSyncResult["outcomes"] = [];
   for (const messageId of messageIds) {
+    throwIfAborted(signal);
     try {
       const existingRecord = await store.findConnectorSourceRecord(userId, account.id, messageId);
       if (existingRecord && !shouldRetryGmailSourceRecord(existingRecord.status)) {
@@ -1423,7 +1498,8 @@ async function processGmailMessageIds(
         );
         continue;
       }
-      const message = await gmail.getMessage(accessToken, messageId);
+      const message = await gmail.getMessage(accessToken, messageId, signal);
+      throwIfAborted(signal);
       nextCursor = maxHistoryId(nextCursor, message.historyId);
       const outcome = await ingestGmailMessage(store, userId, account, message, env, now);
       outcomes.push(outcome);
@@ -2764,11 +2840,13 @@ async function gmailRequest(
   fetchImpl: typeof fetch,
   accessToken: string,
   operation: GmailOperation,
-  pathOrUrl: string | URL
+  pathOrUrl: string | URL,
+  signal?: AbortSignal
 ): Promise<unknown> {
   const url = typeof pathOrUrl === "string" ? `${GMAIL_API_BASE_URL}${pathOrUrl}` : pathOrUrl;
   const response = await fetchImpl(url, {
-    headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" }
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+    signal
   });
   const json = await response.json().catch(() => null);
   if (!response.ok) {
@@ -2783,10 +2861,11 @@ async function gmailRequest(
 
 async function refreshGmailAccessToken(
   gmail: GmailApiClient,
-  refreshToken: string
+  refreshToken: string,
+  signal?: AbortSignal
 ): Promise<GmailTokenResponse> {
   try {
-    const token = await gmail.refreshAccessToken(refreshToken);
+    const token = await gmail.refreshAccessToken(refreshToken, signal);
     console.log(
       JSON.stringify({
         level: "info",
@@ -2939,9 +3018,12 @@ function gmailImapClient(env: GmailRuntimeEnv): GmailImapClient {
   return {
     async poll(options) {
       const client = await openImapClient(cloudflareImapSocketFactory, "imap.gmail.com", 993);
+      const closeOnAbort = () => void client.close().catch(() => undefined);
+      options.signal?.addEventListener("abort", closeOnAbort, { once: true });
       try {
         return await pollGmailImap(client, options);
       } finally {
+        options.signal?.removeEventListener("abort", closeOnAbort);
         await client.logout().catch(() => client.close());
       }
     },

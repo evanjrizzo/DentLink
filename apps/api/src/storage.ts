@@ -7,6 +7,8 @@ import type {
   CalendarEventPatch,
   LocalCalendarEventPatch,
   CalendarSourceFilter,
+  ClientFreshness,
+  ClientFreshnessInput,
   ConnectorAccount,
   ConnectorAccountInput,
   ConnectorAccountPatch,
@@ -14,6 +16,8 @@ import type {
   ConnectorCredentialKind,
   ConnectorOAuthState,
   ConnectorSyncAttempt,
+  ConnectorSyncJob,
+  ConnectorSyncJobInput,
   ConnectorSourceRecord,
   ConnectorSourceRecordInput,
   CurrentSession,
@@ -101,6 +105,13 @@ export interface DentLinkStore {
   createTag(userId: EntityId, name: string, now: string): Promise<Tag>;
   updateTag(userId: EntityId, tagId: EntityId, patch: TagPatch, now: string): Promise<Tag>;
   deleteTag(userId: EntityId, tagId: EntityId, now: string): Promise<void>;
+  currentSyncCursor(userId: EntityId): Promise<string>;
+  upsertClientFreshness(
+    userId: EntityId,
+    input: ClientFreshnessInput,
+    now: string
+  ): Promise<ClientFreshness>;
+  listClientFreshness(userId: EntityId): Promise<ClientFreshness[]>;
   listConnectorAccounts(userId: EntityId): Promise<{ accounts: ConnectorAccount[] }>;
   listConnectorAccountsByKey(connectorKey: string): Promise<ConnectorAccount[]>;
   createConnectorAccount(
@@ -159,6 +170,18 @@ export interface DentLinkStore {
     userId: EntityId,
     input: Omit<ConnectorSyncAttempt, "id" | "userId">
   ): Promise<ConnectorSyncAttempt>;
+  enqueueConnectorSyncJob(
+    userId: EntityId,
+    input: ConnectorSyncJobInput,
+    now: string
+  ): Promise<ConnectorSyncJob>;
+  claimConnectorSyncJobs(now: string, limit: number, workerId: string): Promise<ConnectorSyncJob[]>;
+  completeConnectorSyncJob(
+    jobId: EntityId,
+    status: Extract<ConnectorSyncJob["status"], "succeeded" | "failed" | "skipped">,
+    now: string,
+    error?: { code: string; message: string } | null
+  ): Promise<ConnectorSyncJob | null>;
   listConnectorSyncAttempts(
     userId: EntityId,
     accountId: EntityId,
@@ -246,7 +269,10 @@ export interface DentLinkStore {
     patch: CalendarEventPatch,
     now: string
   ): Promise<CalendarEvent>;
-  listNotifications(userId: EntityId): Promise<{ notifications: Notification[] }>;
+  listNotifications(
+    userId: EntityId,
+    options?: { limit?: number | null }
+  ): Promise<{ notifications: Notification[]; limit: number | null; totalReturned: number }>;
   createNotification(
     userId: EntityId,
     input: NotificationInput & { source?: Notification["source"]; sourceLabel?: string },
@@ -338,8 +364,10 @@ export class MemoryDentLinkStore implements DentLinkStore {
   private folders = new Map<EntityId, Folder>();
   private tags = new Map<EntityId, Tag>();
   private connectorAccounts = new Map<EntityId, ConnectorAccount>();
+  private clientFreshness = new Map<EntityId, ClientFreshness>();
   private connectorSourceRecords = new Map<EntityId, ConnectorSourceRecord>();
   private connectorSyncAttempts = new Map<EntityId, ConnectorSyncAttempt>();
+  private connectorSyncJobs = new Map<EntityId, ConnectorSyncJob>();
   private connectorOAuthStates = new Map<string, ConnectorOAuthState>();
   private connectorCredentials = new Map<EntityId, ConnectorCredential>();
   private calendarEvents = new Map<EntityId, CalendarEvent>();
@@ -653,6 +681,49 @@ export class MemoryDentLinkStore implements DentLinkStore {
     this.recordChange({ type: "tag", op: "delete", id: tagId, userId, cursor: "0" });
   }
 
+  async currentSyncCursor(userId: EntityId): Promise<string> {
+    const latest = this.changes
+      .filter((change) => changeBelongsTo(change, userId))
+      .reduce((max, change) => Math.max(max, Number(change.cursor)), 0);
+    return String(latest);
+  }
+
+  async upsertClientFreshness(
+    userId: EntityId,
+    input: ClientFreshnessInput,
+    now: string
+  ): Promise<ClientFreshness> {
+    const existing = [...this.clientFreshness.values()].find(
+      (item) => item.userId === userId && item.clientId === input.clientId
+    );
+    const next: ClientFreshness = {
+      id: existing?.id ?? this.nextId("client"),
+      userId,
+      clientId: input.clientId,
+      clientType: input.clientType,
+      label: input.label?.trim() || defaultClientLabel(input.clientType),
+      buildId: input.buildId ?? null,
+      platform: input.platform ?? null,
+      lastReadAt: now,
+      lastReadRevision: input.lastReadRevision ?? "0",
+      lastReadStatus: input.lastReadStatus ?? "current",
+      lastErrorCode: input.lastErrorCode ?? null,
+      lastErrorMessage: input.lastErrorMessage ?? null,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      version: (existing?.version ?? 0) + 1
+    };
+    this.clientFreshness.set(next.id, next);
+    return copyClientFreshness(next);
+  }
+
+  async listClientFreshness(userId: EntityId): Promise<ClientFreshness[]> {
+    return [...this.clientFreshness.values()]
+      .filter((item) => item.userId === userId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .map(copyClientFreshness);
+  }
+
   async listConnectorAccounts(userId: EntityId): Promise<{ accounts: ConnectorAccount[] }> {
     return {
       accounts: [...this.connectorAccounts.values()]
@@ -904,6 +975,114 @@ export class MemoryDentLinkStore implements DentLinkStore {
     };
     this.connectorSyncAttempts.set(attempt.id, copyConnectorSyncAttempt(attempt));
     return copyConnectorSyncAttempt(attempt);
+  }
+
+  async enqueueConnectorSyncJob(
+    userId: EntityId,
+    input: ConnectorSyncJobInput,
+    now: string
+  ): Promise<ConnectorSyncJob> {
+    const account = await this.getConnectorAccount(userId, input.accountId);
+    if (!account) throw new StoreError("not_found", "Connector account not found");
+    const existing = [...this.connectorSyncJobs.values()].find(
+      (job) =>
+        job.userId === userId &&
+        job.accountId === input.accountId &&
+        job.trigger === input.trigger &&
+        (job.status === "queued" || job.status === "running")
+    );
+    if (existing) return copyConnectorSyncJob(existing);
+    const job: ConnectorSyncJob = {
+      id: this.nextId("sync_job"),
+      userId,
+      accountId: input.accountId,
+      connectorKey: account.connectorKey,
+      trigger: input.trigger,
+      status: "queued",
+      priority: input.priority ?? 0,
+      attempts: 0,
+      maxAttempts: input.maxAttempts ?? 3,
+      runAfter: input.runAfter ?? now,
+      lockedAt: null,
+      lockedBy: null,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null
+    };
+    this.connectorSyncJobs.set(job.id, job);
+    await this.updateConnectorAccount(
+      userId,
+      account.id,
+      account.version,
+      { nextSyncAt: job.runAfter, errorCode: null, errorMessage: null },
+      now
+    );
+    return copyConnectorSyncJob(job);
+  }
+
+  async claimConnectorSyncJobs(
+    now: string,
+    limit: number,
+    workerId: string
+  ): Promise<ConnectorSyncJob[]> {
+    const staleBefore = new Date(Date.parse(now) - CONNECTOR_SYNC_JOB_STALE_MS).toISOString();
+    for (const job of this.connectorSyncJobs.values()) {
+      if (job.status !== "running" || !job.lockedAt || job.lockedAt > staleBefore) continue;
+      this.connectorSyncJobs.set(job.id, {
+        ...job,
+        status: job.attempts >= job.maxAttempts ? "failed" : "queued",
+        lockedAt: null,
+        lockedBy: null,
+        lastErrorCode: "sync_job_timeout",
+        lastErrorMessage: "Connector sync job lease expired before completion",
+        updatedAt: now,
+        completedAt: job.attempts >= job.maxAttempts ? now : null
+      });
+    }
+    const due = [...this.connectorSyncJobs.values()]
+      .filter((job) => job.status === "queued" && job.runAfter <= now)
+      .sort(
+        (left, right) =>
+          right.priority - left.priority ||
+          left.runAfter.localeCompare(right.runAfter) ||
+          left.createdAt.localeCompare(right.createdAt)
+      )
+      .slice(0, Math.max(0, Math.floor(limit)));
+    for (const job of due) {
+      this.connectorSyncJobs.set(job.id, {
+        ...job,
+        status: "running",
+        attempts: job.attempts + 1,
+        lockedAt: now,
+        lockedBy: workerId,
+        updatedAt: now
+      });
+    }
+    return due.map((job) => copyConnectorSyncJob(this.connectorSyncJobs.get(job.id) ?? job));
+  }
+
+  async completeConnectorSyncJob(
+    jobId: EntityId,
+    status: Extract<ConnectorSyncJob["status"], "succeeded" | "failed" | "skipped">,
+    now: string,
+    error?: { code: string; message: string } | null
+  ): Promise<ConnectorSyncJob | null> {
+    const existing = this.connectorSyncJobs.get(jobId);
+    if (!existing) return null;
+    const next: ConnectorSyncJob = {
+      ...existing,
+      status,
+      lastErrorCode: error?.code ?? null,
+      lastErrorMessage: error?.message ?? null,
+      lockedAt: null,
+      lockedBy: null,
+      updatedAt: now,
+      completedAt: now
+    };
+    this.connectorSyncJobs.set(jobId, next);
+    return copyConnectorSyncJob(next);
   }
 
   async listConnectorSyncAttempts(
@@ -1223,15 +1402,19 @@ export class MemoryDentLinkStore implements DentLinkStore {
     return copyCalendarEvent(next);
   }
 
-  async listNotifications(userId: EntityId): Promise<{ notifications: Notification[] }> {
-    return {
-      notifications: [...this.notifications.values()]
+  async listNotifications(
+    userId: EntityId,
+    options: { limit?: number | null } = {}
+  ): Promise<{ notifications: Notification[]; limit: number | null; totalReturned: number }> {
+    const limit = normalizeListLimit(options.limit);
+    const notifications = [...this.notifications.values()]
         .filter(
           (notification) => notification.userId === userId && notification.status !== "deleted"
         )
         .sort(compareNotifications)
+        .slice(0, limit ?? undefined)
         .map((notification) => ({ ...notification }))
-    };
+    return { notifications, limit, totalReturned: notifications.length };
   }
 
   async createNotification(
@@ -1542,6 +1725,7 @@ export class MemoryDentLinkStore implements DentLinkStore {
           title: input.title,
           body: input.body ?? input.summary ?? "",
           priority: input.priority ?? endpoint.defaultPriority,
+          pinned: input.pinned || endpoint.slug.startsWith("watch-voice-notes"),
           dueAt: input.dueAt ?? null,
           sourceUrl: input.sourceUrl ?? null
         },
@@ -1891,6 +2075,19 @@ function compareConnectorAccounts(left: ConnectorAccount, right: ConnectorAccoun
   return left.displayName.localeCompare(right.displayName);
 }
 
+function defaultClientLabel(clientType: ClientFreshness["clientType"]): string {
+  if (clientType === "desktop") return "Desktop app";
+  if (clientType === "mobile") return "Mobile app";
+  if (clientType === "widget") return "Android widget";
+  return "Browser";
+}
+
+const CONNECTOR_SYNC_JOB_STALE_MS = 70 * 1000;
+
+function copyClientFreshness(item: ClientFreshness): ClientFreshness {
+  return { ...item };
+}
+
 function publicWebhook(webhook: WebhookEndpoint & { secretHash?: string }): WebhookEndpoint {
   return {
     id: webhook.id,
@@ -1957,6 +2154,10 @@ function copyConnectorSyncAttempt(attempt: ConnectorSyncAttempt): ConnectorSyncA
   };
 }
 
+function copyConnectorSyncJob(job: ConnectorSyncJob): ConnectorSyncJob {
+  return { ...job };
+}
+
 function copyCalendarEvent(event: CalendarEvent): CalendarEvent {
   return {
     ...event,
@@ -1975,4 +2176,10 @@ function copyCalendarAnnotation(annotation: CalendarEventAnnotation): CalendarEv
 function normalizeRecurrence(value: string | null | undefined): string | null {
   if (!value) return null;
   return value.toUpperCase().startsWith("RRULE:") ? value : `RRULE:${value}`;
+}
+
+function normalizeListLimit(value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  if (!Number.isFinite(value)) return null;
+  return Math.min(Math.max(Math.floor(value), 1), 500);
 }

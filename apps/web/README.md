@@ -29,20 +29,35 @@ same folder or visible list, and provides a Filters checkbox to hide or show the
 completion checkbox is sized as a touch control; changing it still uses the versioned Notes API and
 backend-owned completion state.
 
-The top refresh control runs `Refresh All`, which asks the backend to sync every connected service
-that supports manual sync before reloading Notifications, Agenda, Notes, webhooks, and connector
-state. The automatic header countdown is also an auto-sync timer: every visible one-minute tick runs
-the same connected-service sync first, then reloads DentLink data. Gmail Refresh All/manual syncs
-can reclaim a stuck in-progress lock after the backend's shorter one-minute interactive stale-lock
-window. Settings -> Connections shows Gmail scheduled sync as an expected backend cadence, not an
-authoritative appointment. When the expected five-minute window has already elapsed, the card shows
-`Due now` instead of rendering a past timestamp.
+The top refresh control runs `Refresh All`, which asks the backend to queue sync jobs for every
+connected service that supports manual sync. Normal visible-tab refreshes then apply `/v1/sync`
+deltas to a browser IndexedDB cache instead of downloading every current notification, note,
+calendar row, webhook, and connector account again. Full list endpoints are still used for initial
+bootstrap, calendar range changes, and cache repair. Per-account Sync Now uses the same background
+queue. The automatic header countdown can enqueue background work without holding the browser
+request open for provider polling. Hidden/background tabs do not run the browser timer, so provider
+sync continuity also depends on backend cron and platform-native refresh jobs. Gmail queued/scheduled
+syncs can reclaim a stuck in-progress lock after the backend stale-lock window. Settings ->
+Connections shows Gmail scheduled sync as an expected backend cadence, not an authoritative
+appointment. When the expected five-minute window has already elapsed, the card shows `Due now`
+instead of rendering a past timestamp.
+
+The local sync cache is controlled by `VITE_DENTLINK_LOCAL_SYNC_CACHE_ENABLED` and defaults on unless
+set to `false`, `0`, or `off`. The backend remains authoritative; the browser cache stores normalized
+DentLink records and the last applied sync cursor for the authenticated user, and it is cleared on
+logout.
 
 Gmail diagnostics separate the latest sync check from the latest per-message processing outcome.
 When a newer sync check finds no newer eligible messages, Connections explains that diagnostics may
 still show older message outcomes. Connections also shows recent durable Gmail sync attempts with
 trigger, engine, status, duration, counts, and safe error details; the diagnostics export includes
 the full safe attempt rows.
+
+Settings -> Connections also shows DentLink freshness from two different sources. Backend freshness
+comes from `/v1/status` and each client heartbeat after a successful backend reload, so browser,
+desktop, mobile, and widget clients can show the backend revision and time they last read. Connector
+freshness comes from backend connector sync state and remains separate from client-read freshness.
+Sub-minute freshness uses an exact local clock time instead of `Just now`.
 
 Adaptive surfaces are shared across notification details, note create/edit, local event creation,
 calendar event details, and ICS import. Phone, narrow landscape, and short dashboard-height
