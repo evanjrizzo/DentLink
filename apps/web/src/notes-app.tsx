@@ -548,7 +548,7 @@ export function DentLinkNotesApp(): ReactElement {
     document.title = auth ? `${pageTitle(view, settingsTab)} - DentLink` : "DentLink";
   }, [auth, view, settingsTab]);
 
-  async function loadNotes(_nextSearch = search, _nextTagIds = tagIds): Promise<void> {
+  async function loadNotes(): Promise<void> {
     const requestId = (notesRequest.current += 1);
     const response = await client.listNotes();
     if (requestId === notesRequest.current) setNotesList(response);
@@ -826,7 +826,9 @@ export function DentLinkNotesApp(): ReactElement {
       { label: "webhooks", load: loadWebhooks },
       { label: "settings", load: loadPreferences }
     ];
-    const resourceResults = await Promise.allSettled(resourceLoads.map((resource) => resource.load()));
+    const resourceResults = await Promise.allSettled(
+      resourceLoads.map((resource) => resource.load())
+    );
     const failedLoadLabels = resourceResults.flatMap((result, index) =>
       result.status === "rejected" ? [resourceLoads[index]?.label ?? "unknown"] : []
     );
@@ -875,7 +877,13 @@ export function DentLinkNotesApp(): ReactElement {
       setRefreshState((current) => ({ ...current, message: "Updating Calendar...", result }));
       await refreshStepDelay();
       if (LOCAL_SYNC_CACHE_ENABLED) await refreshFromLocalSyncCache().catch(() => undefined);
-      else await Promise.allSettled([loadConnectors(), loadCalendarEvents(), loadNotes(), loadWebhooks()]);
+      else
+        await Promise.allSettled([
+          loadConnectors(),
+          loadCalendarEvents(),
+          loadNotes(),
+          loadWebhooks()
+        ]);
       setRefreshState({
         running: false,
         message: refreshAllSummary(result),
@@ -2073,9 +2081,7 @@ export function DentLinkNotesApp(): ReactElement {
           {refreshState.result ? (
             <div className="refresh-results">
               {refreshConnectorResultLines(refreshState.result).map((line) => (
-                <span key={line.key}>
-                  {line.text}
-                </span>
+                <span key={line.key}>{line.text}</span>
               ))}
             </div>
           ) : null}
@@ -2166,7 +2172,7 @@ export function DentLinkNotesApp(): ReactElement {
           search={search}
           onSearchChange={(nextSearch) => {
             setSearch(nextSearch);
-            void loadNotes(nextSearch, tagIds);
+            void loadNotes();
           }}
           onFolderChange={(nextFolderId) => {
             setFolderId(nextFolderId);
@@ -2176,7 +2182,7 @@ export function DentLinkNotesApp(): ReactElement {
               ? tagIds.filter((item) => item !== tagId)
               : [...tagIds, tagId];
             setTagIds(nextTagIds);
-            void loadNotes(search, nextTagIds);
+            void loadNotes();
           }}
           onCreateFolder={createFolder}
           onUpdateFolder={updateFolder}
@@ -5423,7 +5429,10 @@ export function sameCalendarQueryForTest(
   return sameCalendarQuery(left, right);
 }
 
-function sameCalendarQuery(left: LocalCalendarQuery | null, right: LocalCalendarQuery | null): boolean {
+function sameCalendarQuery(
+  left: LocalCalendarQuery | null,
+  right: LocalCalendarQuery | null
+): boolean {
   if (!left || !right) return false;
   return (
     left.mode === right.mode &&
@@ -5577,7 +5586,9 @@ function formatInlineList(values: string[]): string {
   return `${uniqueValues.slice(0, -1).join(", ")}, and ${uniqueValues.at(-1)}`;
 }
 
-function refreshConnectorResultLines(result: ConnectorSyncAllResult): Array<{ key: string; text: string }> {
+function refreshConnectorResultLines(
+  result: ConnectorSyncAllResult
+): Array<{ key: string; text: string }> {
   const lines: Array<{ key: string; text: string }> = [];
   const gmailImapPending = result.connectors.filter(
     (connector) =>
@@ -5623,7 +5634,8 @@ function mergeGmailSyncIntoRefreshResult(
       return {
         ...connector,
         status: gmail.summary.failed > 0 ? "failed" : "success",
-        engine: gmail.account.settings.gmailLastSyncEngine === "gmail_imap" ? "gmail_imap" : "gmail_api",
+        engine:
+          gmail.account.settings.gmailLastSyncEngine === "gmail_imap" ? "gmail_imap" : "gmail_api",
         created: connector.created + gmail.summary.created,
         updated: connector.updated + gmail.summary.updated,
         duplicate: connector.duplicate + gmail.summary.duplicate,
@@ -6268,7 +6280,9 @@ function ArchiveDeviceSettingsPanel(props: {
       </div>
       <section className="archive-transfer-panel" aria-label="Archive assistant device transfer">
         <h4>Device Transfer</h4>
-        <p>Use this when the recovery secret is not available. Treat the code like the archive key.</p>
+        <p>
+          Use this when the recovery secret is not available. Treat the code like the archive key.
+        </p>
         <button
           type="button"
           className="secondary-action"
@@ -6300,10 +6314,7 @@ function ArchiveDeviceSettingsPanel(props: {
               onChange={(event) => props.onTransferImportDraftChange(event.currentTarget.value)}
             />
           </label>
-          <button
-            type="submit"
-            disabled={props.saving || !props.transferImportDraft.trim()}
-          >
+          <button type="submit" disabled={props.saving || !props.transferImportDraft.trim()}>
             Import transfer code
           </button>
         </form>

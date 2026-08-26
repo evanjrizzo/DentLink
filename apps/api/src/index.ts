@@ -150,7 +150,6 @@ const DEFAULT_ARCHIVE_MAX_TOTAL_BYTES = 9_000_000_000;
 const DEFAULT_ARCHIVE_NOTIFICATION_RETENTION_DAYS = 30;
 const DEFAULT_ARCHIVE_NOTIFICATION_RETENTION_BATCH_SIZE = 25;
 const MAX_ARCHIVE_NOTIFICATION_RETENTION_BATCH_SIZE = 100;
-const DEFAULT_SYNC_ALL_CONNECTOR_TIMEOUT_MS = 25_000;
 const CONNECTOR_FRESHNESS_STALE_MS = 15 * 60 * 1000;
 // Claim only the job this invocation is about to run. If a provider call stalls hard enough for
 // the Worker to be killed, pre-claimed later jobs otherwise sit "running" until stale recovery.
@@ -2566,108 +2565,12 @@ function connectorFreshnessStatus(
   return ageMs <= CONNECTOR_FRESHNESS_STALE_MS ? "fresh" : "stale";
 }
 
-async function withConnectorTimeout<T>(
-  work: Promise<T>,
-  timeoutMs: number,
-  account: ConnectorAccount
-): Promise<T> {
-  let timeoutId: ReturnType<typeof setTimeout> | null = null;
-  try {
-    return await Promise.race([
-      work,
-      new Promise<never>((_resolve, reject) => {
-        timeoutId = setTimeout(
-          () => {
-            reject(
-              new StoreError(
-                "sync_timeout",
-                `${account.displayName || account.connectorKey} sync timed out. Try again later.`
-              )
-            );
-          },
-          Math.max(1000, timeoutMs)
-        );
-      })
-    ]);
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
-  }
-}
-
-async function markTimedOutConnectorIdle(
-  store: DentLinkStore,
-  userId: string,
-  account: ConnectorAccount,
-  error: StoreError,
-  now: string
-): Promise<void> {
-  const latest = await store.getConnectorAccount(userId, account.id);
-  if (!latest || latest.syncStatus !== "syncing") return;
-  await store.updateConnectorAccount(
-    userId,
-    latest.id,
-    latest.version,
-    {
-      healthStatus: "degraded",
-      syncStatus: "idle",
-      lastHealthAt: now,
-      errorCode: error.code,
-      errorMessage: error.message
-    },
-    now
-  );
-}
-
 function recoverableGmailAccount(account: ConnectorAccount): boolean {
   return (
     account.connectorKey === "gmail" &&
     account.status === "error" &&
     account.credentialStatus === "configured"
   );
-}
-
-function skippedSyncAllConnector(
-  account: ConnectorAccount,
-  message: string
-): ConnectorSyncAllResult["connectors"][number] {
-  return {
-    accountId: account.id,
-    provider: account.connectorKey,
-    status: "skipped",
-    engine:
-      account.connectorKey === "gmail"
-        ? account.settings.gmailIngestionEngine === "gmail_imap"
-          ? "gmail_imap"
-          : "gmail_api"
-        : undefined,
-    created: 0,
-    updated: 0,
-    duplicate: 0,
-    failed: 0,
-    message
-  };
-}
-
-function pendingGmailImapSyncAllConnector(
-  account: ConnectorAccount
-): ConnectorSyncAllResult["connectors"][number] {
-  return {
-    accountId: account.id,
-    provider: account.connectorKey,
-    status: "skipped",
-    engine: "gmail_imap",
-    created: 0,
-    updated: 0,
-    duplicate: 0,
-    failed: 0,
-    progress: {
-      discovered: 0,
-      examined: 0,
-      remaining: 1,
-      hasMore: true
-    },
-    message: "Gmail IMAP will continue in small batches."
-  };
 }
 
 function failedSyncAllConnector(

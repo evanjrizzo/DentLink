@@ -568,10 +568,7 @@ async function unwrapAccountArchiveKey(
   );
 }
 
-async function importDeviceArchiveKey(
-  rawKey: Uint8Array,
-  cryptoImpl: Crypto
-): Promise<CryptoKey> {
+async function importDeviceArchiveKey(rawKey: Uint8Array, cryptoImpl: Crypto): Promise<CryptoKey> {
   return cryptoImpl.subtle.importKey(
     "raw",
     arrayBuffer(rawKey),
@@ -627,7 +624,8 @@ async function idbGet<T>(db: IDBDatabase, storeName: string, key: IDBValidKey): 
     const request = transaction.objectStore(storeName).get(key);
     request.onsuccess = () => resolve((request.result as T | undefined) ?? null);
     request.onerror = () => reject(request.error ?? new Error("Could not read archive key"));
-    transaction.onerror = () => reject(transaction.error ?? new Error("Could not read archive key"));
+    transaction.onerror = () =>
+      reject(transaction.error ?? new Error("Could not read archive key"));
   });
 }
 
@@ -641,7 +639,8 @@ async function idbPut(
     const transaction = db.transaction(storeName, "readwrite");
     transaction.objectStore(storeName).put(value, key);
     transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error ?? new Error("Could not save archive key"));
+    transaction.onerror = () =>
+      reject(transaction.error ?? new Error("Could not save archive key"));
   });
 }
 
@@ -687,7 +686,11 @@ function randomBytes(cryptoImpl: Crypto, length: number): Uint8Array {
   return bytes;
 }
 
-function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+function promiseWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string
+): Promise<T> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
     promise

@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+import { webcrypto as crypto } from "node:crypto";
+import { Buffer } from "node:buffer";
+import { TextEncoder } from "node:util";
+
 const baseUrl = (process.env.DENTLINK_SMOKE_BASE_URL ?? process.argv[2] ?? "").replace(/\/$/, "");
 
 if (!baseUrl) {
@@ -108,11 +112,12 @@ async function passwordChallengeResponse(password, challenge) {
 }
 
 function fromBase64(value) {
-  return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+  return Uint8Array.from(Buffer.from(value, "base64"));
 }
 
 function toBase64Url(bytes) {
-  return btoa(String.fromCharCode(...bytes))
+  return Buffer.from(bytes)
+    .toString("base64")
     .replaceAll("+", "-")
     .replaceAll("/", "_")
     .replaceAll("=", "");

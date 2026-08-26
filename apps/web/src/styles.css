@@ -4344,10 +4344,7 @@ textarea {
   -webkit-line-clamp: 1;
 }
 
-.dentlink-desktop-client
-  .home-notification-row
-  > button
-  .importance-pill.compact-importance-pill {
+.dentlink-desktop-client .home-notification-row > button .importance-pill.compact-importance-pill {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4366,10 +4363,7 @@ textarea {
   -webkit-line-clamp: initial;
 }
 
-.dentlink-desktop-client
-  .home-notification-row
-  > button
-  .action-required.compact-action-required {
+.dentlink-desktop-client .home-notification-row > button .action-required.compact-action-required {
   display: inline-flex;
   align-items: center;
   justify-content: center;

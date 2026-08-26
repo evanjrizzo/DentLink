@@ -118,15 +118,12 @@ export function applyLocalSyncChanges(
     if (change.type === "webhook") {
       webhooks =
         change.op === "upsert"
-          ? upsertById(
-              webhooks,
-              {
-                ...change.webhook,
-                ingestUrl:
-                  webhooks.find((item) => item.id === change.webhook.id)?.ingestUrl ??
-                  `${globalThis.location?.origin ?? ""}/v1/ingest/webhooks/${change.webhook.slug}`
-              }
-            )
+          ? upsertById(webhooks, {
+              ...change.webhook,
+              ingestUrl:
+                webhooks.find((item) => item.id === change.webhook.id)?.ingestUrl ??
+                `${globalThis.location?.origin ?? ""}/v1/ingest/webhooks/${change.webhook.slug}`
+            })
           : webhooks.filter((item) => item.id !== change.id);
       continue;
     }
@@ -154,9 +151,7 @@ export function applyLocalSyncChanges(
   };
 }
 
-export async function loadLocalSyncCache(
-  userId: EntityId
-): Promise<LocalSyncCacheSnapshot | null> {
+export async function loadLocalSyncCache(userId: EntityId): Promise<LocalSyncCacheSnapshot | null> {
   if (!localSyncCacheSupported()) return null;
   const db = await openCacheDb();
   return requestToPromise<LocalSyncCacheSnapshot | undefined>(
@@ -184,7 +179,11 @@ function upsertById<T extends { id: EntityId; version?: number }>(items: T[], it
   const index = items.findIndex((candidate) => candidate.id === item.id);
   if (index === -1) return [...items, item];
   const existing = items[index];
-  if (existing?.version !== undefined && item.version !== undefined && existing.version > item.version) {
+  if (
+    existing?.version !== undefined &&
+    item.version !== undefined &&
+    existing.version > item.version
+  ) {
     return items;
   }
   const next = [...items];

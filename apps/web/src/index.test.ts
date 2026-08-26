@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { Note, Notification } from "@dentlink/item-model";
 import {
   automaticSyncMessage,
   connectorFreshnessForTest,
@@ -83,7 +84,7 @@ describe("@dentlink/web", () => {
   });
 
   it("applies local sync deltas without replacing the whole notification cache", () => {
-    const baseNotification = {
+    const baseNotification: Notification = {
       id: "notification_old",
       userId: "user_1",
       title: "Old",
@@ -101,32 +102,41 @@ describe("@dentlink/web", () => {
       updatedAt: "2026-08-06T19:00:00.000Z",
       completedAt: null,
       dismissedAt: null,
+      email: null,
+      rule: null,
+      ai: {
+        status: "disabled",
+        model: null,
+        promptVersion: null,
+        processedAt: null,
+        inputChars: null,
+        outputTokens: null,
+        contentHash: null,
+        summary: null,
+        category: null,
+        importance: null,
+        requiresAction: null,
+        suggestedAction: null,
+        deadline: null,
+        reason: null,
+        errorCode: null,
+        errorMessage: null
+      },
       version: 1
-    } as any;
+    };
     const snapshot = {
       ...emptyLocalSyncCacheSnapshot("user_1", "10", "2026-08-06T20:00:00.000Z"),
       notifications: [
         baseNotification,
         {
+          ...baseNotification,
           id: "notification_delete",
-          userId: "user_1",
           title: "Delete",
           summary: "Remove this",
-          body: "",
-          source: "manual",
-          sourceLabel: "Manual",
-          sourceUrl: null,
-          severity: "info",
-          status: "active",
-          pinned: false,
           rank: 1,
           globalOrder: 2000,
-          createdAt: "2026-08-06T19:00:00.000Z",
-          updatedAt: "2026-08-06T19:00:00.000Z",
-          completedAt: null,
-          dismissedAt: null,
           version: 1
-        } as never
+        }
       ]
     };
     const next = applyLocalSyncChanges(
@@ -161,7 +171,7 @@ describe("@dentlink/web", () => {
   });
 
   it("keeps all synced notes while deriving filtered note views locally", () => {
-    const notes = [
+    const notes: Note[] = [
       {
         id: "note_watch",
         userId: "user_1",
@@ -200,7 +210,7 @@ describe("@dentlink/web", () => {
         updatedAt: "2026-08-07T04:00:00.000Z",
         completedAt: null
       }
-    ] as any[];
+    ];
 
     expect(filterVisibleNotesForTest(notes, "", null, [])).toHaveLength(2);
     expect(filterVisibleNotesForTest(notes, "", null, ["tag_1"]).map((note) => note.id)).toEqual([

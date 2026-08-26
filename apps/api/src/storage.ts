@@ -958,8 +958,9 @@ export class MemoryDentLinkStore implements DentLinkStore {
     const records = [...this.connectorSourceRecords.values()]
       .filter((record) => record.userId === userId && record.accountId === accountId)
       .sort((left, right) => left.receivedAt.localeCompare(right.receivedAt));
-    return (boundedLimit === undefined ? records : records.slice(-boundedLimit))
-      .map(copyConnectorSourceRecord);
+    return (boundedLimit === undefined ? records : records.slice(-boundedLimit)).map(
+      copyConnectorSourceRecord
+    );
   }
 
   async createConnectorSyncAttempt(
@@ -1408,12 +1409,10 @@ export class MemoryDentLinkStore implements DentLinkStore {
   ): Promise<{ notifications: Notification[]; limit: number | null; totalReturned: number }> {
     const limit = normalizeListLimit(options.limit);
     const notifications = [...this.notifications.values()]
-        .filter(
-          (notification) => notification.userId === userId && notification.status !== "deleted"
-        )
-        .sort(compareNotifications)
-        .slice(0, limit ?? undefined)
-        .map((notification) => ({ ...notification }))
+      .filter((notification) => notification.userId === userId && notification.status !== "deleted")
+      .sort(compareNotifications)
+      .slice(0, limit ?? undefined)
+      .map((notification) => ({ ...notification }));
     return { notifications, limit, totalReturned: notifications.length };
   }
 

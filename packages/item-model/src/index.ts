@@ -956,13 +956,7 @@ export type ClientFreshnessInput = {
 };
 
 export type ConnectorFreshnessStatus =
-  | "fresh"
-  | "syncing"
-  | "queued"
-  | "stale"
-  | "failed"
-  | "reconnect_required"
-  | "unknown";
+  "fresh" | "syncing" | "queued" | "stale" | "failed" | "reconnect_required" | "unknown";
 
 export type ConnectorFreshness = {
   accountId: EntityId;

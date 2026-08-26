@@ -700,7 +700,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     const password = await hashPassword("correct horse");
     const user = await store.createUser({ email: "renew@example.com", password });
     const token = "session_renew";
-    const initialExpiry = "2026-07-30T00:00:00.000Z";
+    const initialExpiry = new Date(Date.now() + 60 * 60 * 1000).toISOString();
     await store.createSession(
       user.id,
       await hashSessionToken(token),
@@ -2148,7 +2148,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
   it("applies per-account AI overrides, suppresses below-threshold notifications, and reprocesses same-day stored data idempotently", async () => {
     const { store } = createStore();
     const owner = await register(store, "gmail-ai-reprocess@example.com");
-    const now = "2026-07-29T16:00:00.000Z";
+    const now = new Date().toISOString();
     const account = await store.createConnectorAccount(
       owner.user.id,
       {
@@ -2396,8 +2396,8 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       {
         title: "Implant consult",
         description: "Review chart",
-        startAt: "2026-07-30T15:00:00.000Z",
-        endAt: "2026-07-30T15:30:00.000Z",
+        startAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        endAt: new Date(Date.now() + 24 * 60 * 60 * 1000 + 30 * 60 * 1000).toISOString(),
         timezone: "America/New_York",
         location: "Operatory 2"
       },
@@ -2705,8 +2705,8 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       owner.user.id,
       {
         title: "Later event",
-        startAt: "2026-07-31T15:00:00.000Z",
-        endAt: "2026-07-31T15:30:00.000Z",
+        startAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),
+        endAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000 + 30 * 60 * 1000).toISOString(),
         timezone: "America/New_York"
       },
       "2026-07-29T12:00:00.000Z"
@@ -2715,8 +2715,8 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
       owner.user.id,
       {
         title: "Earlier event",
-        startAt: "2026-07-30T15:00:00.000Z",
-        endAt: "2026-07-30T15:30:00.000Z",
+        startAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        endAt: new Date(Date.now() + 24 * 60 * 60 * 1000 + 30 * 60 * 1000).toISOString(),
         timezone: "America/New_York"
       },
       "2026-07-29T12:00:00.000Z"
@@ -4626,7 +4626,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     const agenda = await requestJson<{ events: CalendarEvent[] }>(
       store,
       "GET",
-      "/v1/calendar/events",
+      "/v1/calendar/events?timeMin=2026-07-01T00%3A00%3A00.000Z&timeMax=2026-08-01T00%3A00%3A00.000Z",
       undefined,
       owner.session.token
     );
@@ -4671,7 +4671,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     const repeatedAgenda = await requestJson<{ events: CalendarEvent[] }>(
       store,
       "GET",
-      "/v1/calendar/events",
+      "/v1/calendar/events?timeMin=2026-07-01T00%3A00%3A00.000Z&timeMax=2026-08-01T00%3A00%3A00.000Z",
       undefined,
       owner.session.token
     );
@@ -4704,7 +4704,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     const afterDismiss = await requestJson<{ events: CalendarEvent[] }>(
       store,
       "GET",
-      "/v1/calendar/events",
+      "/v1/calendar/events?timeMin=2026-07-01T00%3A00%3A00.000Z&timeMax=2026-08-01T00%3A00%3A00.000Z",
       undefined,
       owner.session.token
     );
@@ -4724,7 +4724,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     const otherAgenda = await requestJson<{ events: CalendarEvent[] }>(
       store,
       "GET",
-      "/v1/calendar/events",
+      "/v1/calendar/events?timeMin=2026-07-01T00%3A00%3A00.000Z&timeMax=2026-08-01T00%3A00%3A00.000Z",
       undefined,
       other.session.token
     );
@@ -4814,7 +4814,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     const agenda = await requestJson<{ events: CalendarEvent[] }>(
       store,
       "GET",
-      "/v1/calendar/events",
+      "/v1/calendar/events?timeMin=2026-07-01T00%3A00%3A00.000Z&timeMax=2026-08-01T00%3A00%3A00.000Z",
       undefined,
       owner.session.token
     );
@@ -4846,7 +4846,7 @@ describe.each(fixtures)("@dentlink/api milestone 1 storage contract ($name)", ({
     const afterRepeatAgenda = await requestJson<{ events: CalendarEvent[] }>(
       store,
       "GET",
-      "/v1/calendar/events",
+      "/v1/calendar/events?timeMin=2026-07-01T00%3A00%3A00.000Z&timeMax=2026-08-01T00%3A00%3A00.000Z",
       undefined,
       owner.session.token
     );
